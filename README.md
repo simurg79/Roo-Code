@@ -13,6 +13,10 @@
 
 > Your AI-Powered Dev Team, Right in Your Editor
 
+> **Fork notice:** This is a personal fork of [RooCodeInc/Roo-Code](https://github.com/RooCodeInc/Roo-Code)
+> maintained at [simurg79/Roo-Code](https://github.com/simurg79/Roo-Code). It tracks upstream and may
+> include experimental branches (e.g. `feature/per-mode-allowed-tools-mcp`) that are not yet upstreamed.
+
 ## What's New in v3.53.0
 
 > ### The Roo Code plugin is not going away.
