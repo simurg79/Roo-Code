@@ -55,6 +55,8 @@ qdrant_storage/
 plans/
 
 roo-cli-*.tar.gz*
-.roo
+.roo*
 .roomodes
 .clinerules
+myplans
+myscripts
