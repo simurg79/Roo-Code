@@ -1,9 +1,12 @@
 ---
 phase: all
 status: closed
-owner: architect-phase-9
-last_updated: 2026-04-26
-sources: []
+owner: architect-phase-10
+last_updated: 2026-04-30
+sources:
+    - docs/investigation/roo-to-copilot/35-paw-inventory.md
+    - docs/investigation/roo-to-copilot/60-gap-analysis.md
+    - docs/investigation/roo-to-copilot/70-migration-paths.md
 ---
 
 # Decision Log (append-only)
@@ -11,6 +14,7 @@ sources: []
 > Parent plan: [`00-plan.md`](00-plan.md) · Index: [`README.md`](README.md)
 
 **Rules:**
+
 - Append-only. Never edit or delete prior entries; supersede with a new dated entry that links back.
 - One decision per entry.
 - Use the heading format `## YYYY-MM-DD HH:MM — <decision title>` (UTC or local with offset noted).
@@ -155,7 +159,7 @@ Cite the canonical VS Code docs ([`prompt-files`](https://code.visualstudio.com/
 **Consequences**
 
 - **Headline finding (prompt files):** prompt files (`*.prompt.md`) are workspace-scoped at `.github/prompts/` and user-scoped at `%APPDATA%\Code\User\prompts\` on Windows (same folder as `.instructions.md`, user-scope `.agent.md`, and `*.toolsets.jsonc`). Frontmatter has `agent` (not `mode`) — used to bind the prompt to a built-in or custom `.agent.md`; when both prompt and agent declare `tools`, **prompt-file `tools` win** (widening, not narrowing, the agent's allowlist). Parameterization is **free-text-after-slash only** (`/promptname formName=Foo`); no documented `${input:name}` substitution; sub-prompt composition is via Markdown links to other prompt files. Prompt files are still in **public preview** and **not** picked up by Copilot CLI.
-- **Headline finding (tool sets):** `*.toolsets.jsonc` files are **user-scope only** today (`%APPDATA%\Code\User\prompts\` on Windows; workspace storage tracked in [`microsoft/vscode#251515`](https://github.com/microsoft/vscode/issues/251515) but **not yet shipped**). Schema is `{ "<setname>": { tools, description, icon } }`. Sets are referenced from `.agent.md` / `.prompt.md` `tools:` arrays as bare names alongside built-in tools and `mcpserver/*` wildcards. **Tool sets + agent `tools:` array fully replicate Roo's `groups` + `allowedMcpServers`** *except* for (a) `fileRegex` per-tool-group restrictions (still no equivalent — restated from 4a) and (b) workspace-scoped reusable tool-set **files** (workaround: inline tool lists in `.github/agents/*.agent.md`). The 128-tool-per-request hard cap is still enforced ([`vscode-copilot-release#13065`](https://github.com/microsoft/vscode-copilot-release/issues/13065)) and applies to the flattened total, not the number of tool-set references.
+- **Headline finding (tool sets):** `*.toolsets.jsonc` files are **user-scope only** today (`%APPDATA%\Code\User\prompts\` on Windows; workspace storage tracked in [`microsoft/vscode#251515`](https://github.com/microsoft/vscode/issues/251515) but **not yet shipped**). Schema is `{ "<setname>": { tools, description, icon } }`. Sets are referenced from `.agent.md` / `.prompt.md` `tools:` arrays as bare names alongside built-in tools and `mcpserver/*` wildcards. **Tool sets + agent `tools:` array fully replicate Roo's `groups` + `allowedMcpServers`** _except_ for (a) `fileRegex` per-tool-group restrictions (still no equivalent — restated from 4a) and (b) workspace-scoped reusable tool-set **files** (workaround: inline tool lists in `.github/agents/*.agent.md`). The 128-tool-per-request hard cap is still enforced ([`vscode-copilot-release#13065`](https://github.com/microsoft/vscode-copilot-release/issues/13065)) and applies to the flattened total, not the number of tool-set references.
 - New questions Q-019 (prompt-file keybinding args), Q-020 (variable substitution), Q-021 (workspace-scoped toolsets), Q-022 (wildcard-in-toolset), Q-023 (toolset nesting), Q-024 (toolsets in Settings Sync) opened in [`99-open-questions.md`](99-open-questions.md). Q-002 and Q-005 were already partially or fully resolved in 4a; this section adds further confirmation but does not change their status.
 - Phase 4 status badge in [`README.md`](README.md) advanced from `in-progress (4a done)` to `in-progress (4a + 4b done)`.
 
@@ -183,16 +187,16 @@ Cite the canonical VS Code docs ([`docs/copilot/customization/mcp-servers`](http
 **Consequences**
 
 - **Headline finding (`.vscode/mcp.json`):** schema is `{ servers: { … }, inputs: [ … ] }`. Per-server fields differ by transport — stdio (`type`/`command`/`args`/`env`/`envFile`/`sandboxEnabled`/`sandbox`) and HTTP/SSE (`type`/`url`/`headers`). Sandboxing is **macOS/Linux only** (silently ignored on Windows). Three transports: `stdio`, `http` (Streamable HTTP), `sse` (legacy). VS Code falls back from `http` to `sse`. There is **no top-level `gallery` or `dev` key** — the gallery is a UX surface; `dev` is per-server.
-- **Headline finding (secret pattern):** the `${input:id}` placeholder + `inputs: [{ type: "promptString", id, description, password }]` array is the **commit-safe** pattern. VS Code prompts at first-run, stores the value in Windows Credential Manager, and re-uses it silently. **`.vscode/mcp.json` should be committed** (with placeholders), per explicit doc guidance: *"Avoid hardcoding sensitive information like API keys. Use input variables or environment files instead."* This collapses Roo's two-file split (gitignored `mcp_settings.json` + committed `.roo/mcp.json`) into one.
+- **Headline finding (secret pattern):** the `${input:id}` placeholder + `inputs: [{ type: "promptString", id, description, password }]` array is the **commit-safe** pattern. VS Code prompts at first-run, stores the value in Windows Credential Manager, and re-uses it silently. **`.vscode/mcp.json` should be committed** (with placeholders), per explicit doc guidance: _"Avoid hardcoding sensitive information like API keys. Use input variables or environment files instead."_ This collapses Roo's two-file split (gitignored `mcp_settings.json` + committed `.roo/mcp.json`) into one.
 - **Headline finding (per-agent filtering):** **There is no separate `allowedMcpServers` setting** — restriction is performed entirely via `.agent.md` `tools: ["server/*"]` (Phase 4a) and `*.toolsets.jsonc` `tools: [...]` (Phase 4b). Roo's `allowedMcpServers: ["github"]` ↔ Copilot's `tools: ["github/*"]` is a direct 1:1.
 - **Headline finding (auto-import):** `chat.mcp.discovery.enabled` (off by default) imports MCP server configs from other clients — Claude Desktop confirmed; Cursor/Continue/Windsurf inferred from community reports (filed as Q-025). Useful for migration **from** other AI clients but not strictly needed for the Roo→Copilot path.
 - **Headline finding (storage):** consolidated Windows path table now lives in [`40-copilot-chat-research.md` § Storage Locations (Windows)](40-copilot-chat-research.md#storage-locations-windows). Key insight: **`mcp.json` and `settings.json` are profile-scoped** (`%APPDATA%\Code\User\profiles\<profile-id>\…`); the **`prompts/` folder** (covering agents, prompts, instructions, tool sets) is **global** (`%APPDATA%\Code\User\prompts\`). The vault symlink scheme works as-is for the global folder; per-profile `mcp.json` requires a small Phase-8 PowerShell helper (filed as Q-026).
 - **Headline finding (Windows quirks):** `npx`-based stdio servers can fail when launched from VS Code if `nvm-windows` hides `npx.cmd` from the launched-from-shortcut env; workaround is absolute path or `cmd /c`. `mcp.json` does **not** expand literal `%APPDATA%`; use `${env:APPDATA}` or `${userHome}`. Docker stdio servers must not use `-d` (detach).
 - **Roo→Copilot MCP migration sketch (4 steps):**
-  1. Move `~/AppData/Roaming/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json` → `%APPDATA%\Code\User\mcp.json` (rename `mcpServers` → `servers`).
-  2. Move project `.roo/mcp.json` → `.vscode/mcp.json` (same rename).
-  3. Replace inline tokens with `${input:…}` placeholders; declare each placeholder in the top-level `inputs` array with `password: true`.
-  4. Restrict per-agent access via `.github/agents/<mode>.agent.md` `tools: ["servername/*"]` instead of `.roomodes` `allowedMcpServers`.
+    1. Move `~/AppData/Roaming/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json` → `%APPDATA%\Code\User\mcp.json` (rename `mcpServers` → `servers`).
+    2. Move project `.roo/mcp.json` → `.vscode/mcp.json` (same rename).
+    3. Replace inline tokens with `${input:…}` placeholders; declare each placeholder in the top-level `inputs` array with `password: true`.
+    4. Restrict per-agent access via `.github/agents/<mode>.agent.md` `tools: ["servername/*"]` instead of `.roomodes` `allowedMcpServers`.
 - Open questions resolved: **Q-009** (empty `allowedMcpServers` array means "no MCP"), **Q-015** (partial — `mcp.json` profile-scoped, `prompts/` global), **Q-008** (partial — symlink portability confirmed for Copilot Chat). New questions opened: **Q-025** (residual MCP unknowns), **Q-026** (multi-profile vault symlink automation).
 - Phase 4 status badge in [`README.md`](README.md) advanced from `in-progress (4a + 4b done)` to `in-progress (4a + 4b + 4c done — agents/instructions, prompt files, tool sets, MCP, Windows storage paths)`.
 
@@ -220,7 +224,7 @@ Populate [`30-squad-inventory.md`](30-squad-inventory.md) with: Squad's identity
 **Consequences**
 
 - **Headline finding:** Squad is a **parallel-by-default** Copilot CLI orchestrator with persistent named agents and committed markdown state. Roo is **sequential-by-design** with isolated `new_task` boomerangs. They occupy adjacent but distinct niches: Squad supplies parallel fan-out + Copilot integration that Roo lacks, but offers no Roo-style per-mode tool/file-regex/MCP restrictions, no webview UI, and no layered rules system. Squad is alpha (v0.9.1) — production migration risk is non-trivial.
-- Phase 7 (migration paths) must consider Squad as a *supplement* to Copilot Chat/CLI rather than a peer alternative.
+- Phase 7 (migration paths) must consider Squad as a _supplement_ to Copilot Chat/CLI rather than a peer alternative.
 
 **Status**
 
@@ -338,7 +342,7 @@ Set the file's marker comment to `<!-- 5a + 5b-i complete 2026-04-26; 5b-ii pend
 
 **Consequences — Headline findings**
 
-- **Headline finding (verdict — `preToolUse` vs `fileRegex`):** **Yes-with-caveats.** The CLI's `preToolUse` hook **does** mechanically substitute for Roo's per-mode `fileRegex` for the **main agent on serial tool calls** — `toolName`, `toolArgs.path` (after JSON parse), and the `{permissionDecision:"deny",permissionDecisionReason}` output contract are all there, and a working Windows PowerShell reference is in [§ 10.4](50-copilot-cli-research.md#104-pretooluse-deep-dive--the-fileregex-substitute). **It does not** close the gap for `task`-dispatched sub-agents ([`#2392`](https://github.com/github/copilot-cli/issues/2392)), parallel tool calls ([`#2893`](https://github.com/github/copilot-cli/issues/2893)), plugin-shipped policies ([`#2540`](https://github.com/github/copilot-cli/issues/2540)), or write-path mutation ([`#2013`](https://github.com/github/copilot-cli/issues/2013)). **Net for the unified Gap Matrix:** G-1 stays 🔴 *blocker* on the Chat path (no hook surface) but downgrades to **🟠 *major*** on the CLI path. This is a meaningful Path-B advantage but **not a clean parity win** — the vault must accept the sub-agent caveat or restructure orchestrator flows to use `--agent` boot mode rather than `task` dispatch.
+- **Headline finding (verdict — `preToolUse` vs `fileRegex`):** **Yes-with-caveats.** The CLI's `preToolUse` hook **does** mechanically substitute for Roo's per-mode `fileRegex` for the **main agent on serial tool calls** — `toolName`, `toolArgs.path` (after JSON parse), and the `{permissionDecision:"deny",permissionDecisionReason}` output contract are all there, and a working Windows PowerShell reference is in [§ 10.4](50-copilot-cli-research.md#104-pretooluse-deep-dive--the-fileregex-substitute). **It does not** close the gap for `task`-dispatched sub-agents ([`#2392`](https://github.com/github/copilot-cli/issues/2392)), parallel tool calls ([`#2893`](https://github.com/github/copilot-cli/issues/2893)), plugin-shipped policies ([`#2540`](https://github.com/github/copilot-cli/issues/2540)), or write-path mutation ([`#2013`](https://github.com/github/copilot-cli/issues/2013)). **Net for the unified Gap Matrix:** G-1 stays 🔴 _blocker_ on the Chat path (no hook surface) but downgrades to **🟠 _major_** on the CLI path. This is a meaningful Path-B advantage but **not a clean parity win** — the vault must accept the sub-agent caveat or restructure orchestrator flows to use `--agent` boot mode rather than `task` dispatch.
 - **Headline finding (CLI MCP — schema fork):** CLI `mcp-config.json` uses **`mcpServers`** at top level; Chat `.vscode/mcp.json` uses **`servers`** + a top-level **`inputs`** array. Migration is a one-liner (`jq '{mcpServers: .servers}'`) but **secrets do not migrate** — see next finding.
 - **Headline finding (CLI MCP — secrets model on Windows, resolves Q-033):** CLI uses **process-env substitution only** (`$VAR` / `${VAR}` / `${VAR:-default}`); there is **no** `${input:…}` Credential-Manager prompt as on the Chat side, and the OS keychain is reserved for the GitHub auth token. Vault recommendation: persist secrets via `[Environment]::SetEnvironmentVariable("KEY","val","User")` and let the same `${KEY}` resolve in both layers (Chat side via env-fallback, CLI side natively). **No shared secret-handling story exists between Chat and CLI** — same logical secret needs two configs.
 - **Headline finding (CLI MCP — slash commands):** Full set documented: `/mcp [show|add|edit|delete|disable|enable|auth|reload] [SERVER-NAME]`, plus the non-interactive `copilot mcp [list|get|add|remove]` for shell automation. Hot-reload is supported (no session restart on add/edit).
@@ -376,11 +380,11 @@ Set the file's marker comment to `<!-- 5a + 5b-i + 5b-ii-A complete 2026-04-26; 
 
 **Rationale**
 
-Phase 5b-ii-A's narrow scope was deliberate: Skills and Scripting/automation are the two surfaces that determine whether the CLI path can carry the vault's *automation* workload — not just interactive coding. Resolving them together let the same primary-doc surface (the [add-skills](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-skills) and [programmatic reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference) docs) be cited cleanly, and produced the **single most consequential correction** in the investigation so far: the structured-event-stream gap (G-6) that the Phase-5a stub had hidden.
+Phase 5b-ii-A's narrow scope was deliberate: Skills and Scripting/automation are the two surfaces that determine whether the CLI path can carry the vault's _automation_ workload — not just interactive coding. Resolving them together let the same primary-doc surface (the [add-skills](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-skills) and [programmatic reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference) docs) be cited cleanly, and produced the **single most consequential correction** in the investigation so far: the structured-event-stream gap (G-6) that the Phase-5a stub had hidden.
 
 **Consequences — Headline findings**
 
-- **Headline finding (Skills — what they are):** A skill is a *directory* (not a file) with `SKILL.md` + arbitrary sibling resources (scripts, samples). The whole directory is loaded into the agent's context when the skill activates. Skills implement the open [Agent Skills standard](https://agentskills.io/) so a Copilot-flavoured `SKILL.md` is also discoverable by Claude Code, Cursor, Gemini CLI, Codex CLI — a rare cross-tool surface for this investigation.
+- **Headline finding (Skills — what they are):** A skill is a _directory_ (not a file) with `SKILL.md` + arbitrary sibling resources (scripts, samples). The whole directory is loaded into the agent's context when the skill activates. Skills implement the open [Agent Skills standard](https://agentskills.io/) so a Copilot-flavoured `SKILL.md` is also discoverable by Claude Code, Cursor, Gemini CLI, Codex CLI — a rare cross-tool surface for this investigation.
 - **Headline finding (Skills — frontmatter):** Required `name` (slash-command name) + `description` (autonomous-trigger string — must be specific or skills silently fail to fire per [`copilot-cli#978`](https://github.com/github/copilot-cli/issues/978)). Optional `license` + `allowed-tools`. **`user-invocable` and `disable-model-invocation` are NOT documented for the Copilot CLI** even though the cross-tool standard defines them — silently ignored (filed as Q-041).
 - **Headline finding (Skills — storage):** Scope tiers `~/.copilot/skills/`, `~/.claude/skills/`, `~/.agents/skills/` (user) and `.github/skills/`, `.claude/skills/`, `.agents/skills/` (project). Project beats user; plugins lowest. Squad's `.copilot/skills/` (23 files at investigation time) is **non-canonical** and works only via launcher-set `COPILOT_HOME` — same Q-031 pattern as MCP.
 - **Headline finding (Skills — invocation):** Three modes: autonomous (description-driven), explicit `/<name>` slash in prompt, REPL `/skills [list|info|reload|add|remove]`. Autonomous mode is unreliable in practice ([`#978`](https://github.com/github/copilot-cli/issues/978)) — the explicit slash is the production-reliable path.
@@ -414,10 +418,10 @@ Record the **Path-D embeddability verdict** as **🟡 embeddable with shim** and
 
 - **Headline (identity):** `@github/copilot-sdk` is **MIT, public preview (0.x)**, v0.3.0 at access, 54 versions in ~5 months, 134 dependents, runtime deps = 3 (lean), Node 20+. The SDK is a **transport wrapper** over the CLI binary (JSON-RPC via `vscode-jsonrpc`); **it contains no model client of its own**. This anchors all downstream architecture decisions.
 - **Headline (top exports):** `CopilotClient` (lifecycle + session admin + `listModels`/`ping`/`getStatus`/`getAuthStatus`), `CopilotSession` (`send`/`sendAndWait`/`abort`/`getMessages`/typed `on`/`disconnect`), `defineTool` (Zod-typed custom tools), `approveAll` (test helper), in-process `SessionHooks` (`onPreToolUse`/`onPostToolUse`/`onUserPromptSubmitted`/`onSessionStart`/`onSessionEnd`/`onErrorOccurred`), `ProviderConfig` (BYOK: openai/azure/anthropic + env-var fallback), elicitation/user-input/permission handlers. Event types are dotted (`assistant.message_delta`, `tool.execution_start`, `session.shutdown`).
-- **Headline (Squad's actual usage corrects 5a stub):** Squad has **exactly one** value-level SDK import — `CopilotClient` in `adapter/client.ts:10`. Squad's `defineTool` at `tools/index.ts:116` is a **re-implementation, not a re-export**; the stub claim that Squad uses `defineTool` from the SDK was wrong. Squad insulates the rest of its codebase via `Squad*` mirror types in `adapter/types.ts` (explicit comment: *"All Squad code should import types from this adapter layer, never directly from the Copilot SDK."*). Squad pin is `^0.1.32` — three minor versions behind current `0.3.0`; drift absorbed by `as Parameters<typeof …>[N]` casts.
+- **Headline (Squad's actual usage corrects 5a stub):** Squad has **exactly one** value-level SDK import — `CopilotClient` in `adapter/client.ts:10`. Squad's `defineTool` at `tools/index.ts:116` is a **re-implementation, not a re-export**; the stub claim that Squad uses `defineTool` from the SDK was wrong. Squad insulates the rest of its codebase via `Squad*` mirror types in `adapter/types.ts` (explicit comment: _"All Squad code should import types from this adapter layer, never directly from the Copilot SDK."_). Squad pin is `^0.1.32` — three minor versions behind current `0.3.0`; drift absorbed by `as Parameters<typeof …>[N]` casts.
 - **Headline (Squad as cautionary tale for SDK consumers):** Squad ships a runtime ESM patcher ([`squad-cli/src/cli-entry.ts:25`](../squad/packages/squad-cli/src/cli-entry.ts:25)) for `@github/copilot-sdk@0.1.32`'s broken `vscode-jsonrpc/node` import, plus a `doctor` command that re-validates the patch. This is the cost of consuming a 0.x SDK with monthly minor bumps. Vault automation must budget for similar maintenance.
 - **Headline (BYOK reaffirmed):** SDK supports the same `provider: { type: "openai"|"azure"|"anthropic", baseUrl, apiKey }` configuration as the CLI's env vars; Ollama-via-OpenAI-compat works. Resolves the SDK side of Q-030 in addition to the CLI side already resolved in 5a § 7.
-- **Headline (Path-D verdict — 🟡 embeddable with shim):** SDK can run in the **VS Code extension host** (full Node, supports `child_process` and `vscode-jsonrpc`). It **cannot** run in webviews (sandboxed, no `child_process`). A Path-D VSIX therefore must (a) require user-installed `@github/copilot` CLI on `PATH` or bundle the CLI in the VSIX (size + signing concerns), (b) keep all SDK calls in the extension-host process, (c) accept process-spawn cost per session, (d) re-architect Roo's webview-driven UX as either a chat-participant UI or an extension-host ↔ webview `postMessage` bridge. **This nullifies the "trivially embed Squad" hope from Q-010** — both Squad and the SDK are structurally CLI-driver libraries, not embeddable model clients. Path D remains feasible but is *not* a free win; cost is ~1 engineer-month of extension-host harness work plus ongoing 0.x SDK maintenance.
+- **Headline (Path-D verdict — 🟡 embeddable with shim):** SDK can run in the **VS Code extension host** (full Node, supports `child_process` and `vscode-jsonrpc`). It **cannot** run in webviews (sandboxed, no `child_process`). A Path-D VSIX therefore must (a) require user-installed `@github/copilot` CLI on `PATH` or bundle the CLI in the VSIX (size + signing concerns), (b) keep all SDK calls in the extension-host process, (c) accept process-spawn cost per session, (d) re-architect Roo's webview-driven UX as either a chat-participant UI or an extension-host ↔ webview `postMessage` bridge. **This nullifies the "trivially embed Squad" hope from Q-010** — both Squad and the SDK are structurally CLI-driver libraries, not embeddable model clients. Path D remains feasible but is _not_ a free win; cost is ~1 engineer-month of extension-host harness work plus ongoing 0.x SDK maintenance.
 - **Headline (license/versioning risk):** MIT ✅; preview 0.x carries breaking-change risk per minor (e.g., `autoRestart` removal already happened). Mitigation patterns observable in Squad: adapter-mirror types, `as Parameters<typeof …>[N]` casts, runtime patcher, doctor command. Vault should adopt the same pattern if it depends on the SDK directly.
 
 **Consequences**
@@ -448,15 +452,15 @@ Flip Phase 5 to ✅ complete. Proceed to Phase 6 next.
 **Rationale — CG-/CW- tally summary**
 
 - **Inherited Chat gaps under CLI severities (Part A, 14 IDs):**
-  - 🟠 major (4): G-1 (demoted from 🔴), G-2, G-5 (worse on CLI), G-9 (better-but-still-major elsewhere — minor here).
-  - 🟡 minor (5): G-4, G-7, G-12, G-14, G-9 (CLI-side rating).
-  - ✅ closed-on-CLI (4): G-3 (N/A), G-8, G-11, G-13.
-  - ✅ better (2): G-6, G-10.
+    - 🟠 major (4): G-1 (demoted from 🔴), G-2, G-5 (worse on CLI), G-9 (better-but-still-major elsewhere — minor here).
+    - 🟡 minor (5): G-4, G-7, G-12, G-14, G-9 (CLI-side rating).
+    - ✅ closed-on-CLI (4): G-3 (N/A), G-8, G-11, G-13.
+    - ✅ better (2): G-6, G-10.
 - **CLI-specific gaps (Part B, CG-1…CG-15, 15 IDs):**
-  - 🟠 major (5): CG-1 (webview-UI loss), CG-4 (repo-allowlist scope), CG-7 (no structured output), CG-8 (SDK churn), CG-11 (sub-agent hook bypass).
-  - 🟠 (Path-C-only): CG-12 (Squad alpha).
-  - 🟡 minor (9): CG-2, CG-3, CG-5, CG-6, CG-9, CG-10, CG-13, CG-14, CG-15.
-  - 🔴 blockers: **0** — every CLI-specific gap has a documented workaround.
+    - 🟠 major (5): CG-1 (webview-UI loss), CG-4 (repo-allowlist scope), CG-7 (no structured output), CG-8 (SDK churn), CG-11 (sub-agent hook bypass).
+    - 🟠 (Path-C-only): CG-12 (Squad alpha).
+    - 🟡 minor (9): CG-2, CG-3, CG-5, CG-6, CG-9, CG-10, CG-13, CG-14, CG-15.
+    - 🔴 blockers: **0** — every CLI-specific gap has a documented workaround.
 - **CLI-specific wins (Part C, CW-1…CW-12, 12 IDs):** all 🟢. Match Chat's W-1…W-12 count; CW-1/CW-2/CW-3/CW-6 close Chat-side gaps outright (G-1 mitigation, G-13, observability, G-11).
 
 **Net headline:** CLI carries **0 × 🔴 + 9 × 🟠 + 14 × 🟡** vs Chat's **1 × 🔴 + ~4 × 🟠 + ~6 × 🟡**. CLI eliminates Chat's lone blocker (with the CG-11 sub-agent caveat) and three of Chat's four majors, at the cost of four new CLI-only majors centred on observability, SDK churn, and the sub-agent hook bypass.
@@ -530,17 +534,17 @@ Phase 7 was the path-selection synthesis phase. It scored the four candidate pat
 
 **Rationale — score table**
 
-| Criterion | Wt | A | B | C | D | **Hybrid** |
-|---|---:|---:|---:|---:|---:|---:|
-| C1 Capability fidelity | 30% | 2 | 4 | 4 | 5 | **4** |
-| C2 Effort | 20% | 4 | 3 | 2 | 1 | **3** |
-| C3 Operational risk | 15% | 4 | 3 | 2 | 2 | **3** |
-| C4 Day-to-day UX | 10% | 5 | 2 | 2 | 5 | **4** |
-| C5 Automation / CI | 10% | 1 | 5 | 5 | 3 | **5** |
-| C6 Vault portability | 5% | 3 | 5 | 4 | 4 | **5** |
-| C7 Reversibility | 5% | 4 | 5 | 3 | 2 | **5** |
-| C8 Cost | 5% | 3 | 5 | 5 | 3 | **5** |
-| **Weighted total** | **100%** | **3.10** | **3.70** | **3.20** | **3.25** | **3.90** |
+| Criterion              |       Wt |        A |        B |        C |        D | **Hybrid** |
+| ---------------------- | -------: | -------: | -------: | -------: | -------: | ---------: |
+| C1 Capability fidelity |      30% |        2 |        4 |        4 |        5 |      **4** |
+| C2 Effort              |      20% |        4 |        3 |        2 |        1 |      **3** |
+| C3 Operational risk    |      15% |        4 |        3 |        2 |        2 |      **3** |
+| C4 Day-to-day UX       |      10% |        5 |        2 |        2 |        5 |      **4** |
+| C5 Automation / CI     |      10% |        1 |        5 |        5 |        3 |      **5** |
+| C6 Vault portability   |       5% |        3 |        5 |        4 |        4 |      **5** |
+| C7 Reversibility       |       5% |        4 |        5 |        3 |        2 |      **5** |
+| C8 Cost                |       5% |        3 |        5 |        5 |        3 |      **5** |
+| **Weighted total**     | **100%** | **3.10** | **3.70** | **3.20** | **3.25** |   **3.90** |
 
 Three-bullet justification:
 
@@ -667,7 +671,7 @@ Playbook frontmatter flipped `status: in-progress` → `status: complete`; marke
 **Rationale**
 
 - **Symlinks beat copy on every Phase-7 criterion the vault weights.** (a) Single-source-of-truth — eliminates the "did I update both?" failure mode that plagues copy-based approaches. (b) Multi-machine portability — `setup-copilot-vault.ps1` running on a second machine recreates symlinks pointing at the (presumably synced) vault, no migration. (c) Mirrors the existing `roo-vault\setup-vault.ps1` pattern the user already trusts (per [20 § Global Settings](20-roo-vault-inventory.md)). The downside (admin/Developer-Mode requirement) is a one-time cost detected by `Test-CanSymlink` rather than failing silently mid-script. The exception — per-project `.github/` assets — are copied because they're code-review artifacts that benefit from being inside the repo's diff.
-- **Table-driven validation maximises hand-off readability.** A prose runbook hides the test count and makes coverage gaps invisible; scripted assertions buy precision but lock the user into a specific test framework. A table with copy-paste `cmd` + `expected` columns lets a future operator (or LLM) execute one row at a time, cite the row ID in failure reports, and re-run subsets after focused edits. The 4-bucket organization (§ 11.4) makes the "when to run what" decision mechanical: edit a `.agent.md` → run T-CHAT-01 + T-CLI-01 only; edit `mode-policies.json` → run all T-HOOK-*.
+- **Table-driven validation maximises hand-off readability.** A prose runbook hides the test count and makes coverage gaps invisible; scripted assertions buy precision but lock the user into a specific test framework. A table with copy-paste `cmd` + `expected` columns lets a future operator (or LLM) execute one row at a time, cite the row ID in failure reports, and re-run subsets after focused edits. The 4-bucket organization (§ 11.4) makes the "when to run what" decision mechanical: edit a `.agent.md` → run T-CHAT-01 + T-CLI-01 only; edit `mode-policies.json` → run all T-HOOK-\*.
 - **Appendix B's depth is bounded by Hybrid's decisive win.** Path B scored 3.70 vs Hybrid's 3.90; the gap is small enough that Path B remains a credible fallback but large enough that re-publishing 12 sections of CLI content is wasteful. The trigger conditions (B.1) are deliberately objective — "audit chat history monthly; >2 violations over 30 days" — so the switch decision is mechanical, not subjective. The reverse migration path (B.5) is documented to keep the option open if Chat catches up upstream.
 
 **Consequences**
@@ -714,3 +718,124 @@ Phase 9 verification:
 **Status**
 
 `accepted` · investigation `closed`
+
+---
+
+## 2026-04-30 01:35 — Investigation re-opened: Phase 10a (PAW inventory) complete
+
+**Context**
+
+The user introduced a new candidate, **PAW (Phased Agent Workflow)** at `c:/git/phased-agent-workflow`, after the investigation closed at the end of Phase 9. Phase 10 was scoped as a 3-step extension (10a inventory → 10b gap-matrix folding → 10c re-score) without disturbing Phases 1–9. This entry covers Phase 10a only.
+
+**Decision**
+
+Re-open the investigation. Flip [`90-decision-log.md`](90-decision-log.md) front-matter `status: closed` → `status: re-opened`. Flip [`README.md`](README.md) front-matter `status: complete` → `status: in-progress`. Mark Path Hybrid (3.90 winner from Phase 7) as the **standing** recommendation pending Phase 10c re-score; do **not** retract the recommendation today.
+
+Phase 10a deliverable: created [`35-paw-inventory.md`](35-paw-inventory.md) modelled on the structure of [`30-squad-inventory.md`](30-squad-inventory.md). 13 sections (Identity / Architecture / Mode-Agent-Phase System / Tool Access / MCP / Rules / Orchestration / UI / Model & Provider / Setup / Maturity / Gap Catalog / Open Questions). Frontmatter `status: complete, phase: 10a, date: 2026-04-30`. Preliminary Gap Catalog landed with **0 × 🔴 + 4 × 🟠 + 12 × 🟡 = 16 entries** (P-1..P-11 plus PW-1..PW-5). Six new open questions filed as **Q-059..Q-064** in [`99-open-questions.md`](99-open-questions.md).
+
+Bookkeeping: [`README.md`](README.md) updated with (a) `35-paw-inventory.md` file-map row, (b) status-table rows for 10a ✅ / 10b ⬜ / 10c ⬜, (c) a new "Phase 10 — PAW evaluation (re-opened 2026-04-30)" section explaining the sub-phase split.
+
+**Rationale — first impressions of PAW**
+
+PAW is **structurally a third category** distinct from anything investigated in Phases 1–9. It is not an extension that owns an agent loop (like Roo), not a CLI wrapper that drives Copilot programmatically (like Squad), not a chat host (like Copilot Chat), and not a binary (like Copilot CLI). PAW is a **two-agent prompt-and-skill bundle plus distribution wrappers**: it ships two `.agent.md` orchestrators (`PAW`, `PAW-Review`), ~30 `SKILL.md` skill packages, a 1113-line normative specification, a 310-line VS Code extension that installs the agent files into `~/.copilot/agents/`, a Node ESM CLI installer (`@paw-workflow/cli`) that does the same for Copilot CLI / Claude Code, and a Copilot CLI plugin manifest (`plugin.json` v0.3.0) that publishes the same bundle as a first-class plugin. **Zero runtime dependencies** outside `vscode` — no `@github/copilot-sdk`, no `@anthropic-ai/sdk`, no `@modelcontextprotocol/sdk`. The closest analog among prior investigations is **Squad's `.copilot/skills/` + `.github/agents/squad.agent.md` pattern**, but PAW (a) has no SDK runtime layer at all (Squad has `CopilotClient` via `@github/copilot-sdk`), (b) imposes a strict phased workflow state machine (Squad is parallel-by-default, PAW is serial-by-design with explicit transition gates), and (c) targets _three_ hosts (Copilot CLI, Copilot Chat, Claude Code) via the same Markdown bundle, where Squad targets the Copilot CLI primarily.
+
+Stage maturity: components at 0.0.1 (NPM CLI) / 0.0.2-dev (extension) / 0.3.0 (Copilot CLI plugin); 1113-line normative spec; ~20 integration tests with a real LLM-as-judge harness; very active dogfooding (25+ in-flight `.paw/work/<id>/` directories). It reads as more mature than its version numbers suggest, and lower-risk to adopt than Squad-on-Copilot-SDK because there is no transitive SDK churn surface.
+
+**Consequences**
+
+- Phase 10b is unblocked and is the next subtask: fold the P-/PW- entries from § 12 of [`35-paw-inventory.md`](35-paw-inventory.md) into the unified matrix in [`60-gap-analysis.md`](60-gap-analysis.md), define Path E (Hybrid + PAW overlay), and assign per-axis severities. Q-059..Q-061 in particular need answers before Path E severities can be finalised (`allowed-tools` intent, MCP filtering plans, project-level customisation story).
+- Phase 10c is unblocked once 10b lands: re-run the weighted scoring from [`70-migration-paths.md`](70-migration-paths.md) with Path E added; if Path E ≥ Path Hybrid's 3.90 the recommendation flips and [`00-executive-summary.md`](00-executive-summary.md) needs an addendum.
+- No Phase 1–9 deliverables modified. Path Hybrid remains the standing recommendation until 10c completes.
+- The user can begin reading [`35-paw-inventory.md`](35-paw-inventory.md) immediately if they want a self-contained 13-section description of PAW; nothing in 1–9 needs to be re-read first.
+
+**Status**
+
+`accepted` · investigation `re-opened`
+
+---
+
+## 2026-04-30 02:05 — Phase 10b complete: Path E (PAW alone) = 2.60; Path Hybrid+PAW = 3.85; Hybrid 3.90 standing recommendation unchanged
+
+**Context**
+
+Phase 10b's task was to fold the preliminary PAW gap catalog (P-1..P-11 / PW-1..PW-5 from [`35-paw-inventory.md` § 12](35-paw-inventory.md#12-paw-gap-catalog-preliminary)) into the unified gap matrix at [`60-gap-analysis.md`](60-gap-analysis.md), define Path E (and the canonical composition Hybrid+PAW), and re-score with the Phase-7 rubric. Open at start of phase: standing recommendation = Path Hybrid (3.90) from Phase 7. Question: does adding PAW change that?
+
+**Decision**
+
+1. **Add a PAW column to all 12 sub-tables** in [`60-gap-analysis.md`](60-gap-analysis.md) §§ B.1–B.12 expressing PAW's per-row delta against the host (`inherits` for parity, `+ <feature>` for additive PAW wins, severity icons for PAW-specific gaps). PAW column convention documented in § A. Add new § G "PAW Surface Summary" with per-section severity tally (**0 × 🔴 · 5 × 🟠 · 6 × 🟡 · 9 × ➕ PAW-specific deltas**), three headline strengths (serial workflow state machine, artifact-based persistence at `.paw/work/`, multi-model planning + SoT review), three headline gaps PAW does _not_ fix (G-1 unchanged via P-1, G-2 _worse_ via P-9, no webview), and a composability matrix.
+2. **Define two new candidate paths** in [`70-migration-paths.md`](70-migration-paths.md):
+    - **Path E (PAW alone on top of one host).** Section § 2.F. Rubric-scored against the same 8 weighted criteria. **Score: 2.60 (worst of any path investigated).** Driven by C1=2 (17 vault modes collapse to 2 PAW agents — substantial vault rewrite), C2=2 (2–4 weeks first project + per-work-item Spec/Research/Plan overhead), C5=3 (no PAW-side headless invocation; `paw_new_session` is fire-and-forget).
+    - **Path Hybrid+PAW (Hybrid substrate + PAW layer).** Section § 2.G. Canonical composition: Hybrid as host substrate + PAW installed as both Copilot CLI plugin and VS Code extension. **Score: 3.85.** Drops 0.05 below plain Hybrid entirely on C7 (Reversibility 5 → 4) because adopting PAW creates a vault subtree (`.paw/work/`, `WorkflowContext.md`) that doesn't trivially port to Roo / Squad / vanilla Copilot. Every other criterion unchanged from plain Hybrid.
+3. **Standing recommendation unchanged: plain Hybrid (3.90).** Update §§ 4.1, 4.2, 4.5, 6 with PAW context. Add § 4.1.1 "When to layer PAW on top" listing four trigger conditions for adopting Hybrid+PAW as a Stage-3 escalation (analogous to Squad on Path C). Update side-by-side comparison table to include both new paths; ranks: 1st Hybrid (3.90), 2nd Hybrid+PAW (3.85), 3rd B (3.70), 4th D (3.25), 5th C (3.20), 6th A (3.10), 7th E (2.60).
+4. **File two new open questions** in [`99-open-questions.md`](99-open-questions.md): **Q-065** (PAW install vs vault `~/.copilot/agents/` symlink interaction — affects Hybrid+PAW first-project setup), **Q-066** (`paw-init` template-honour vs interactive-prompt — affects whether the vault can ship a default `WorkflowContext.md` preset).
+5. **Phase 10b status flipped** from ⬜ to ✅ in [`README.md`](README.md). Phase 10c remains ⬜ pending — its scope contracts to "update the executive summary with the Phase 10b finding (recommendation does **not** flip)".
+
+**Rationale — why PAW didn't move the needle on the rubric**
+
+PAW's three structural wins are real and meaningful (the strict serial workflow state machine is the only off-the-shelf G-4 closure investigated in any of Phases 1–10; `.paw/work/` artifact persistence is _strictly better_ than every other path's session model; multi-model planning + Society-of-Thought review are richer than Squad's `model-selection` skill or Roo's per-mode `apiConfigId`). But they are **not what the Phase-7 rubric measures**:
+
+- **C1 (Capability fidelity, 30%) measures Phase-6 surviving 🔴/🟠 row count after migration.** PAW closes none of those rows — P-1 leaves G-1 unchanged, P-9 makes G-2 _worse_ than Path A/B by deprecating `.paw/instructions/`, and no PAW capability restores any vault feature lost on plain Hybrid. PAW's wins land in a column the rubric doesn't have.
+- **C2 (Effort, 20%) is _worse_ under Hybrid+PAW** because the per-work-item Spec/Research/Plan/Plan-Review overhead is a recurring cost on top of Hybrid's 1–2 week setup. The rubric counts effort as bad-when-high; PAW's workflow-discipline overhead reads as effort, not as value, by the rubric's design.
+- **C7 (Reversibility, 5%) drops 1 point** because PAW-managed work items create a vault subtree that needs PAW to read meaningfully.
+
+**The honest framing** is that Phase 10b confirmed Phase 7's recommendation through the rubric _and_ surfaced that the rubric doesn't capture PAW's wins. § 6 sensitivity analysis added two new triggers: (a) hypothetical C9 criterion at 10% weight for "workflow discipline / artifact code-reviewability" would push Hybrid+PAW (3.85 → ~3.97) above plain Hybrid (3.90 → ~3.71); (b) PAW reaching 1.0 stable would close the C3 0.x-cadence gap and tie Hybrid+PAW to plain Hybrid at ~4.00. Phase 10c's executive-summary update should mention this so future readers don't mistake "rubric says Hybrid wins" for "PAW is wrong for everyone".
+
+**The recommendation framing** in § 4.1.1 is therefore: _plain Hybrid is the default_; _Hybrid+PAW is a Stage-3 escalation_ for users whose workflow is dominated by spec-driven feature PRs or who value workflow discipline highly enough to absorb the C7 lock-in cost. This mirrors how Path C (Squad) is treated — a real value prop for a narrow workload.
+
+**Consequences**
+
+- [`60-gap-analysis.md`](60-gap-analysis.md) gains a PAW column on every sub-table (~70 row-cells annotated) plus a new § G PAW Surface Summary (~5 sub-sections including composability matrix). Frontmatter `last_updated` flipped 2026-04-26 → 2026-04-30; a Phase-10b banner comment added at the top.
+- [`70-migration-paths.md`](70-migration-paths.md) gains §§ 2.F (Path E, ~10 sub-sections + score table) and 2.G (Path Hybrid+PAW, ~10 sub-sections + score table). § 3 side-by-side table extended to 7 paths; § 4.1 prefaced with "Path Hybrid (3.90) remains the primary recommendation"; new § 4.1.1 "When to layer PAW on top" with four trigger conditions; §§ 4.2 / 4.5 / 6 updated with PAW context; § 7 hand-off open-questions list updated with Q-059..Q-066.
+- [`README.md`](README.md) Phase-10b status flipped ⬜ → ✅; status table updated to enumerate the two new sections in 60/70; the Phase-10 narrative paragraph updated to record that the recommendation **did not flip** as a result of Phase 10b.
+- [`99-open-questions.md`](99-open-questions.md) gains **Q-065** and **Q-066** in a new "Added during Phase 10b" section. Q-059..Q-064 (filed in Phase 10a) are retained as still-open; their answers don't change Phase 10b's score (P-1 stays 🟠 regardless of Q-059's resolution, etc.) but they do affect Hybrid+PAW first-project setup (Q-065/Q-066 specifically).
+- **Phase 10c is unblocked and is the last remaining phase.** Its scope is now narrow: update [`00-executive-summary.md`](00-executive-summary.md) with one paragraph noting that PAW was evaluated, scored 2.60 standalone / 3.85 layered, and is documented as a Stage-3 escalation in [`70 § 4.1.1`](70-migration-paths.md#-411--when-to-layer-paw-on-top-added-phase-10b). The headline 10-step rollout plan does **not** change. The executive-summary file map should add `35-paw-inventory.md`. No re-derivation of Phases 1–9 needed.
+- The user can begin reading [`70-migration-paths.md`](70-migration-paths.md) §§ 2.F / 2.G immediately if they want a self-contained 10-section description of either Path E or Hybrid+PAW; the [`60 § G`](60-gap-analysis.md#g-paw-surface-summary-added-phase-10b--2026-04-30) summary is a 1-page distillation suitable as a stakeholder briefing.
+
+**Status**
+
+`accepted` · standing recommendation: **Path Hybrid (3.90)** unchanged · investigation `re-opened` (Phase 10c pending)
+
+---
+
+## 2026-04-30 02:30 — Investigation re-closed after Phase 10 PAW evaluation
+
+**Context**
+
+Phase 10c was the final synthesis pass after the Phase 10 PAW re-opening. Phase 10b had already produced the load-bearing finding (Path E = 2.60; Hybrid+PAW = 3.85; plain Hybrid 3.90 unchanged) and updated [`60-gap-analysis.md`](60-gap-analysis.md), [`70-migration-paths.md`](70-migration-paths.md), and [`99-open-questions.md`](99-open-questions.md). Phase 10c's narrow scope was to thread that finding into [`00-executive-summary.md`](00-executive-summary.md) and re-close the index — without disturbing the playbook ([`80-migration-playbook.md`](80-migration-playbook.md)) or any Phase 1–9 deliverables.
+
+**Decision**
+
+Re-close the investigation. Flip [`90-decision-log.md`](90-decision-log.md) front-matter `status: re-opened` → `status: closed`. Flip [`README.md`](README.md) front-matter `status: in-progress` → `status: complete`; mark Phase 10c ✅. Apply targeted edits to six sections of [`00-executive-summary.md`](00-executive-summary.md):
+
+- **§ 1 TL;DR** — appended one sentence pointing to § 7.1 for the PAW addendum.
+- **§ 6** — renamed "Five Migration Paths" → "Six Migration Paths"; added Path E (2.60) and Hybrid+PAW (3.85) rows; restated the Hybrid > Hybrid+PAW > B > D > C > A > E ranking.
+- **§ 7.1 PAW Evaluation (new sub-section)** — ~15-line addendum quoting [`35-paw-inventory.md`](35-paw-inventory.md) for the PAW one-sentence definition, explaining why Path E scored worst (vault-rewrite cost), why Hybrid+PAW scored 3.85 not higher (C7 lock-in via `.paw/work/` subtree, dual-tool overhead, 0.x dependency cadence), the four trigger conditions for Stage-3 escalation, and the honest framing that PAW's three structural wins (serial state machine, artifact persistence, multi-model SoT review) live in a column the Phase-7 rubric doesn't have — a rubric limitation, not a PAW deficiency.
+- **§ 12** — added step **10b** for conditional PAW re-evaluation as a Stage-3 escalation if any of the four [`70 § 4.1.1`](70-migration-paths.md#-411--when-to-layer-paw-on-top-added-phase-10b) trigger conditions become true (~½ day re-score effort).
+- **§ 13** — appended a 6th decision row mirroring this entry.
+- **§ 14 File Map** — added `35-paw-inventory.md` row (~640 lines); refreshed line-count estimates for the four files modified by Phase 10b (60-gap-analysis ~340; 70-migration-paths ~685; 90-decision-log ~810; 99-open-questions ~145); bumped `00-executive-summary.md` to ~400 to reflect the addendum.
+
+Frontmatter on [`00-executive-summary.md`](00-executive-summary.md): added `phase_10_addendum: complete`, bumped `last_updated` to 2026-04-30, kept `status: complete`. No new open questions surfaced — the Phase 10b deliverables and the addendum are internally consistent (Q-067+ slot remains unused).
+
+**Rationale — what the Phase 10 addendum revealed**
+
+The PAW addendum surfaced a **rubric blind spot for spec-driven workflows**. Phase 7's 8-criterion weighted rubric was designed against the vault's 17-mode pattern and measures capability fidelity (rows surviving from the unified gap matrix), effort, operational risk, day-to-day UX, automation, portability, reversibility, and cost. None of these criteria capture **workflow discipline** (serial state machine), **artifact code-reviewability** (committed Markdown specs/plans), or **multi-perspective deliberation** (Society-of-Thought review) — PAW's three structural strengths. The rubric correctly judged plain Hybrid the right default for the current vault, but the "PAW is wrong for everyone" misreading is something this entry (and § 7.1) is at pains to forestall. Future similar evaluations against spec-driven candidates should consider adding a C9 criterion for workflow discipline if that workload becomes a meaningful slice of the user's day.
+
+**Forward-looking note — when to re-open again**
+
+Re-open the investigation when **any** of the following hold:
+
+- One or more of the four [`70 § 4.1.1`](70-migration-paths.md#-411--when-to-layer-paw-on-top-added-phase-10b) trigger conditions becomes true (spec-driven PR cadence dominates daily work, cross-machine `.paw/work/` artifact persistence becomes valuable, multi-model SoT review demand emerges, or the user begins actively dogfooding PAW).
+- **PAW reaches 1.0 stable** — closes the C3 0.x-cadence operational-risk gap and would re-tilt Hybrid+PAW toward parity with plain Hybrid (~4.00 each per the [Phase 10b sensitivity analysis](90-decision-log.md#2026-04-30-0205--phase-10b-complete-path-e-paw-alone--260-path-hybridpaw--385-hybrid-390-standing-recommendation-unchanged)).
+- [`copilot-cli#2392`](https://github.com/github/copilot-cli/issues/2392) (sub-agent hook bypass) ships — closes CG-11 and pushes plain Hybrid to ~4.05, widening the gap over Hybrid+PAW.
+- A new candidate enters the field that the existing rubric doesn't measure well (the same lesson Phase 10 surfaced).
+
+**Consequences**
+
+- Investigation officially **re-closed** as of 2026-04-30 02:30. The user can begin execution against [`80-migration-playbook.md`](80-migration-playbook.md) immediately; the unchanged 10-step rollout in [`00-executive-summary.md` § 12](00-executive-summary.md#-12--recommended-next-steps) remains the canonical action list, with new conditional step 10b for the PAW re-evaluation watch.
+- No edits to Phases 1–9 deliverables beyond bookkeeping ([`README.md`](README.md), this log, [`00-executive-summary.md`](00-executive-summary.md)). [`80-migration-playbook.md`](80-migration-playbook.md) is **deliberately untouched** — Hybrid+PAW execution detail is deferred to Stage-3 escalation, not added to the current playbook.
+- README's index `status` is now `complete` again — the next reader sees green badges across all 9 phases plus 10a/10b/10c.
+- Future memory-file edits (e.g., when [`copilot-cli#2392`](https://github.com/github/copilot-cli/issues/2392) ships and CG-11 closes, or PAW reaches 1.0) should be filed as new dated entries in this log under a re-opened status, not as in-place edits — the same convention from the Phase 9 close.
+
+**Status**
+
+`accepted` · standing recommendation: **Path Hybrid (3.90)** unchanged · investigation `closed` (PAW documented as Stage-3 escalation; re-evaluate per § "Forward-looking note" above)
