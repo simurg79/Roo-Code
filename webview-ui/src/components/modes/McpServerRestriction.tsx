@@ -136,10 +136,7 @@ const McpServerRestriction: React.FC<McpServerRestrictionProps> = ({ customMode,
 
 	return (
 		<div className="mt-3 ml-1" data-testid="mcp-server-restriction">
-			<VSCodeCheckbox
-				checked={isRestricted}
-				data-testid="restrict-mcp-servers-toggle"
-				onChange={handleToggle}>
+			<VSCodeCheckbox checked={isRestricted} data-testid="restrict-mcp-servers-toggle" onChange={handleToggle}>
 				Restrict to specific MCP servers
 			</VSCodeCheckbox>
 			{isRestricted && (
@@ -155,9 +152,7 @@ const McpServerRestriction: React.FC<McpServerRestrictionProps> = ({ customMode,
 							</VSCodeCheckbox>
 						))
 					) : (
-						<div className="text-xs text-vscode-descriptionForeground">
-							No MCP servers connected
-						</div>
+						<div className="text-xs text-vscode-descriptionForeground">No MCP servers connected</div>
 					)}
 					{/* Warning for servers in cached list that aren't connected */}
 					{cachedAllowedMcpServers

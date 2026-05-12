@@ -17,7 +17,27 @@ export const VSCodeRadio = ({ children, value, ...props }: any) => (
 )
 
 export const VSCodeTextArea = ({ value, onChange, "data-testid": dataTestId, ...props }: any) => (
-	<textarea data-testid={dataTestId} value={value} onChange={onChange} {...props} />
+	<textarea
+		data-testid={dataTestId}
+		value={value ?? ""}
+		onChange={(e: any) => onChange?.(e)}
+		// Bridge: the real toolkit dispatches a CustomEvent("change") with the
+		// new value carried on `event.detail.target.value`. Existing tests rely
+		// on this. Forward such events to the React onChange handler so the
+		// component sees the synthesized detail.
+		ref={(el: HTMLTextAreaElement | null) => {
+			if (!el) return
+			if ((el as any).__vscodeChangeBridge) return
+			;(el as any).__vscodeChangeBridge = true
+			el.addEventListener("change", (e: Event) => {
+				const ce = e as CustomEvent
+				if (ce.detail && (ce.detail as any).target) {
+					onChange?.(ce as unknown as React.ChangeEvent<HTMLTextAreaElement>)
+				}
+			})
+		}}
+		{...props}
+	/>
 )
 
 export const VSCodeLink = ({ children, href, ...props }: any) => (

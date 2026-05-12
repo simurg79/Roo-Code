@@ -7,14 +7,6 @@ import McpServerRestriction from "../McpServerRestriction"
 import { ExtensionStateContext } from "@src/context/ExtensionStateContext"
 import { vscode } from "@src/utils/vscode"
 
-// Mock the VSCode webview-ui-toolkit locally for this suite to avoid dual
-// React instance issues caused by FAST Foundation web component registration.
-// Scoped here (rather than via a global vitest alias) so that other suites
-// continue to exercise the real toolkit components.
-vitest.mock("@vscode/webview-ui-toolkit/react", async () => {
-	return await import("@src/__mocks__/@vscode/webview-ui-toolkit/react")
-})
-
 // Mock vscode API
 vitest.mock("@src/utils/vscode", () => ({
 	vscode: {
@@ -228,13 +220,7 @@ describe("McpServerRestriction subcomponent — flicker regressions", () => {
 		vitest.useFakeTimers()
 		try {
 			const onCommit = vitest.fn()
-			render(
-				<McpServerRestriction
-					customMode={baseCustomMode}
-					mcpServers={mcpServers}
-					onCommit={onCommit}
-				/>,
-			)
+			render(<McpServerRestriction customMode={baseCustomMode} mcpServers={mcpServers} onCommit={onCommit} />)
 
 			const toggleLabel = screen.getByTestId("restrict-mcp-servers-toggle")
 			const checkbox = toggleLabel.querySelector("input[type='checkbox']") as HTMLInputElement
@@ -244,11 +230,9 @@ describe("McpServerRestriction subcomponent — flicker regressions", () => {
 			fireEvent.click(checkbox)
 
 			// Synchronous post-click assertions — no advanceTimers, no host echo.
-			const checkboxAfter = (
-				screen.getByTestId("restrict-mcp-servers-toggle").querySelector(
-					"input[type='checkbox']",
-				) as HTMLInputElement
-			)
+			const checkboxAfter = screen
+				.getByTestId("restrict-mcp-servers-toggle")
+				.querySelector("input[type='checkbox']") as HTMLInputElement
 			expect(checkboxAfter.checked).toBe(true)
 			expect(screen.getByTestId("mcp-server-list")).toBeInTheDocument()
 			// Debounced flush has not fired yet.
@@ -272,11 +256,7 @@ describe("McpServerRestriction subcomponent — flicker regressions", () => {
 		// Stable props across rerenders — React.memo will bail out.
 		const stableMcpServers = mcpServers
 		const { rerender } = render(
-			<McpServerRestriction
-				customMode={customMode}
-				mcpServers={stableMcpServers}
-				onCommit={onCommit}
-			/>,
+			<McpServerRestriction customMode={customMode} mcpServers={stableMcpServers} onCommit={onCommit} />,
 		)
 		const listBefore = screen.getByTestId("mcp-server-list")
 		// Tag with a sentinel symbol so we can verify DOM-node identity.
@@ -288,13 +268,7 @@ describe("McpServerRestriction subcomponent — flicker regressions", () => {
 			{ name: "server-a", tools: [], status: "connected" },
 			{ name: "server-b", tools: [], status: "connected" },
 		] as any[]
-		rerender(
-			<McpServerRestriction
-				customMode={customMode}
-				mcpServers={newHeartbeatArray}
-				onCommit={onCommit}
-			/>,
-		)
+		rerender(<McpServerRestriction customMode={customMode} mcpServers={newHeartbeatArray} onCommit={onCommit} />)
 
 		const listAfter = screen.getByTestId("mcp-server-list")
 		// Same DOM node — i.e. not unmounted/remounted.
@@ -321,33 +295,17 @@ describe("McpServerRestriction subcomponent — flicker regressions", () => {
 			const onRender = vitest.fn()
 			const customMode = { ...baseCustomMode, allowedMcpServers: [] as string[] }
 
-			// We wrap the Profiler + component in a memoized `Inner` boundary.
-			// This matters because React's <Profiler> calls onRender once for
-			// EVERY re-render of the Profiler boundary itself — even when the
-			// memoized child below it bails out. So a bare parent rerender would
-			// always register one commit regardless of the child's memoization,
-			// making a literal "0" impossible to observe. By memoizing `Inner`
-			// on the `servers` prop, an equivalent (same-reference) heartbeat
-			// bails out at the boundary and the Profiler does not re-render at
-			// all — letting us assert that no extra commit work happens.
-			const Inner = React.memo(({ servers }: { servers: any[] }) => (
+			const Tree = ({ servers }: { servers: any[] }) => (
 				<Profiler id="mcp-restriction" onRender={onRender}>
-					<McpServerRestriction
-						customMode={customMode}
-						mcpServers={servers}
-						onCommit={onCommit}
-					/>
+					<McpServerRestriction customMode={customMode} mcpServers={servers} onCommit={onCommit} />
 				</Profiler>
-			))
-			Inner.displayName = "Inner"
-			const Tree = ({ servers }: { servers: any[] }) => <Inner servers={servers} />
+			)
 
 			const { rerender } = render(<Tree servers={mcpServers} />)
 			const initialCommits = onRender.mock.calls.length
 			expect(initialCommits).toBeGreaterThan(0)
 
-			// (a) Click — exactly 1 additional commit (the optimistic local-state
-			// update inside the subcomponent).
+			// (a) Click — exactly 1 additional commit.
 			const serverCheckbox = screen
 				.getByTestId("mcp-server-checkbox-server-a")
 				.querySelector("input[type='checkbox']") as HTMLInputElement
@@ -356,10 +314,12 @@ describe("McpServerRestriction subcomponent — flicker regressions", () => {
 			expect(afterClickCommits - initialCommits).toBe(1)
 			expect(onCommit).not.toHaveBeenCalled() // debounce hasn't fired
 
-			// (b) Heartbeat — re-render the parent with the SAME `mcpServers`
-			// reference (what a properly-memoized parent would do). `Inner`'s
-			// React.memo bails out, the Profiler boundary does not re-render, and
-			// the subcomponent performs ZERO additional commits — no flicker.
+			// (b) Heartbeat — equivalent array, ZERO additional commits because
+			// React.memo bails out on identity-equal customMode/onCommit and
+			// the new mcpServers array, while a different reference, is not
+			// shallow-equal — so memo will actually re-render once. To make
+			// memo's bail-out observable we pass the SAME array reference,
+			// which is what a properly-memoized parent would do.
 			rerender(<Tree servers={mcpServers} />)
 			const afterHeartbeatCommits = onRender.mock.calls.length
 			expect(afterHeartbeatCommits - afterClickCommits).toBe(0)
