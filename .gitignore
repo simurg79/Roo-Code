@@ -60,3 +60,5 @@ roo-cli-*.tar.gz*
 .clinerules
 myplans
 myscripts
+.roo
+.rooignore

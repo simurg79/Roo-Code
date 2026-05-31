@@ -45,5 +45,8 @@
 	"settings.debug.description": "Abilita la modalità debug per mostrare pulsanti aggiuntivi per visualizzare la cronologia delle conversazioni API e i messaggi dell'interfaccia utente come JSON formattato in file temporanei.",
 	"settings.debugProxy.enabled.description": "**Abilita Debug Proxy** — Instrada tutte le richieste di rete in uscita tramite un proxy per il debugging MITM. Attivo solo quando esegui in modalità debug (F5).",
 	"settings.debugProxy.serverUrl.description": "URL del proxy (ad es. `http://127.0.0.1:8888`). Usato solo quando **Debug Proxy** è abilitato.",
-	"settings.debugProxy.tlsInsecure.description": "Accetta certificati autofirmati dal proxy. **Necessario per l'ispezione MITM.** ⚠️ Non sicuro — usalo solo per il debugging locale."
+	"settings.debugProxy.tlsInsecure.description": "Accetta certificati autofirmati dal proxy. **Necessario per l'ispezione MITM.** ⚠️ Non sicuro — usalo solo per il debugging locale.",
+	"settings.workspace.rootResolution.description": "Come Roo risolve la radice dell'area di lavoro in un'area di lavoro multi-radice. La radice viene usata per individuare `.roomodes`, `.roo/mcp.json`, `.roo/rules/` e altre configurazioni a livello di progetto. La modifica di questa impostazione influisce solo sulle ricerche future; le attività in esecuzione mantengono la loro radice originale.",
+	"settings.workspace.rootResolution.activeEditor.description": "Usa la cartella dell'area di lavoro che contiene l'editor attivo; ricorri alla prima cartella dell'area di lavoro. (Predefinito — conserva il comportamento precedente.)",
+	"settings.workspace.rootResolution.firstFolder.description": "Usa sempre la prima cartella dell'area di lavoro (workspaceFolders[0]). Deterministico — indipendente dal file attualmente attivo."
 }
