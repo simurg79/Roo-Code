@@ -45,5 +45,8 @@
 	"settings.debug.description": "Włącz tryb debugowania, aby wyświetlić dodatkowe przyciski do przeglądania historii rozmów API i komunikatów interfejsu użytkownika jako sformatowany JSON w plikach tymczasowych.",
 	"settings.debugProxy.enabled.description": "**Włącz Debug Proxy** — Kieruj wszystkie wychodzące żądania sieciowe przez proxy na potrzeby debugowania MITM. Aktywne tylko wtedy, gdy uruchamiasz w trybie debugowania (F5).",
 	"settings.debugProxy.serverUrl.description": "URL proxy (np. `http://127.0.0.1:8888`). Używany tylko wtedy, gdy **Debug Proxy** jest włączony.",
-	"settings.debugProxy.tlsInsecure.description": "Akceptuj certyfikaty self-signed z proxy. **Wymagane do inspekcji MITM.** ⚠️ Niezabezpieczone — używaj tylko do lokalnego debugowania."
+	"settings.debugProxy.tlsInsecure.description": "Akceptuj certyfikaty self-signed z proxy. **Wymagane do inspekcji MITM.** ⚠️ Niezabezpieczone — używaj tylko do lokalnego debugowania.",
+	"settings.workspace.rootResolution.description": "Jak Roo ustala katalog główny obszaru roboczego w obszarze roboczym z wieloma katalogami głównymi. Katalog główny służy do lokalizowania `.roomodes`, `.roo/mcp.json`, `.roo/rules/` i innej konfiguracji w zakresie projektu. Zmiana tego ustawienia wpływa tylko na przyszłe wyszukiwania; uruchomione zadania zachowują swój pierwotny katalog główny.",
+	"settings.workspace.rootResolution.activeEditor.description": "Użyj folderu obszaru roboczego zawierającego aktywny edytor; w razie potrzeby wróć do pierwszego folderu obszaru roboczego. (Domyślnie — zachowuje dotychczasowe zachowanie.)",
+	"settings.workspace.rootResolution.firstFolder.description": "Zawsze używaj pierwszego folderu obszaru roboczego (workspaceFolders[0]). Deterministyczne — niezależne od tego, który plik jest obecnie aktywny."
 }
