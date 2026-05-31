@@ -114,9 +114,6 @@
 			"thinking_complete_safety": "(Pensament completat, però la sortida s'ha bloquejat a causa de la configuració de seguretat.)",
 			"thinking_complete_recitation": "(Pensament completat, però la sortida s'ha bloquejat a causa de la comprovació de recitació.)"
 		},
-		"roo": {
-			"authenticationRequired": "El proveïdor Roo requereix autenticació al núvol. Si us plau, inicieu sessió a Roo Code Cloud."
-		},
 		"openAiCodex": {
 			"notAuthenticated": "No esteu autenticat amb OpenAI Codex. Si us plau, inicieu sessió mitjançant el flux OAuth d'OpenAI Codex.",
 			"invalidRequest": "Sol·licitud no vàlida a l'API de Codex. Si us plau, comproveu els paràmetres d'entrada.",
@@ -215,26 +212,6 @@
 			"global": "global"
 		}
 	},
-	"marketplace": {
-		"mode": {
-			"rulesCleanupFailed": "El mode s'ha eliminat correctament, però no s'ha pogut eliminar la carpeta de regles a {{rulesFolderPath}}. És possible que l'hagis d'eliminar manualment."
-		}
-	},
-	"mdm": {
-		"errors": {
-			"cloud_auth_required": "La teva organització requereix autenticació de Roo Code Cloud. Si us plau, inicia sessió per continuar.",
-			"organization_mismatch": "Has d'estar autenticat amb el compte de Roo Code Cloud de la teva organització.",
-			"manual_url_empty": "Si us plau, introdueix una URL de callback vàlida",
-			"manual_url_no_query": "URL de callback no vàlida: falten paràmetres de consulta",
-			"manual_url_missing_params": "URL de callback no vàlida: falten paràmetres requerits (code i state)",
-			"manual_url_auth_failed": "Autenticació manual per URL ha fallat",
-			"manual_url_auth_error": "Autenticació fallida",
-			"verification_failed": "No s'ha pogut verificar l'autenticació de l'organització."
-		},
-		"info": {
-			"organization_requires_auth": "La teva organització requereix autenticació."
-		}
-	},
 	"prompts": {
 		"deleteMode": {
 			"title": "Suprimeix el mode personalitzat",
@@ -250,6 +227,6 @@
 	},
 	"docsLink": {
 		"label": "Docs",
-		"url": "https://docs.roocode.com"
+		"url": "https://github.com/RooCodeInc/Roo-Code"
 	}
 }
