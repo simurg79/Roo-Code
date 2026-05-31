@@ -48,16 +48,11 @@
 			"label": "发现 Bug？",
 			"link": "在 GitHub 报告"
 		},
-		"featureRequest": {
-			"label": "有想法？",
-			"link": "与我们分享"
-		},
 		"securityIssue": {
 			"label": "发现安全漏洞？",
 			"link": "遵循我们的披露流程"
 		},
-		"community": "想要获取使用技巧或与其他 Roo Code 用户交流？加入 <redditLink>reddit.com/r/RooCode</redditLink> 或 <discordLink>discord.gg/roocode</discordLink>",
-		"contactAndCommunity": "联系与社区",
+		"contact": "GitHub",
 		"manageSettings": "管理设置",
 		"debugMode": {
 			"label": "启用调试模式",
@@ -306,7 +301,7 @@
 		"searchProviderPlaceholder": "搜索提供商",
 		"noProviderMatchFound": "未找到提供商",
 		"noMatchFound": "未找到匹配的配置文件",
-		"retiredProviderMessage": "抱歉，此供应商已不再受支持。我们发现实际使用它的 Roo 用户非常少，我们需要缩减代码库的范围，以便继续快速交付并更好地服务社区。这是一个非常艰难的决定，但它能让我们专注于对你最重要的事情。我们知道这很遗憾。",
+		"retiredProviderMessage": "This provider is no longer supported. Please select a different provider in your API profile settings.",
 		"vscodeLmDescription": "VS Code 语言模型 API 允许您运行由其他 VS Code 扩展（包括但不限于 GitHub Copilot）提供的模型。最简单的方法是从 VS Code 市场安装 Copilot 和 Copilot Chat 扩展。",
 		"awsCustomArnUse": "请输入有效的 Amazon Bedrock ARN（Amazon资源名称），格式示例：",
 		"awsCustomArnDesc": "请确保ARN中的区域与上方选择的AWS区域一致。",
@@ -468,10 +463,6 @@
 			"description": "Ollama 允许您在本地计算机上运行模型。有关如何开始使用的说明，请参阅其快速入门指南。",
 			"warning": "注意：Roo Code 使用复杂的提示，与 Claude 模型配合最佳。功能较弱的模型可能无法按预期工作。"
 		},
-		"roo": {
-			"authenticatedMessage": "已通过 Roo Code Cloud 账户安全认证。",
-			"connectButton": "连接到 Roo Code Cloud"
-		},
 		"openRouter": {
 			"providerRouting": {
 				"title": "OpenRouter 提供商路由",
@@ -554,7 +545,8 @@
 			"placeholder": "默认：claude",
 			"maxTokensLabel": "最大输出 Token",
 			"maxTokensDescription": "Claude Code 响应的最大输出 Token 数量。默认为 8000。"
-		}
+		},
+		"retiredRooProviderMessage": "As part of our decision to sunset the Roo Code extension, we also ended the Roo Code Router, which only existed to support the extension. Sorry about the hassle."
 	},
 	"checkpoints": {
 		"timeout": {
@@ -780,10 +772,6 @@
 			"name": "启用并发文件读取",
 			"description": "启用后，Roo 可以在单个请求中读取多个文件。禁用后，Roo 必须逐个读取文件。在使用能力较弱的模型或希望对文件访问有更多控制时，禁用此功能可能会有所帮助。"
 		},
-		"MARKETPLACE": {
-			"name": "启用 Marketplace",
-			"description": "启用后，你可以从 Marketplace 安装 MCP 和自定义模式。"
-		},
 		"PREVENT_FOCUS_DISRUPTION": {
 			"name": "后台编辑",
 			"description": "启用后防止编辑器焦点干扰。文件编辑在后台进行，不会打开差异视图或抢夺焦点。你可以在 Roo 进行更改时继续不受干扰地工作。文件可以在不获取焦点的情况下打开以捕获诊断信息，或保持完全关闭状态。"
@@ -865,10 +853,6 @@
 		"simplifiedExplanation": "你可以稍后调整详细的模型设置。"
 	},
 	"footer": {
-		"telemetry": {
-			"label": "允许匿名数据收集",
-			"description": "通过发送匿名使用数据和错误报告来帮助改进 Roo Code。此遥测不会收集代码、提示 或个人信息。详细信息请参阅我们的<privacyLink>隐私政策</privacyLink>。您可以随时关闭此功能。"
-		},
 		"settings": {
 			"import": "导入",
 			"export": "导出",
@@ -1009,7 +993,6 @@
 			"nameInvalid": "名称必须为1-64个小写字母、数字或连字符",
 			"descriptionRequired": "描述为必填项",
 			"descriptionTooLong": "描述不得超过1024个字符"
-		},
-		"footer": "使用技能编写器模式创建您自己的技能，可在 <MarketplaceLink>模式市集</MarketplaceLink> 中获得。"
+		}
 	}
 }
