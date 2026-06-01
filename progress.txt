@@ -57,3 +57,5 @@
   will be resolved when the PR is merged to main and the script reference is cleaned up.
 - Push was done with `--no-verify` after independent verification of types, backend tests,
   and UI tests all passed cleanly.
+
+<!-- CI investigation sample PR -->
