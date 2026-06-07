@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react"
 import { VSCodeCheckbox } from "@vscode/webview-ui-toolkit/react"
 import type { ModeConfig, McpServer } from "@roo-code/types"
+import McpServerChecklist from "./McpServerChecklist"
 
 export interface McpServerRestrictionProps {
 	customMode: ModeConfig
@@ -61,6 +62,18 @@ const McpServerRestriction: React.FC<McpServerRestrictionProps> = ({ customMode,
 	// Reseed-on-mode-switch is keyed on slug; track the last slug we saw.
 	const lastSlugRef = useRef(customMode.slug)
 
+	// Always hold the latest `customMode` and `onCommit` so the debounced flush
+	// merges `allowedMcpServers` into the freshest mode snapshot instead of the
+	// stale one captured when the timeout was scheduled. Without this, an edit to
+	// another field of the same mode within the 150 ms debounce window would be
+	// clobbered when this flush spreads an outdated `customMode`.
+	const latestCustomModeRef = useRef(customMode)
+	const latestOnCommitRef = useRef(onCommit)
+	useEffect(() => {
+		latestCustomModeRef.current = customMode
+		latestOnCommitRef.current = onCommit
+	})
+
 	// Reseed when the user switches to a different mode.
 	useEffect(() => {
 		if (lastSlugRef.current !== customMode.slug) {
@@ -98,10 +111,13 @@ const McpServerRestriction: React.FC<McpServerRestrictionProps> = ({ customMode,
 		}
 		const handle = setTimeout(() => {
 			lastFlushedRef.current = cachedAllowedMcpServers
-			onCommit(customMode.slug, {
-				...customMode,
+			// Merge into the freshest mode snapshot (via refs) so a concurrent edit to
+			// another field within the debounce window is not clobbered by a stale spread.
+			const latestCustomMode = latestCustomModeRef.current
+			latestOnCommitRef.current(latestCustomMode.slug, {
+				...latestCustomMode,
 				allowedMcpServers: cachedAllowedMcpServers,
-				source: customMode.source || "global",
+				source: latestCustomMode.source || "global",
 			})
 		}, 150)
 		return () => clearTimeout(handle)
@@ -136,41 +152,16 @@ const McpServerRestriction: React.FC<McpServerRestrictionProps> = ({ customMode,
 
 	return (
 		<div className="mt-3 ml-1" data-testid="mcp-server-restriction">
-			<VSCodeCheckbox
-				checked={isRestricted}
-				data-testid="restrict-mcp-servers-toggle"
-				onChange={handleToggle}>
+			<VSCodeCheckbox checked={isRestricted} data-testid="restrict-mcp-servers-toggle" onChange={handleToggle}>
 				Restrict to specific MCP servers
 			</VSCodeCheckbox>
 			{isRestricted && (
-				<div className="ml-6 mt-2 flex flex-col gap-1" data-testid="mcp-server-list">
-					{mcpServers && mcpServers.length > 0 ? (
-						mcpServers.map((server) => (
-							<VSCodeCheckbox
-								key={server.name}
-								checked={cachedAllowedMcpServers?.includes(server.name) ?? false}
-								data-testid={`mcp-server-checkbox-${server.name}`}
-								onChange={handleServerToggle(server.name)}>
-								{server.name}
-							</VSCodeCheckbox>
-						))
-					) : (
-						<div className="text-xs text-vscode-descriptionForeground">
-							No MCP servers connected
-						</div>
-					)}
-					{/* Warning for servers in cached list that aren't connected */}
-					{cachedAllowedMcpServers
-						?.filter((s) => !mcpServers?.some((ms) => ms.name === s))
-						.map((missingServer) => (
-							<div
-								key={missingServer}
-								className="text-xs text-vscode-errorForeground flex items-center gap-1">
-								<span className="codicon codicon-warning" />
-								{missingServer} (not connected)
-							</div>
-						))}
-				</div>
+				<McpServerChecklist
+					allowedMcpServers={cachedAllowedMcpServers ?? []}
+					mcpServers={mcpServers}
+					onServerToggle={handleServerToggle}
+					testIdPrefix="mcp-server"
+				/>
 			)}
 		</div>
 	)
