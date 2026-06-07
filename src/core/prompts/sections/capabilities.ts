@@ -22,7 +22,8 @@ export function getCapabilitiesSection(cwd: string, mcpHub?: McpHub, allowedMcpS
 	// text consistent with the tools that are exposed for the mode.
 	let hasMcpServers = false
 	if (mcpHub) {
-		let servers = mcpHub.getServers()
+		// Tolerate hubs without getServers (e.g. minimal/test stubs); treat as no servers.
+		let servers = mcpHub.getServers?.() ?? []
 		if (allowedMcpServers) {
 			const allowSet = new Set(allowedMcpServers)
 			servers = servers.filter((server) => allowSet.has(server.name))

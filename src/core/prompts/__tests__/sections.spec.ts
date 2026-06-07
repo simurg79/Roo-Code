@@ -44,7 +44,7 @@ describe("getCapabilitiesSection", () => {
 	})
 
 	it("includes MCP reference when mcpHub is provided", () => {
-		const mockMcpHub = {} as McpHub
+		const mockMcpHub = { getServers: () => [{ name: "test-server" }] } as unknown as McpHub
 		const result = getCapabilitiesSection(cwd, mockMcpHub)
 
 		expect(result).toContain("MCP servers")
@@ -54,6 +54,20 @@ describe("getCapabilitiesSection", () => {
 		const result = getCapabilitiesSection(cwd, undefined)
 
 		expect(result).not.toContain("MCP servers")
+	})
+
+	it("omits MCP reference when allowedMcpServers is an empty array", () => {
+		const mockMcpHub = { getServers: () => [{ name: "test-server" }] } as unknown as McpHub
+		const result = getCapabilitiesSection(cwd, mockMcpHub, [])
+
+		expect(result).not.toContain("MCP servers")
+	})
+
+	it("includes MCP reference when allowedMcpServers matches a connected server", () => {
+		const mockMcpHub = { getServers: () => [{ name: "allowed-server" }] } as unknown as McpHub
+		const result = getCapabilitiesSection(cwd, mockMcpHub, ["allowed-server"])
+
+		expect(result).toContain("MCP servers")
 	})
 })
 
