@@ -69,6 +69,20 @@ describe("getCapabilitiesSection", () => {
 
 		expect(result).toContain("MCP servers")
 	})
+
+	it("excludes MCP reference when mcpHub exposes no servers", () => {
+		const mockMcpHub = { getServers: () => [] } as unknown as McpHub
+		const result = getCapabilitiesSection(cwd, mockMcpHub)
+
+		expect(result).not.toContain("MCP servers")
+	})
+
+	it("excludes MCP reference when allowedMcpServers matches no connected server", () => {
+		const mockMcpHub = { getServers: () => [{ name: "connected-server" }] } as unknown as McpHub
+		const result = getCapabilitiesSection(cwd, mockMcpHub, ["some-other-server"])
+
+		expect(result).not.toContain("MCP servers")
+	})
 })
 
 describe("getRulesSection", () => {
