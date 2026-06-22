@@ -3727,7 +3727,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			settings: this.apiConfiguration,
 		})
 
-		const contextWindow = modelInfo.contextWindow
+		// VS Code LM (Copilot) measures usage against its static-table maxInputTokens, not the
+		// inflated live window, so context management runs in line with the context bar. Every
+		// other provider returns undefined here and falls back to modelInfo.contextWindow.
+		const contextWindow = this.api.getCondenseContextWindow?.() ?? modelInfo.contextWindow
 
 		// Get the current profile ID using the helper method
 		const currentProfileId = this.getCurrentProfileId(state)
@@ -3917,7 +3920,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				settings: this.apiConfiguration,
 			})
 
-			const contextWindow = modelInfo.contextWindow
+			// VS Code LM (Copilot) measures usage against its static-table maxInputTokens, not the
+			// inflated live window, so auto-condense fires in line with the context bar. Every other
+			// provider returns undefined here and falls back to modelInfo.contextWindow.
+			const contextWindow = this.api.getCondenseContextWindow?.() ?? modelInfo.contextWindow
 
 			// Get the current profile ID using the helper method
 			const currentProfileId = this.getCurrentProfileId(state)

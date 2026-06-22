@@ -55,6 +55,7 @@ vi.mock("vscode", () => {
 })
 
 import * as vscode from "vscode"
+import { openAiModelInfoSaneDefaults, vscodeLlmModels } from "@roo-code/types"
 import { VsCodeLmHandler } from "../vscode-lm"
 import type { ApiHandlerOptions } from "../../../shared/api"
 import type { Anthropic } from "@anthropic-ai/sdk"
@@ -99,6 +100,29 @@ describe("VsCodeLmHandler", () => {
 			callback({ affectsConfiguration: () => true })
 			// Should reset client when config changes
 			expect(handler["client"]).toBeNull()
+		})
+	})
+
+	describe("getCondenseContextWindow", () => {
+		it("uses the static-table maxInputTokens for a known VS Code LM family", () => {
+			const opusHandler = new VsCodeLmHandler({
+				vsCodeLmModelSelector: { vendor: "copilot", family: "claude-opus-4.8" },
+			})
+
+			// The condense gate must measure usage against the curated static window, not the
+			// inflated live Copilot window, so it agrees with the context bar.
+			expect(opusHandler.getCondenseContextWindow()).toBe(vscodeLlmModels["claude-opus-4.8"].maxInputTokens)
+
+			opusHandler.dispose()
+		})
+
+		it("falls back to the live model context window for families not in the static table", () => {
+			// "test-family" isn't in vscodeLlmModels; with a live client present we fall back to
+			// getModel().info.contextWindow (the live maxInputTokens).
+			handler["client"] = mockLanguageModelChat as unknown as vscode.LanguageModelChat
+
+			expect(handler.getCondenseContextWindow()).toBe(handler.getModel().info.contextWindow)
+			expect(handler.getCondenseContextWindow()).toBe(mockLanguageModelChat.maxInputTokens)
 		})
 	})
 
@@ -434,6 +458,38 @@ describe("VsCodeLmHandler", () => {
 			handler["client"] = null
 			const model = handler.getModel()
 			expect(model.info).toBeDefined()
+		})
+
+		it("should use the full advertised maxInputTokens without an upper cap", async () => {
+			// The 128K cap was removed per simurg79/Roo-Code#10; contextWindow now reflects the
+			// provider-advertised maxInputTokens directly, even when large (~936K).
+			const mockModel = { ...mockLanguageModelChat, maxInputTokens: 936000 }
+			;(vscode.lm.selectChatModels as Mock).mockResolvedValue([mockModel])
+			handler["client"] = null
+			await handler.initializeClient()
+
+			const model = handler.getModel()
+			expect(model.info.contextWindow).toBe(936000)
+		})
+
+		it("should pass through a small maxInputTokens unchanged", async () => {
+			const mockModel = { ...mockLanguageModelChat, maxInputTokens: 4096 }
+			;(vscode.lm.selectChatModels as Mock).mockResolvedValue([mockModel])
+			handler["client"] = null
+			await handler.initializeClient()
+
+			const model = handler.getModel()
+			expect(model.info.contextWindow).toBe(4096)
+		})
+
+		it("should fall back to sane defaults when maxInputTokens is not a number", async () => {
+			const mockModel = { ...mockLanguageModelChat, maxInputTokens: undefined as unknown as number }
+			;(vscode.lm.selectChatModels as Mock).mockResolvedValue([mockModel])
+			handler["client"] = null
+			await handler.initializeClient()
+
+			const model = handler.getModel()
+			expect(model.info.contextWindow).toBe(openAiModelInfoSaneDefaults.contextWindow)
 		})
 	})
 
