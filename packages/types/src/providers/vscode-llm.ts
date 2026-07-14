@@ -18,6 +18,10 @@ export const vscodeLlmDefaultModelId: VscodeLlmModelId = "claude-sonnet-4.5"
 //   - claude-opus-4.7 / 4.6, claude-sonnet-4.6,
 //     gemini-3.1-pro-preview, gemini-3.5-flash:          enforced ~197.9K
 //   - gpt-5.5 / gpt-5.4:                                 enforced ~268.4K
+// Additions measured 2026-07-14 (VS Code 1.126.0) with the same single-message binary search:
+//   - claude-sonnet-5:                                   enforced 925449 (near-full window, unlike the older ~197.9K claude rows)
+//   - gpt-5.6-luna:                                      enforced 199753
+//   - gpt-5.6-sol / gpt-5.6-terra:                       enforced 271785
 // Guardrail: these are empirically measured — re-measure (do not hand-tune) if the models change.
 // See GitHub issue simurg79/Roo-Code#10 and myplans/VSCode LM Model Table Integrity/vscode_lm_opus_data_integrity_design.md.
 export const vscodeLlmModels = {
@@ -69,6 +73,18 @@ export const vscodeLlmModels = {
 		supportsToolCalling: true,
 		maxInputTokens: 167790,
 	},
+	"claude-sonnet-5": {
+		contextWindow: 925449,
+		supportsImages: true,
+		supportsPromptCache: false,
+		inputPrice: 0,
+		outputPrice: 0,
+		family: "claude-sonnet-5",
+		version: "claude-sonnet-5",
+		name: "Claude Sonnet 5",
+		supportsToolCalling: true,
+		maxInputTokens: 925449,
+	},
 	"claude-sonnet-4.6": {
 		contextWindow: 197896,
 		supportsImages: true,
@@ -104,6 +120,42 @@ export const vscodeLlmModels = {
 		name: "Claude Haiku 4.5",
 		supportsToolCalling: true,
 		maxInputTokens: 135790,
+	},
+	"gpt-5.6-luna": {
+		contextWindow: 199753,
+		supportsImages: true,
+		supportsPromptCache: false,
+		inputPrice: 0,
+		outputPrice: 0,
+		family: "gpt-5.6-luna",
+		version: "gpt-5.6-luna",
+		name: "GPT-5.6 Luna",
+		supportsToolCalling: true,
+		maxInputTokens: 199753,
+	},
+	"gpt-5.6-sol": {
+		contextWindow: 271785,
+		supportsImages: true,
+		supportsPromptCache: false,
+		inputPrice: 0,
+		outputPrice: 0,
+		family: "gpt-5.6-sol",
+		version: "gpt-5.6-sol",
+		name: "GPT-5.6 Sol",
+		supportsToolCalling: true,
+		maxInputTokens: 271785,
+	},
+	"gpt-5.6-terra": {
+		contextWindow: 271785,
+		supportsImages: true,
+		supportsPromptCache: false,
+		inputPrice: 0,
+		outputPrice: 0,
+		family: "gpt-5.6-terra",
+		version: "gpt-5.6-terra",
+		name: "GPT-5.6 Terra",
+		supportsToolCalling: true,
+		maxInputTokens: 271785,
 	},
 	"gpt-5.5": {
 		contextWindow: 268426,
