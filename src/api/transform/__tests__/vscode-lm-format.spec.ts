@@ -3,7 +3,12 @@
 import { Anthropic } from "@anthropic-ai/sdk"
 import * as vscode from "vscode"
 
-import { convertToVsCodeLmMessages, convertToAnthropicRole, extractTextCountFromMessage } from "../vscode-lm-format"
+import {
+	convertToVsCodeLmMessages,
+	convertToAnthropicRole,
+	extractTextCountFromMessage,
+	sanitizeSurrogates,
+} from "../vscode-lm-format"
 
 // Mock crypto using Vitest
 vitest.stubGlobal("crypto", {
@@ -173,6 +178,65 @@ describe("convertToVsCodeLmMessages", () => {
 		expect(result).toHaveLength(1)
 		const imagePlaceholder = result[0].content[1] as MockLanguageModelTextPart
 		expect(imagePlaceholder.value).toContain("[Image (base64): image/png not supported by VSCode LM API]")
+	})
+
+	it("should replace an unpaired surrogate in a tool_result with U+FFFD", () => {
+		const messages: Anthropic.Messages.MessageParam[] = [
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: "tool-1",
+						content: `head\uD800tail`,
+					},
+				],
+			},
+		]
+
+		const result = convertToVsCodeLmMessages(messages)
+
+		const toolResult = result[0].content[0] as MockLanguageModelToolResultPart
+		expect(toolResult.content[0].value).toBe(`head\uFFFDtail`)
+	})
+
+	it("should keep a valid surrogate pair (emoji) intact through conversion", () => {
+		const messages: Anthropic.Messages.MessageParam[] = [{ role: "user", content: `hi \uD83D\uDE00` }]
+
+		const result = convertToVsCodeLmMessages(messages)
+
+		expect((result[0].content[0] as MockLanguageModelTextPart).value).toBe(`hi \uD83D\uDE00`)
+	})
+})
+
+describe("sanitizeSurrogates", () => {
+	it("leaves plain ASCII unchanged", () => {
+		expect(sanitizeSurrogates("hello world")).toBe("hello world")
+	})
+
+	it("leaves valid surrogate pairs unchanged", () => {
+		// 😀 U+1F600 and 𐀀 U+10000 are astral-plane code points encoded as surrogate pairs.
+		expect(sanitizeSurrogates("a\uD83D\uDE00b\uD800\uDC00c")).toBe("a\uD83D\uDE00b\uD800\uDC00c")
+	})
+
+	it("replaces a lone high surrogate with U+FFFD", () => {
+		expect(sanitizeSurrogates("a\uD800b")).toBe("a\uFFFDb")
+	})
+
+	it("replaces a lone low surrogate with U+FFFD", () => {
+		expect(sanitizeSurrogates("a\uDC00b")).toBe("a\uFFFDb")
+	})
+
+	it("replaces a trailing lone high surrogate", () => {
+		expect(sanitizeSurrogates("abc\uD800")).toBe("abc\uFFFD")
+	})
+
+	it("replaces a reversed (low-then-high) pair as two lone surrogates", () => {
+		expect(sanitizeSurrogates("\uDC00\uD800")).toBe("\uFFFD\uFFFD")
+	})
+
+	it("returns empty and non-surrogate input unchanged", () => {
+		expect(sanitizeSurrogates("")).toBe("")
 	})
 })
 

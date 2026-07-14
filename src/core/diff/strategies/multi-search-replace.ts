@@ -337,6 +337,12 @@ export class MultiSearchReplaceDiffStrategy implements DiffStrategy {
 
 			// Validate that search and replace content are not identical
 			if (searchContent === replaceContent) {
+				// [apply_diff diagnostics] TEMP: confirm no-op block detection in multi-block diffs.
+				console.warn(
+					`[apply_diff diagnostics] identical SEARCH/REPLACE block` +
+						` startLine=${replacement.startLine}` +
+						` searchPreview=${JSON.stringify(searchContent.slice(0, 80))}`,
+				)
 				diffResults.push({
 					success: false,
 					error:
@@ -507,6 +513,13 @@ export class MultiSearchReplaceDiffStrategy implements DiffStrategy {
 			appliedCount++
 		}
 		const finalContent = resultLines.join(lineEnding)
+		// [apply_diff diagnostics] TEMP: confirm appliedCount/failParts at the all-or-nothing gate.
+		console.warn(
+			`[apply_diff diagnostics] applyDiff summary` +
+				` matches=${matches.length}` +
+				` appliedCount=${appliedCount}` +
+				` failParts=${diffResults.length}`,
+		)
 		if (appliedCount === 0) {
 			return {
 				success: false,
