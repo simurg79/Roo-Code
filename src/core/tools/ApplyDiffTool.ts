@@ -86,6 +86,15 @@ export class ApplyDiffTool extends BaseTool<"apply_diff"> {
 				let formattedError = ""
 
 				if (diffResult.failParts && diffResult.failParts.length > 0) {
+					// [apply_diff diagnostics] TEMP: how many failParts exist, and how many are surfaced.
+					const failedParts = diffResult.failParts.filter((p) => !p.success)
+					console.warn(
+						`[apply_diff diagnostics] surfacing failParts` +
+							` total=${diffResult.failParts.length}` +
+							` failed=${failedParts.length}` +
+							` (only the LAST failed message is shown to the model)`,
+					)
+
 					for (const failPart of diffResult.failParts) {
 						if (failPart.success) {
 							continue

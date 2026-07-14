@@ -3486,6 +3486,27 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						// Increment consecutive no-tool-use counter
 						this.consecutiveNoToolUseCount++
 
+						// Diagnostic logging for the "no tools used" path. This most often happens when a
+						// provider (e.g. vscode-lm) surfaces the model's tool call as plain text/XML markup
+						// (e.g. a leaked `<invoke name="...">` block) instead of a structured tool_use block,
+						// so we capture the assistant text and a heuristic flag to make the failure diagnosable.
+						const assistantText = this.assistantMessageContent
+							.map((block) => (block.type === "text" ? block.content : ""))
+							.join("")
+						const looksLikeToolCallAsText = /<(invoke|function_calls|tool_call|parameter)\b/i.test(
+							assistantText,
+						)
+						console.warn(`[Task#${this.taskId}.${this.instanceId}] Model did not use a tool`, {
+							consecutiveNoToolUseCount: this.consecutiveNoToolUseCount,
+							provider: this.apiConfiguration.apiProvider ?? "unknown",
+							model: this.api.getModel().id,
+							blockTypes: this.assistantMessageContent.map((block) => block.type),
+							assistantTextLength: assistantText.length,
+							// Strong signal the model emitted a tool call as text rather than a structured tool_use block.
+							looksLikeToolCallAsText,
+							assistantTextPreview: assistantText.slice(0, 2000),
+						})
+
 						// Only show error and count toward mistake limit after 2 consecutive failures
 						if (this.consecutiveNoToolUseCount >= 2) {
 							await this.say("error", "MODEL_NO_TOOLS_USED")
