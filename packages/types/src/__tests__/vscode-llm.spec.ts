@@ -22,6 +22,27 @@ describe("vscodeLlmModels", () => {
 		expect(vscodeLlmModels["gemini-2.5-pro"].maxInputTokens).toBe(108594)
 	})
 
+	it("includes the 2026-07-14 additions with their measured single-message ceilings", () => {
+		// Measured via single-message binary search on VS Code 1.126.0 (largest input the backend
+		// accepts). claude-sonnet-5 accepts nearly its full advertised window (925449), unlike the
+		// older claude rows that cap at ~197.9K — this divergence is exactly why the values are
+		// measured rather than inferred from a sibling row.
+		expect(vscodeLlmModels["claude-sonnet-5"].maxInputTokens).toBe(925449)
+		expect(vscodeLlmModels["claude-sonnet-5"].contextWindow).toBe(925449)
+		expect(vscodeLlmModels["gpt-5.6-luna"].maxInputTokens).toBe(199753)
+		expect(vscodeLlmModels["gpt-5.6-sol"].maxInputTokens).toBe(271785)
+		expect(vscodeLlmModels["gpt-5.6-terra"].maxInputTokens).toBe(271785)
+	})
+
+	it("includes the 2026-07-26 model-picker-cache additions at their advertised windows", () => {
+		// Sourced from `chat.cachedLanguageModels` in User/globalStorage/state.vscdb; not yet
+		// binary-searched, so both fields carry the advertised value exactly as captured.
+		expect(vscodeLlmModels["claude-opus-5"].maxInputTokens).toBe(935793)
+		expect(vscodeLlmModels["claude-opus-5"].contextWindow).toBe(935793)
+		expect(vscodeLlmModels["gemini-3.6-flash"].maxInputTokens).toBe(935793)
+		expect(vscodeLlmModels["gemini-3.6-flash"].contextWindow).toBe(935793)
+	})
+
 	it("keeps both window fields populated and positive for every row", () => {
 		// NOTE: contextWindow and maxInputTokens are intentionally ALLOWED to differ (claude-opus-4.8
 		// diverges: 679560 vs 197897). The UI reads maxInputTokens, and that divergence is a deliberate
@@ -40,6 +61,9 @@ describe("vscodeLlmModels", () => {
 		expect(vscodeLlmModels).not.toHaveProperty("claude-opus-4.7-high")
 		expect(vscodeLlmModels).not.toHaveProperty("claude-3.5-sonnet")
 		expect(vscodeLlmModels).not.toHaveProperty("claude-4-sonnet")
+		expect(vscodeLlmModels).not.toHaveProperty("auto")
+		expect(vscodeLlmModels).not.toHaveProperty("copilot-utility")
+		expect(vscodeLlmModels).not.toHaveProperty("copilot-utility-small")
 	})
 
 	it("defaults to a model id that exists in the table", () => {
