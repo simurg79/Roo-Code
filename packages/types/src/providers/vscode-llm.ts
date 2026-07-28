@@ -22,9 +22,26 @@ export const vscodeLlmDefaultModelId: VscodeLlmModelId = "claude-sonnet-4.5"
 //   - claude-sonnet-5:                                   enforced 925449 (near-full window, unlike the older ~197.9K claude rows)
 //   - gpt-5.6-luna:                                      enforced 199753
 //   - gpt-5.6-sol / gpt-5.6-terra:                       enforced 271785
+// Additions sourced 2026-07-26 from the Copilot model-picker cache (`chat.cachedLanguageModels` in
+// VS Code's User/globalStorage/state.vscdb), which persists the metadata `selectChatModels` returns:
+//   - claude-opus-5 / gemini-3.6-flash:                  advertised 935793, NOT yet binary-searched
+// Those two rows carry the advertised value exactly as captured; re-measure by binary search and
+// correct them if the backend turns out to enforce a lower ceiling.
 // Guardrail: these are empirically measured — re-measure (do not hand-tune) if the models change.
 // See GitHub issue simurg79/Roo-Code#10 and myplans/VSCode LM Model Table Integrity/vscode_lm_opus_data_integrity_design.md.
 export const vscodeLlmModels = {
+	"claude-opus-5": {
+		contextWindow: 935793,
+		supportsImages: true,
+		supportsPromptCache: false,
+		inputPrice: 0,
+		outputPrice: 0,
+		family: "claude-opus-5",
+		version: "claude-opus-5",
+		name: "Claude Opus 5",
+		supportsToolCalling: true,
+		maxInputTokens: 935793,
+	},
 	"claude-opus-4.8": {
 		contextWindow: 679560,
 		supportsImages: true,
@@ -228,6 +245,18 @@ export const vscodeLlmModels = {
 		name: "GPT-4o mini",
 		supportsToolCalling: true,
 		maxInputTokens: 12078,
+	},
+	"gemini-3.6-flash": {
+		contextWindow: 935793,
+		supportsImages: true,
+		supportsPromptCache: false,
+		inputPrice: 0,
+		outputPrice: 0,
+		family: "gemini-3.6-flash",
+		version: "gemini-3.6-flash",
+		name: "Gemini 3.6 Flash",
+		supportsToolCalling: true,
+		maxInputTokens: 935793,
 	},
 	"gemini-3.1-pro-preview": {
 		contextWindow: 197897,
