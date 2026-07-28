@@ -34,12 +34,13 @@ describe("vscodeLlmModels", () => {
 		expect(vscodeLlmModels["gpt-5.6-terra"].maxInputTokens).toBe(271785)
 	})
 
-	it("includes the 2026-07-26 model-picker-cache additions at their advertised windows", () => {
+	it("caps the 2026-07-26 model-picker-cache additions at the conservative measured ceiling", () => {
 		// Sourced from `chat.cachedLanguageModels` in User/globalStorage/state.vscdb; not yet
-		// binary-searched, so both fields carry the advertised value exactly as captured.
-		expect(vscodeLlmModels["claude-opus-5"].maxInputTokens).toBe(935793)
+		// binary-searched, so contextWindow records the advertised window while maxInputTokens holds
+		// the lowest measured enforced ceiling to avoid overflowing on an unverified number.
+		expect(vscodeLlmModels["claude-opus-5"].maxInputTokens).toBe(197897)
 		expect(vscodeLlmModels["claude-opus-5"].contextWindow).toBe(935793)
-		expect(vscodeLlmModels["gemini-3.6-flash"].maxInputTokens).toBe(935793)
+		expect(vscodeLlmModels["gemini-3.6-flash"].maxInputTokens).toBe(197897)
 		expect(vscodeLlmModels["gemini-3.6-flash"].contextWindow).toBe(935793)
 	})
 

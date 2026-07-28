@@ -8,9 +8,10 @@ export const vscodeLlmDefaultModelId: VscodeLlmModelId = "claude-sonnet-4.5"
 // The VS Code LM API exposes ONLY `maxInputTokens` (there is no separate context-window field), and
 // that is the single value the runtime/condense gate enforces: getModel() sets
 // contextWindow = Math.max(0, client.maxInputTokens) in src/api/providers/vscode-lm.ts. So for every
-// row `maxInputTokens` IS the enforced context window, and `contextWindow` is set equal to it purely
-// as an informational mirror (the UI reads maxInputTokens via useSelectedModel.ts, so the two MUST
-// match to keep the context bar and the gate on one source of truth).
+// row `maxInputTokens` IS the enforced context window, and `contextWindow` normally mirrors it
+// (the UI reads maxInputTokens via useSelectedModel.ts). Rows whose advertised window is known to
+// exceed the measured ceiling deliberately diverge: contextWindow records what Copilot advertises
+// while maxInputTokens carries the value the backend actually accepts.
 // These ceilings were measured empirically on 2026-06-18 (VS Code 1.125.0) by binary-searching the
 // single-message "Message exceeds token limit" threshold per model — they are the largest input the
 // backend actually accepts, which for several models is well below the value Copilot advertises:
@@ -25,8 +26,10 @@ export const vscodeLlmDefaultModelId: VscodeLlmModelId = "claude-sonnet-4.5"
 // Additions sourced 2026-07-26 from the Copilot model-picker cache (`chat.cachedLanguageModels` in
 // VS Code's User/globalStorage/state.vscdb), which persists the metadata `selectChatModels` returns:
 //   - claude-opus-5 / gemini-3.6-flash:                  advertised 935793, NOT yet binary-searched
-// Those two rows carry the advertised value exactly as captured; re-measure by binary search and
-// correct them if the backend turns out to enforce a lower ceiling.
+// Those two rows keep 935793 in contextWindow as the advertised window, but pin maxInputTokens to
+// 197897 — the lowest enforced ceiling measured on any row here. Trusting an unverified advertised
+// window would overflow the request and hard-fail mid-task, so the conservative floor is used until
+// a binary search establishes the real ceiling (mirrors the claude-opus-4.8 divergence above).
 // Guardrail: these are empirically measured — re-measure (do not hand-tune) if the models change.
 // See GitHub issue simurg79/Roo-Code#10 and myplans/VSCode LM Model Table Integrity/vscode_lm_opus_data_integrity_design.md.
 export const vscodeLlmModels = {
@@ -40,7 +43,7 @@ export const vscodeLlmModels = {
 		version: "claude-opus-5",
 		name: "Claude Opus 5",
 		supportsToolCalling: true,
-		maxInputTokens: 935793,
+		maxInputTokens: 197897,
 	},
 	"claude-opus-4.8": {
 		contextWindow: 679560,
@@ -256,7 +259,7 @@ export const vscodeLlmModels = {
 		version: "gemini-3.6-flash",
 		name: "Gemini 3.6 Flash",
 		supportsToolCalling: true,
-		maxInputTokens: 935793,
+		maxInputTokens: 197897,
 	},
 	"gemini-3.1-pro-preview": {
 		contextWindow: 197897,
