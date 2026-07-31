@@ -457,9 +457,31 @@ export class MultiSearchReplaceDiffStrategy implements DiffStrategy {
 
 					const lineRange = startLine ? ` at line: ${startLine}` : ""
 
+					// A mistyped start-line marker (":3", "start_line:3") is not recognized by
+					// the parser, so it becomes the first line of the search text - and the
+					// following "-------" is swallowed too - making an exact match impossible.
+					const hintLines = searchChunk.split("\n")
+					const firstSearchLine = hintLines[0]?.trim() ?? ""
+					const separatorSwallowed = hintLines[1]?.trim() === "-------"
+					const malformedMarkerHint = /^(?::\s*\d{1,9}:?|:?\s*start[_-]?line\s*:?\s*\d{1,9}:?)$/i.test(
+						firstSearchLine,
+					)
+						? `\n- LIKELY CAUSE: the first line of your search content is "${firstSearchLine}", which looks like a malformed start-line marker and was therefore searched for as literal file text${separatorSwallowed ? ', together with the "-------" line after it' : ""}. The only recognized form is ":start_line:<number>" on the line immediately after "<<<<<<< SEARCH", optionally followed by a "-------" line. Remove or correct that line and retry.`
+						: ""
+
 					diffResults.push({
 						success: false,
-						error: `No sufficiently similar match found${lineRange} (${Math.floor(bestMatchScore * 100)}% similar, needs ${Math.floor(this.fuzzyThreshold * 100)}%)\n\nDebug Info:\n- Similarity Score: ${Math.floor(bestMatchScore * 100)}%\n- Required Threshold: ${Math.floor(this.fuzzyThreshold * 100)}%\n- Search Range: ${startLine ? `starting at line ${startLine}` : "start to end"}\n- Tried both standard and aggressive line number stripping\n- Tip: Use the read_file tool to get the latest content of the file before attempting to use the apply_diff tool again, as the file content may have changed\n\nSearch Content:\n${searchChunk}${bestMatchSection}${originalContentSection}`,
+						error:
+							`No sufficiently similar match found${lineRange} ` +
+							`(${Math.floor(bestMatchScore * 100)}% similar, needs ${Math.floor(this.fuzzyThreshold * 100)}%)\n\n` +
+							`Debug Info:\n` +
+							`- Similarity Score: ${Math.floor(bestMatchScore * 100)}%\n` +
+							`- Required Threshold: ${Math.floor(this.fuzzyThreshold * 100)}%\n` +
+							`- Search Range: ${startLine ? `starting at line ${startLine}` : "start to end"}\n` +
+							`- Tried both standard and aggressive line number stripping${malformedMarkerHint}\n` +
+							`- Tip: Use the read_file tool to get the latest content of the file before attempting ` +
+							`to use the apply_diff tool again, as the file content may have changed\n\n` +
+							`Search Content:\n${searchChunk}${bestMatchSection}${originalContentSection}`,
 					})
 					continue
 				}
@@ -513,13 +535,6 @@ export class MultiSearchReplaceDiffStrategy implements DiffStrategy {
 			appliedCount++
 		}
 		const finalContent = resultLines.join(lineEnding)
-		// [apply_diff diagnostics] TEMP: confirm appliedCount/failParts at the all-or-nothing gate.
-		console.warn(
-			`[apply_diff diagnostics] applyDiff summary` +
-				` matches=${matches.length}` +
-				` appliedCount=${appliedCount}` +
-				` failParts=${diffResults.length}`,
-		)
 		if (appliedCount === 0) {
 			return {
 				success: false,
