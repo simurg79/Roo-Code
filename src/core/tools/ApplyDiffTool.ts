@@ -11,7 +11,7 @@ import { RecordSource } from "../context-tracking/FileContextTrackerTypes"
 import { unescapeHtmlEntities } from "../../utils/text-normalization"
 import { EXPERIMENT_IDS, experiments } from "../../shared/experiments"
 import { computeDiffStats, sanitizeUnifiedDiff } from "../diff/stats"
-import type { ToolUse } from "../../shared/tools"
+import type { DiffResult, ToolUse } from "../../shared/tools"
 
 import { BaseTool, ToolCallbacks } from "./BaseTool"
 
@@ -19,6 +19,19 @@ interface ApplyDiffParams {
 	path: string
 	diff: string
 }
+
+// Each failed block embeds a slice of the file, so only the first N are shown in
+// full; the rest are abbreviated to keep the error payload bounded.
+const DETAILED_APPLY_DIFF_FAILURES = 5
+
+// A single detailed failure can embed the whole file, so cap its rendered size.
+const MAX_DETAILED_FAILURE_CHARACTERS = 4000
+
+// Abbreviated failures are one line each, but a single line can still be very long.
+const MAX_SUMMARY_FAILURE_CHARACTERS = 200
+
+// Beyond this many failures even one-line summaries dominate the payload.
+const MAX_ABBREVIATED_FAILURES = 50
 
 export class ApplyDiffTool extends BaseTool<"apply_diff"> {
 	readonly name = "apply_diff" as const
@@ -86,26 +99,13 @@ export class ApplyDiffTool extends BaseTool<"apply_diff"> {
 				let formattedError = ""
 
 				if (diffResult.failParts && diffResult.failParts.length > 0) {
-					// [apply_diff diagnostics] TEMP: how many failParts exist, and how many are surfaced.
-					const failedParts = diffResult.failParts.filter((p) => !p.success)
-					console.warn(
-						`[apply_diff diagnostics] surfacing failParts` +
-							` total=${diffResult.failParts.length}` +
-							` failed=${failedParts.length}` +
-							` (only the LAST failed message is shown to the model)`,
-					)
+					const failedParts = diffResult.failParts.filter((part) => !part.success)
+					const summary =
+						failedParts.length > 1
+							? `${failedParts.length} diff blocks failed to apply. All of them are reported below and must be fixed before retrying.\n\n`
+							: ""
 
-					for (const failPart of diffResult.failParts) {
-						if (failPart.success) {
-							continue
-						}
-
-						const errorDetails = failPart.details ? JSON.stringify(failPart.details, null, 2) : ""
-
-						formattedError = `<error_details>\n${
-							failPart.error
-						}${errorDetails ? `\n\nDetails:\n${errorDetails}` : ""}\n</error_details>`
-					}
+					formattedError = `<error_details>\n${summary}${this.formatFailedParts(failedParts)}\n</error_details>`
 				} else {
 					const errorDetails = diffResult.details ? JSON.stringify(diffResult.details, null, 2) : ""
 
@@ -238,17 +238,25 @@ export class ApplyDiffTool extends BaseTool<"apply_diff"> {
 
 			// Used to determine if we should wait for busy terminal to update before sending api request
 			task.didEditFile = true
+
+			// Counted by regex, so a literal `<<<<<<< SEARCH` inside block content inflates it: the `X of Y` count is advisory.
+			const searchBlocks = (diffContent.match(/<<<<<<< SEARCH/g) || []).length
+			const unappliedParts = diffResult.failParts?.filter((part) => !part.success) ?? []
 			let partFailHint = ""
 
-			if (diffResult.failParts && diffResult.failParts.length > 0) {
-				partFailHint = `But unable to apply all diff parts to file: ${absolutePath}. Use the read_file tool to check the newest file version and re-apply diffs.\n`
+			if (unappliedParts.length > 0) {
+				const appliedBlocks = Math.max(0, searchBlocks - unappliedParts.length)
+				partFailHint =
+					`Applied ${appliedBlocks} of ${searchBlocks} diff blocks to ${absolutePath}. ` +
+					`The other ${unappliedParts.length} did NOT apply, so those changes are NOT in the file. ` +
+					`Fix the failures below and resend ONLY the blocks that failed; the blocks that already applied will no longer match.\n\n` +
+					`<error_details>\n${this.formatFailedParts(unappliedParts)}\n</error_details>\n\n`
 			}
 
 			// Get the formatted response message
 			const message = await task.diffViewProvider.pushToolWriteResult(task, task.cwd, !fileExists)
 
 			// Check for single SEARCH/REPLACE block warning
-			const searchBlocks = (diffContent.match(/<<<<<<< SEARCH/g) || []).length
 			const singleBlockNotice =
 				searchBlocks === 1
 					? "\n<notice>Making multiple related changes in a single apply_diff is more efficient. If other changes are needed in this file, please include them as additional SEARCH/REPLACE blocks.</notice>"
@@ -274,6 +282,53 @@ export class ApplyDiffTool extends BaseTool<"apply_diff"> {
 			task.processQueuedMessages()
 			return
 		}
+	}
+
+	// Reporting only some failures makes the model rediscover the rest one request at a
+	// time, exhausting the consecutive-mistake limit before the diff can converge.
+	private formatFailedParts(failedParts: Extract<DiffResult, { success: false }>[]): string {
+		const renderedCount = Math.min(failedParts.length, MAX_ABBREVIATED_FAILURES)
+		const sections = failedParts.slice(0, renderedCount).map((failPart, index) => {
+			const label = failedParts.length > 1 ? `--- Diff block ${index + 1} of ${failedParts.length} ---\n` : ""
+			const error = failPart.error ?? "Unknown apply_diff failure"
+
+			if (index >= DETAILED_APPLY_DIFF_FAILURES) {
+				const summaryLine = error.split("\n")[0]
+				return `${label}${this.truncate(summaryLine, MAX_SUMMARY_FAILURE_CHARACTERS)}`
+			}
+
+			const errorDetails = failPart.details ? JSON.stringify(failPart.details, null, 2) : ""
+			const detailedSection = `${label}${error}${errorDetails ? `\n\nDetails:\n${errorDetails}` : ""}`
+
+			return this.truncate(detailedSection, MAX_DETAILED_FAILURE_CHARACTERS)
+		})
+
+		const trailers: string[] = []
+		const abbreviatedRangeStart = DETAILED_APPLY_DIFF_FAILURES + 1
+
+		if (renderedCount > DETAILED_APPLY_DIFF_FAILURES) {
+			trailers.push(
+				`(Failures ${abbreviatedRangeStart}-${renderedCount} are shown as a single summary line each; retry those blocks individually for full detail.)`,
+			)
+		}
+
+		const omitted = failedParts.length - renderedCount
+
+		if (omitted > 0) {
+			trailers.push(`(+${omitted} more failures not shown; retry those blocks individually for full detail.)`)
+		}
+
+		return [sections.join("\n\n"), ...trailers].join("\n\n")
+	}
+
+	private truncate(text: string, maxCharacters: number): string {
+		if (text.length <= maxCharacters) {
+			return text
+		}
+
+		const omitted = text.length - maxCharacters
+
+		return `${text.slice(0, maxCharacters)}\n... [truncated; ${omitted} characters omitted — retry this block alone for full detail]`
 	}
 
 	override async handlePartial(task: Task, block: ToolUse<"apply_diff">): Promise<void> {
