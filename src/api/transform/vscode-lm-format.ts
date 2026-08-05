@@ -45,6 +45,31 @@ export function sanitizeSurrogates(text: string): string {
 	return text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD")
 }
 
+const SUPPORTED_IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"])
+
+function convertImagePart(part: {
+	source?: { type?: string; media_type?: string; data?: string }
+}): vscode.LanguageModelTextPart | vscode.LanguageModelDataPart {
+	if (
+		part.source?.type === "base64" &&
+		part.source.data &&
+		part.source.media_type &&
+		SUPPORTED_IMAGE_MEDIA_TYPES.has(part.source.media_type)
+	) {
+		// MUST be raw decoded bytes: passing the base64 string re-encodes it and corrupts the image.
+		const bytes = new Uint8Array(Buffer.from(part.source.data, "base64"))
+		// Buffer.from never throws on malformed base64 — it yields empty/garbage bytes — so an empty
+		// result is the only signal that decoding failed, and it falls through to a visible placeholder.
+		if (bytes.length > 0) {
+			return vscode.LanguageModelDataPart.image(bytes, part.source.media_type)
+		}
+	}
+
+	return new vscode.LanguageModelTextPart(
+		`[Image (${part.source?.type || "Unknown source-type"}): ${part.source?.media_type || "unknown media-type"} not supported by VSCode LM API]`,
+	)
+}
+
 export function convertToVsCodeLmMessages(
 	anthropicMessages: Anthropic.Messages.MessageParam[],
 ): vscode.LanguageModelChatMessage[] {
@@ -85,14 +110,12 @@ export function convertToVsCodeLmMessages(
 					// Convert tool messages to ToolResultParts
 					...toolMessages.map((toolMessage) => {
 						// Process tool result content into TextParts
-						const toolContentParts: vscode.LanguageModelTextPart[] =
+						const toolContentParts: (vscode.LanguageModelTextPart | vscode.LanguageModelDataPart)[] =
 							typeof toolMessage.content === "string"
 								? [new vscode.LanguageModelTextPart(sanitizeSurrogates(toolMessage.content))]
 								: (toolMessage.content?.map((part) => {
 										if (part.type === "image") {
-											return new vscode.LanguageModelTextPart(
-												`[Image (${part.source?.type || "Unknown source-type"}): ${part.source?.media_type || "unknown media-type"} not supported by VSCode LM API]`,
-											)
+											return convertImagePart(part)
 										}
 										return new vscode.LanguageModelTextPart(sanitizeSurrogates(part.text))
 									}) ?? [new vscode.LanguageModelTextPart("")])
@@ -103,9 +126,7 @@ export function convertToVsCodeLmMessages(
 					// Convert non-tool messages to TextParts after tool messages
 					...nonToolMessages.map((part) => {
 						if (part.type === "image") {
-							return new vscode.LanguageModelTextPart(
-								`[Image (${part.source?.type || "Unknown source-type"}): ${part.source?.media_type || "unknown media-type"} not supported by VSCode LM API]`,
-							)
+							return convertImagePart(part)
 						}
 						return new vscode.LanguageModelTextPart(sanitizeSurrogates(part.text))
 					}),
