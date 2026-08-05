@@ -311,7 +311,9 @@ function getSelectedModel({
 				...openAiModelInfoSaneDefaults,
 				...listedModel,
 				contextWindow: listedModel.maxInputTokens,
-				supportsImages: false, // VSCode LM API currently doesn't support images.
+				// The fallback row supplies a usable window, but its image capability is unverified for an
+				// unlisted family, so default to false to match the provider's own resolution.
+				supportsImages: vscodeLlmModels[modelFamily as keyof typeof vscodeLlmModels]?.supportsImages ?? false,
 			}
 			return { id, info }
 		}

@@ -34,6 +34,11 @@ interface MockLanguageModelToolResultPart {
 	content: MockLanguageModelTextPart[]
 }
 
+interface MockLanguageModelDataPart {
+	data: Uint8Array
+	mimeType: string
+}
+
 // Mock vscode namespace
 vitest.mock("vscode", () => {
 	const LanguageModelChatMessageRole = {
@@ -53,6 +58,18 @@ vitest.mock("vscode", () => {
 			public name: string,
 			public input: any,
 		) {}
+	}
+
+	// The real vscode.LanguageModelDataPart carries no discriminator field, only data and mimeType.
+	class MockLanguageModelDataPart {
+		constructor(
+			public data: Uint8Array,
+			public mimeType: string,
+		) {}
+
+		static image(data: Uint8Array, mimeType: string) {
+			return new MockLanguageModelDataPart(data, mimeType)
+		}
 	}
 
 	class MockLanguageModelToolResultPart {
@@ -78,6 +95,7 @@ vitest.mock("vscode", () => {
 		},
 		LanguageModelChatMessageRole,
 		LanguageModelTextPart: MockLanguageModelTextPart,
+		LanguageModelDataPart: MockLanguageModelDataPart,
 		LanguageModelToolCallPart: MockLanguageModelToolCallPart,
 		LanguageModelToolResultPart: MockLanguageModelToolResultPart,
 	}
@@ -155,7 +173,8 @@ describe("convertToVsCodeLmMessages", () => {
 		expect(toolCall.type).toBe("tool_call")
 	})
 
-	it("should handle image blocks with appropriate placeholders", () => {
+	it("should convert base64 image blocks into data parts with decoded bytes", () => {
+		const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 		const messages: Anthropic.Messages.MessageParam[] = [
 			{
 				role: "user",
@@ -166,7 +185,7 @@ describe("convertToVsCodeLmMessages", () => {
 						source: {
 							type: "base64",
 							media_type: "image/png",
-							data: "base64data",
+							data: Buffer.from(pngBytes).toString("base64"),
 						},
 					},
 				],
@@ -176,8 +195,79 @@ describe("convertToVsCodeLmMessages", () => {
 		const result = convertToVsCodeLmMessages(messages)
 
 		expect(result).toHaveLength(1)
+		const imagePart = result[0].content[1] as unknown as MockLanguageModelDataPart
+		expect(imagePart.mimeType).toBe("image/png")
+		// Guards against passing the base64 string through instead of the decoded bytes.
+		expect(Array.from(imagePart.data)).toEqual(Array.from(pngBytes))
+	})
+
+	it("should keep a text placeholder for URL-sourced images", () => {
+		const messages: Anthropic.Messages.MessageParam[] = [
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "Look at this:" },
+					// The SDK's ImageBlockParam.Source only models base64 sources, but URL-sourced
+					// images do reach this transform at runtime, so exercise that branch directly.
+					{
+						type: "image",
+						source: {
+							type: "url",
+							url: "https://example.com/image.png",
+						},
+					} as unknown as Anthropic.ImageBlockParam,
+				],
+			},
+		]
+
+		const result = convertToVsCodeLmMessages(messages)
+
+		expect(result).toHaveLength(1)
 		const imagePlaceholder = result[0].content[1] as MockLanguageModelTextPart
-		expect(imagePlaceholder.value).toContain("[Image (base64): image/png not supported by VSCode LM API]")
+		expect(imagePlaceholder.value).toBe("[Image (url): unknown media-type not supported by VSCode LM API]")
+	})
+
+	it("should fall back to a text placeholder when base64 data decodes to no bytes", () => {
+		const messages: Anthropic.Messages.MessageParam[] = [
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "Look at this:" },
+					// Buffer.from strips non-base64 characters rather than throwing, so the data must
+					// contain NO base64 alphabet characters at all to actually decode to zero bytes.
+					{ type: "image", source: { type: "base64", media_type: "image/png", data: "!!!" } },
+				],
+			},
+		]
+
+		const result = convertToVsCodeLmMessages(messages)
+
+		const imagePlaceholder = result[0].content[1] as MockLanguageModelTextPart
+		expect(imagePlaceholder.value).toBe("[Image (base64): image/png not supported by VSCode LM API]")
+	})
+
+	it("should fall back to a text placeholder for an unsupported media type", () => {
+		const messages: Anthropic.Messages.MessageParam[] = [
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "Look at this:" },
+					{
+						type: "image",
+						source: {
+							type: "base64",
+							media_type: "image/bmp",
+							data: Buffer.from([1, 2, 3]).toString("base64"),
+						},
+					} as unknown as Anthropic.ImageBlockParam,
+				],
+			},
+		]
+
+		const result = convertToVsCodeLmMessages(messages)
+
+		const imagePlaceholder = result[0].content[1] as MockLanguageModelTextPart
+		expect(imagePlaceholder.value).toBe("[Image (base64): image/bmp not supported by VSCode LM API]")
 	})
 
 	it("should replace an unpaired surrogate in a tool_result with U+FFFD", () => {

@@ -497,6 +497,35 @@ describe("VsCodeLmHandler", () => {
 			const model = handler.getModel()
 			expect(model.info.contextWindow).toBe(openAiModelInfoSaneDefaults.contextWindow)
 		})
+
+		it("resolves supportsImages to true for a family the static table marks image-capable", async () => {
+			const mockModel = { ...mockLanguageModelChat, family: "claude-sonnet-4.5" }
+			;(vscode.lm.selectChatModels as Mock).mockResolvedValue([mockModel])
+			handler["client"] = null
+			await handler.initializeClient()
+
+			expect(vscodeLlmModels["claude-sonnet-4.5"].supportsImages).toBe(true)
+			expect(handler.getModel().info.supportsImages).toBe(true)
+		})
+
+		it("resolves supportsImages to false for a family the static table marks image-incapable", async () => {
+			const mockModel = { ...mockLanguageModelChat, family: "gpt-4o-mini" }
+			;(vscode.lm.selectChatModels as Mock).mockResolvedValue([mockModel])
+			handler["client"] = null
+			await handler.initializeClient()
+
+			expect(vscodeLlmModels["gpt-4o-mini"].supportsImages).toBe(false)
+			expect(handler.getModel().info.supportsImages).toBe(false)
+		})
+
+		it("defaults supportsImages to false for a family missing from the static table", async () => {
+			const mockModel = { ...mockLanguageModelChat, family: "totally-unknown-family" }
+			;(vscode.lm.selectChatModels as Mock).mockResolvedValue([mockModel])
+			handler["client"] = null
+			await handler.initializeClient()
+
+			expect(handler.getModel().info.supportsImages).toBe(false)
+		})
 	})
 
 	describe("countTokens", () => {

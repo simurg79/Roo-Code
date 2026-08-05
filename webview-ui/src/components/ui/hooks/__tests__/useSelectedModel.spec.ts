@@ -805,6 +805,32 @@ describe("useSelectedModel", () => {
 			// contextWindow MUST equal the live window the condense gate consumes (client.maxInputTokens),
 			// not the empirically-measured contextWindow field on the static row.
 			expect(result.current.info?.contextWindow).toBe(vscodeLlmModels[listedFamily].maxInputTokens)
+			// The hook no longer forces supportsImages false; the family-table value flows through.
+			expect(result.current.info?.supportsImages).toBe(vscodeLlmModels[listedFamily].supportsImages)
+		})
+
+		it("surfaces supportsImages true for an image-capable family", () => {
+			const apiConfiguration: ProviderSettings = {
+				apiProvider: "vscode-lm",
+				vsCodeLmModelSelector: { vendor: "copilot", family: "claude-sonnet-4.5" },
+			}
+
+			const wrapper = createWrapper()
+			const { result } = renderHook(() => useSelectedModel(apiConfiguration), { wrapper })
+
+			expect(vscodeLlmModels["claude-sonnet-4.5"].supportsImages).toBe(true)
+			expect(result.current.info?.supportsImages).toBe(true)
+		})
+
+		it("surfaces supportsImages false for an image-incapable family", () => {
+			const apiConfiguration: ProviderSettings = {
+				apiProvider: "vscode-lm",
+				vsCodeLmModelSelector: { vendor: "copilot", family: "gpt-4o-mini" },
+			}
+
+			const wrapper = createWrapper()
+			const { result } = renderHook(() => useSelectedModel(apiConfiguration), { wrapper })
+
 			expect(result.current.info?.supportsImages).toBe(false)
 		})
 
@@ -822,6 +848,8 @@ describe("useSelectedModel", () => {
 			// which would diverge from the gate and break the context bar / auto-condense.
 			expect(result.current.info?.contextWindow).not.toBe(128000)
 			expect(result.current.info?.contextWindow).toBe(vscodeLlmModels[vscodeLlmDefaultModelId].maxInputTokens)
+			// Image capability is unverified for an unlisted family, so it must not be inherited from the
+			// fallback row; this matches the provider's `?? false` resolution.
 			expect(result.current.info?.supportsImages).toBe(false)
 		})
 	})
