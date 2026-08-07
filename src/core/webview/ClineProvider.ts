@@ -2879,7 +2879,58 @@ export class ClineProvider
 			startTask: false,
 		})
 
-		// 5) Persist parent delegation metadata BEFORE the child starts writing.
+		// 5) Stamp the child id onto the parent's pending `newTask` row so the UI can resolve
+		// the link from the message itself. Positional matching against `childIds` drifts
+		// whenever a delegation is rejected, aborted, or re-issued.
+		try {
+			const delegationStoragePath = this.contextProxy.globalStorageUri.fsPath
+			const parentMessages = await readTaskMessages({
+				taskId: parentTaskId,
+				globalStoragePath: delegationStoragePath,
+			})
+
+			if (Array.isArray(parentMessages)) {
+				for (let messageIndex = parentMessages.length - 1; messageIndex >= 0; messageIndex--) {
+					const candidate = parentMessages[messageIndex]
+
+					if (candidate.type !== "ask" || candidate.ask !== "tool") {
+						continue
+					}
+
+					let parsedTool: { tool?: string } | undefined
+					try {
+						parsedTool = candidate.text ? JSON.parse(candidate.text) : undefined
+					} catch {
+						parsedTool = undefined
+					}
+
+					if (parsedTool?.tool !== "newTask") {
+						continue
+					}
+
+					// Stop at the newest `newTask` row: it is the one being delegated now. Walking
+					// further back would stamp an earlier delegation with this child's id.
+					if (!candidate.childTaskId) {
+						candidate.childTaskId = child.taskId
+						await saveTaskMessages({
+							messages: parentMessages,
+							taskId: parentTaskId,
+							globalStoragePath: delegationStoragePath,
+						})
+					}
+
+					break
+				}
+			}
+		} catch (err) {
+			this.log(
+				`[delegateParentAndOpenChild] Failed to stamp childTaskId on parent ${parentTaskId}: ${
+					(err as Error)?.message ?? String(err)
+				}`,
+			)
+		}
+
+		// 6) Persist parent delegation metadata BEFORE the child starts writing.
 		try {
 			const { historyItem } = await this.getTaskWithId(parentTaskId)
 			const childIds = Array.from(new Set([...(historyItem.childIds ?? []), child.taskId]))
@@ -2958,6 +3009,7 @@ export class ClineProvider
 			say: "subtask_result",
 			text: completionResultSummary,
 			ts,
+			childTaskId,
 		}
 		parentClineMessages.push(subtaskUiMessage)
 		await saveTaskMessages({ messages: parentClineMessages, taskId: parentTaskId, globalStoragePath })

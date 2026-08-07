@@ -784,4 +784,57 @@ describe("History resume delegation - parent metadata transitions", () => {
 			}),
 		)
 	})
+
+	it("stamps each injected subtask_result with its own child id across sequential delegations", async () => {
+		const makeProvider = () =>
+			({
+				contextProxy: { globalStorageUri: { fsPath: "/storage" } },
+				getTaskWithId: vi.fn().mockResolvedValue({
+					historyItem: {
+						id: "p1",
+						status: "delegated",
+						childIds: ["c1", "c2"],
+						ts: 100,
+						task: "Parent",
+						tokensIn: 0,
+						tokensOut: 0,
+						totalCost: 0,
+					},
+				}),
+				emit: vi.fn(),
+				getCurrentTask: vi.fn(() => ({ taskId: "c1" })),
+				removeClineFromStack: vi.fn().mockResolvedValue(undefined),
+				createTaskWithHistoryItem: vi.fn().mockResolvedValue({
+					taskId: "p1",
+					resumeAfterDelegation: vi.fn().mockResolvedValue(undefined),
+				}),
+				updateTaskHistory: vi.fn().mockResolvedValue([]),
+			}) as unknown as ClineProvider
+
+		vi.mocked(readApiMessages).mockResolvedValue([])
+
+		vi.mocked(readTaskMessages).mockResolvedValue([])
+		await (ClineProvider.prototype as any).reopenParentFromDelegation.call(makeProvider(), {
+			parentTaskId: "p1",
+			childTaskId: "c1",
+			completionResultSummary: "First result",
+		})
+
+		const firstSavedMessages = vi.mocked(saveTaskMessages).mock.calls.at(-1)![0].messages
+		expect(firstSavedMessages.at(-1)).toEqual(expect.objectContaining({ say: "subtask_result", childTaskId: "c1" }))
+
+		vi.mocked(readTaskMessages).mockResolvedValue(firstSavedMessages)
+		await (ClineProvider.prototype as any).reopenParentFromDelegation.call(makeProvider(), {
+			parentTaskId: "p1",
+			childTaskId: "c2",
+			completionResultSummary: "Second result",
+		})
+
+		const secondSavedMessages = vi.mocked(saveTaskMessages).mock.calls.at(-1)![0].messages
+		const stampedChildIds = secondSavedMessages
+			.filter((message) => message.say === "subtask_result")
+			.map((message) => message.childTaskId)
+
+		expect(stampedChildIds).toEqual(["c1", "c2"])
+	})
 })

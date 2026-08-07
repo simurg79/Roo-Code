@@ -268,6 +268,13 @@ export const clineMessageSchema = z.object({
 	 * Present when `say: "sliding_window_truncation"`.
 	 */
 	contextTruncation: contextTruncationSchema.optional(),
+	/**
+	 * Id of the child task this delegation row refers to, stamped when the child is
+	 * created (`ask: "tool"` / `newTask`) or when its result is injected
+	 * (`say: "subtask_result"`). Absent on history written before this field existed,
+	 * which falls back to positional matching against `HistoryItem.childIds`.
+	 */
+	childTaskId: z.string().optional(),
 	isProtected: z.boolean().optional(),
 	apiProtocol: z.union([z.literal("openai"), z.literal("anthropic")]).optional(),
 	isAnswered: z.boolean().optional(),
