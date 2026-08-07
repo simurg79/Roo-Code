@@ -223,5 +223,188 @@ describe("ChatRow - subtask links", () => {
 			const goToSubtaskButton = screen.queryByText("Go to subtask")
 			expect(goToSubtaskButton).toBeNull()
 		})
+
+		it("should link to the matching child task, not the last one, when several subtasks completed", () => {
+			const newTask = (ts: number) => ({
+				ts,
+				type: "ask" as const,
+				ask: "tool" as const,
+				text: JSON.stringify({ tool: "newTask", mode: "code", content: `Subtask ${ts}` }),
+			})
+			const subtaskResult = (ts: number) => ({
+				ts,
+				type: "say" as const,
+				say: "subtask_result" as const,
+				text: `Result ${ts}`,
+			})
+
+			const firstResult = subtaskResult(1001)
+			const clineMessages = [
+				newTask(1000),
+				firstResult,
+				newTask(1002),
+				subtaskResult(1003),
+				newTask(1004),
+				subtaskResult(1005),
+			] as ClineMessage[]
+
+			renderChatRow(
+				firstResult,
+				{
+					childIds: ["first-child", "second-child", "third-child"],
+					// Only ever holds the most recently completed child.
+					completedByChildId: "third-child",
+				},
+				clineMessages,
+			)
+
+			fireEvent.click(screen.getByText("Go to subtask"))
+
+			expect(mockPostMessage).toHaveBeenCalledWith({
+				type: "showTaskWithId",
+				text: "first-child",
+			})
+		})
+
+		it("should link to the matching child task when the result is not adjacent to its newTask row", () => {
+			const newTaskMessage = {
+				ts: 1000,
+				type: "ask" as const,
+				ask: "tool" as const,
+				text: JSON.stringify({ tool: "newTask", mode: "code", content: "Implement feature X" }),
+			}
+			const resumeTaskMessage = {
+				ts: 1001,
+				type: "ask" as const,
+				ask: "resume_task" as const,
+			}
+			const resultMessage = {
+				ts: 1002,
+				type: "say" as const,
+				say: "subtask_result" as const,
+				text: "The subtask has been completed successfully.",
+			}
+
+			renderChatRow(resultMessage, { childIds: ["only-child"], completedByChildId: "stale-child" }, [
+				newTaskMessage,
+				resumeTaskMessage,
+				resultMessage,
+			] as ClineMessage[])
+
+			fireEvent.click(screen.getByText("Go to subtask"))
+
+			expect(mockPostMessage).toHaveBeenCalledWith({
+				type: "showTaskWithId",
+				text: "only-child",
+			})
+		})
+
+		it("should prefer the message's own childTaskId over positional childIds", () => {
+			const message = {
+				ts: 1002,
+				type: "say" as const,
+				say: "subtask_result" as const,
+				text: "Result",
+				childTaskId: "stamped-child",
+			}
+
+			renderChatRow(message, { childIds: ["wrong-child"], completedByChildId: "last-child" }, [
+				message,
+			] as ClineMessage[])
+
+			fireEvent.click(screen.getByText("Go to subtask"))
+
+			expect(mockPostMessage).toHaveBeenCalledWith({
+				type: "showTaskWithId",
+				text: "stamped-child",
+			})
+		})
+
+		it("should link each of several stamped results to its own child", () => {
+			const firstResult = {
+				ts: 1001,
+				type: "say" as const,
+				say: "subtask_result" as const,
+				text: "Result 1",
+				childTaskId: "child-alpha",
+			}
+			const secondResult = {
+				ts: 1003,
+				type: "say" as const,
+				say: "subtask_result" as const,
+				text: "Result 2",
+				childTaskId: "child-beta",
+			}
+			const clineMessages = [firstResult, secondResult] as ClineMessage[]
+
+			renderChatRow(secondResult, { completedByChildId: "child-beta" }, clineMessages)
+
+			fireEvent.click(screen.getByText("Go to subtask"))
+
+			expect(mockPostMessage).toHaveBeenCalledWith({
+				type: "showTaskWithId",
+				text: "child-beta",
+			})
+		})
+
+		it("should resolve an unstamped result via its stamped newTask row", () => {
+			const newTaskMessage = {
+				ts: 1000,
+				type: "ask" as const,
+				ask: "tool" as const,
+				text: JSON.stringify({ tool: "newTask", mode: "code", content: "Do work" }),
+				childTaskId: "stamped-child",
+			}
+			const resultMessage = {
+				ts: 1001,
+				type: "say" as const,
+				say: "subtask_result" as const,
+				text: "Result",
+			}
+
+			renderChatRow(resultMessage, { childIds: [], completedByChildId: "stale-child" }, [
+				newTaskMessage,
+				resultMessage,
+			] as ClineMessage[])
+
+			fireEvent.click(screen.getByText("Go to subtask"))
+
+			expect(mockPostMessage).toHaveBeenCalledWith({
+				type: "showTaskWithId",
+				text: "stamped-child",
+			})
+		})
+	})
+
+	describe("rejected delegations", () => {
+		it("should link a stamped newTask row correctly when an earlier ask was rejected", () => {
+			const rejectedNewTask = {
+				ts: 1000,
+				type: "ask" as const,
+				ask: "tool" as const,
+				text: JSON.stringify({ tool: "newTask", mode: "code", content: "Rejected work" }),
+			}
+			const approvedNewTask = {
+				ts: 1001,
+				type: "ask" as const,
+				ask: "tool" as const,
+				text: JSON.stringify({ tool: "newTask", mode: "code", content: "Approved work" }),
+				childTaskId: "real-child",
+			}
+
+			// `childIds` holds one entry while two `newTask` rows exist, so index matching
+			// would resolve the approved row to nothing.
+			renderChatRow(approvedNewTask, { childIds: ["real-child"] }, [
+				rejectedNewTask,
+				approvedNewTask,
+			] as ClineMessage[])
+
+			fireEvent.click(screen.getByText("Go to subtask"))
+
+			expect(mockPostMessage).toHaveBeenCalledWith({
+				type: "showTaskWithId",
+				text: "real-child",
+			})
+		})
 	})
 })

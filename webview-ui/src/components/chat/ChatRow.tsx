@@ -109,6 +109,67 @@ function getPreviousTodos(messages: ClineMessage[], currentMessageTs: number): a
 	return []
 }
 
+function isNewTaskAsk(message: ClineMessage): boolean {
+	if (message.type !== "ask" || message.ask !== "tool") {
+		return false
+	}
+
+	return safeJsonParse<ClineSayTool>(message.text)?.tool === "newTask"
+}
+
+// Resolves which child task a delegation row refers to.
+//
+// The message's own `childTaskId` is authoritative: it is stamped when the child is
+// created. Positional matching against `childIds` is only a fallback for history
+// written before that stamp existed, and drifts when a delegation was rejected or
+// re-issued because `childIds` then holds fewer entries than there are `newTask` rows.
+//
+// In the fallback path, `childIds` is appended in delegation order, so the Nth
+// `newTask` row maps to `childIds[N]`. A `subtask_result` row reports the outcome of
+// the most recent preceding `newTask` row, so it resolves to that same id. Counting
+// `newTask` rows up to (and including) the current row handles both cases, and stays
+// correct when a `subtask_result` is separated from its `newTask` row by other
+// messages such as `resume_task` or `user_feedback`.
+function getDelegatedChildTaskId(
+	messages: ClineMessage[],
+	currentMessageTs: number,
+	childIds: string[],
+): string | undefined {
+	const currentMessageIndex = messages.findIndex((msg) => msg.ts === currentMessageTs)
+
+	if (currentMessageIndex === -1) {
+		return undefined
+	}
+
+	const stampedChildTaskId = messages[currentMessageIndex].childTaskId
+
+	if (stampedChildTaskId) {
+		return stampedChildTaskId
+	}
+
+	// A `subtask_result` predating the stamp still resolves via its originating
+	// `newTask` row, which may itself carry the stamp.
+	let newTaskCount = 0
+	let precedingNewTaskChildId: string | undefined
+
+	for (let messageIndex = 0; messageIndex <= currentMessageIndex; messageIndex++) {
+		if (isNewTaskAsk(messages[messageIndex])) {
+			newTaskCount++
+			// Deliberately not retained across rows: an older row's stamp says nothing
+			// about this one, so an unstamped `newTask` row must fall through to `childIds`.
+			precedingNewTaskChildId = messages[messageIndex].childTaskId
+		}
+	}
+
+	if (newTaskCount === 0) {
+		return undefined
+	}
+
+	return messages[currentMessageIndex].say === "subtask_result" && precedingNewTaskChildId
+		? precedingNewTaskChildId
+		: childIds[newTaskCount - 1]
+}
+
 interface ChatRowProps {
 	message: ClineMessage
 	lastModifiedMessage?: ClineMessage
@@ -831,23 +892,11 @@ export const ChatRowContent = ({
 					</>
 				)
 			case "newTask":
-				// Find all newTask messages to determine which child task ID corresponds to this message
-				const newTaskMessages = clineMessages.filter((msg) => {
-					if (msg.type === "ask" && msg.ask === "tool") {
-						const t = safeJsonParse<ClineSayTool>(msg.text)
-						return t?.tool === "newTask"
-					}
-					return false
-				})
-				const thisNewTaskIndex = newTaskMessages.findIndex((msg) => msg.ts === message.ts)
-				const childIds = currentTaskItem?.childIds || []
-
 				// Only get the child task ID if this newTask has been approved (has a corresponding entry in childIds)
 				// This prevents showing a link to a previous task when the current newTask is still awaiting approval
 				// Note: We don't use delegatedToId here because it persists after child tasks complete and would
 				// incorrectly point to the previous task when a new newTask is awaiting approval
-				const childTaskId =
-					thisNewTaskIndex >= 0 && thisNewTaskIndex < childIds.length ? childIds[thisNewTaskIndex] : undefined
+				const childTaskId = getDelegatedChildTaskId(clineMessages, message.ts, currentTaskItem?.childIds || [])
 
 				// Check if the next message is a subtask_result - if so, don't show the button
 				// since the result is displayed right after this message
@@ -1021,8 +1070,13 @@ export const ChatRowContent = ({
 						/>
 					)
 				case "subtask_result":
-					// Get the child task ID that produced this result
-					const completedChildTaskId = currentTaskItem?.completedByChildId
+					// Get the child task ID that produced this result.
+					// `completedByChildId` only ever holds the most recently completed child, so it is
+					// used as a fallback for legacy history items that predate `childIds`. Relying on it
+					// alone made every subtask result in a task link to the last child task.
+					const completedChildTaskId =
+						getDelegatedChildTaskId(clineMessages, message.ts, currentTaskItem?.childIds || []) ??
+						currentTaskItem?.completedByChildId
 					return (
 						<div className="border-l border-muted-foreground/80 ml-2 pl-4 pt-2 pb-1 -mt-5">
 							<div style={headerStyle}>
