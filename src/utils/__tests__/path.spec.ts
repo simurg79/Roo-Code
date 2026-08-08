@@ -9,6 +9,7 @@ import * as path from "path"
 // against a `resolve.alias` mapping.
 import * as vscodeMock from "vscode"
 
+import { Package } from "../../shared/package"
 import { arePathsEqual, getReadablePath, getWorkspacePath, getWorkspacePathForContext } from "../path"
 
 // Loose typing for the mock object — the file is plain JS and exposes a
@@ -32,13 +33,13 @@ const mockWindow = (
 ).window
 
 /**
- * Set the value returned for `roo-cline.workspace.rootResolution` in tests.
+ * Set the value returned for `<Package.name>.workspace.rootResolution` in tests.
  * Pass `undefined` to fall back to the default ("activeEditor").
  */
 function setRootResolution(value: "activeEditor" | "firstFolder" | undefined) {
 	mockWorkspace.getConfiguration = (section?: string) => ({
 		get: (key: string, defaultValue?: unknown) => {
-			if (section === "roo-cline" && key === "workspace.rootResolution") {
+			if (section === Package.name && key === "workspace.rootResolution") {
 				return value ?? defaultValue
 			}
 			return defaultValue
@@ -54,19 +55,24 @@ function withWorkspaceMock(opts: {
 	folders?: Array<{ uri: { fsPath: string }; name: string; index: number }> | undefined
 	getWorkspaceFolder?: (...args: unknown[]) => { uri: { fsPath: string } } | null | undefined
 	activeEditor?: { document: { uri: { fsPath: string } } } | null
+	getConfiguration?: (section?: string) => { get: (key: string, defaultValue?: unknown) => unknown }
 }): () => void {
 	const previousFolders = mockWorkspace.workspaceFolders
 	const previousGetWorkspaceFolder = mockWorkspace.getWorkspaceFolder
 	const previousActiveEditor = mockWindow.activeTextEditor
+	// Captured so a test that installs a throwing/custom config mock cannot leak it into siblings.
+	const previousGetConfiguration = mockWorkspace.getConfiguration
 
 	if ("folders" in opts) mockWorkspace.workspaceFolders = opts.folders
 	if (opts.getWorkspaceFolder) mockWorkspace.getWorkspaceFolder = opts.getWorkspaceFolder
 	if ("activeEditor" in opts) mockWindow.activeTextEditor = opts.activeEditor ?? null
+	if (opts.getConfiguration) mockWorkspace.getConfiguration = opts.getConfiguration
 
 	return () => {
 		mockWorkspace.workspaceFolders = previousFolders
 		mockWorkspace.getWorkspaceFolder = previousGetWorkspaceFolder
 		mockWindow.activeTextEditor = previousActiveEditor
+		mockWorkspace.getConfiguration = previousGetConfiguration
 	}
 }
 
@@ -203,17 +209,35 @@ describe("Path Utilities", () => {
 		})
 
 		it("falls back to default behavior when reading the setting throws", () => {
-			mockWorkspace.getConfiguration = () => {
-				throw new Error("not available in this context")
-			}
 			const restore = withWorkspaceMock({
 				folders: [{ uri: { fsPath: "/test/workspace" }, name: "test", index: 0 }],
 				activeEditor: { document: { uri: { fsPath: "/test/workspaceFolder/file.ts" } } },
 				getWorkspaceFolder: () => ({ uri: { fsPath: "/test/workspaceFolder" } }),
+				getConfiguration: () => {
+					throw new Error("not available in this context")
+				},
 			})
 			try {
 				// Should not throw and should resolve via active-editor logic.
 				expect(getWorkspacePath()).toBe("/test/workspaceFolder")
+			} finally {
+				restore()
+			}
+		})
+
+		it("reads the setting from the extension's configuration section", () => {
+			const sections: Array<string | undefined> = []
+			const restore = withWorkspaceMock({
+				folders: [{ uri: { fsPath: "/test/workspace" }, name: "test", index: 0 }],
+				activeEditor: null,
+				getConfiguration: (section?: string) => {
+					sections.push(section)
+					return { get: (_key: string, defaultValue?: unknown) => defaultValue }
+				},
+			})
+			try {
+				getWorkspacePath()
+				expect(sections).toContain(Package.name)
 			} finally {
 				restore()
 			}
