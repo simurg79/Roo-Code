@@ -55,7 +55,7 @@ vi.mock("vscode", () => {
 })
 
 import * as vscode from "vscode"
-import { openAiModelInfoSaneDefaults, vscodeLlmModels } from "@roo-code/types"
+import { openAiModelInfoSaneDefaults, vscodeLlmDefaultModelId, vscodeLlmModels } from "@roo-code/types"
 import {
 	VsCodeLmHandler,
 	extractLeakedToolCalls,
@@ -122,13 +122,41 @@ describe("VsCodeLmHandler", () => {
 			opusHandler.dispose()
 		})
 
-		it("falls back to the live model context window for families not in the static table", () => {
-			// "test-family" isn't in vscodeLlmModels; with a live client present we fall back to
-			// getModel().info.contextWindow (the live maxInputTokens).
+		it("falls back to the default-row maxInputTokens for an unknown family (catalog drift)", () => {
+			// "test-family" isn't a curated row, so the gate resolves the default row rather than
+			// trusting the live window, which VS Code inflates for some models.
 			handler["client"] = mockLanguageModelChat as unknown as vscode.LanguageModelChat
 
-			expect(handler.getCondenseContextWindow()).toBe(handler.getModel().info.contextWindow)
-			expect(handler.getCondenseContextWindow()).toBe(mockLanguageModelChat.maxInputTokens)
+			expect(handler.getCondenseContextWindow()).toBe(vscodeLlmModels[vscodeLlmDefaultModelId].maxInputTokens)
+		})
+
+		it("falls back to the default-row maxInputTokens when no family is resolvable", () => {
+			const noFamilyHandler = new VsCodeLmHandler({ vsCodeLmModelSelector: { vendor: "copilot" } })
+			noFamilyHandler["client"] = null
+
+			expect(noFamilyHandler.getCondenseContextWindow()).toBe(
+				vscodeLlmModels[vscodeLlmDefaultModelId].maxInputTokens,
+			)
+
+			noFamilyHandler.dispose()
+		})
+
+		it("falls back to the live window when the static row's maxInputTokens is non-positive", () => {
+			const family = "claude-opus-4.8"
+			const original = vscodeLlmModels[family].maxInputTokens
+			try {
+				;(vscodeLlmModels[family] as { maxInputTokens: number }).maxInputTokens = 0
+				const guardHandler = new VsCodeLmHandler({
+					vsCodeLmModelSelector: { vendor: "copilot", family },
+				})
+				guardHandler["client"] = null
+
+				expect(guardHandler.getCondenseContextWindow()).toBe(guardHandler.getModel().info.contextWindow)
+
+				guardHandler.dispose()
+			} finally {
+				;(vscodeLlmModels[family] as { maxInputTokens: number }).maxInputTokens = original
+			}
 		})
 	})
 

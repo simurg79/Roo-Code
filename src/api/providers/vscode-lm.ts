@@ -2,7 +2,7 @@ import { Anthropic } from "@anthropic-ai/sdk"
 import * as vscode from "vscode"
 import OpenAI from "openai"
 
-import { type ModelInfo, openAiModelInfoSaneDefaults, vscodeLlmModels } from "@roo-code/types"
+import { type ModelInfo, openAiModelInfoSaneDefaults, vscodeLlmDefaultModelId, vscodeLlmModels } from "@roo-code/types"
 
 import type { ApiHandlerOptions } from "../../shared/api"
 import { SELECTOR_SEPARATOR, stringifyVsCodeLmModelSelector } from "../../shared/vsCodeSelectorUtils"
@@ -922,11 +922,15 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 	 * static table's `maxInputTokens` — the same value the context bar uses via
 	 * `useSelectedModel` — so the gate and the gauge stay on one source of truth.
 	 *
-	 * Falls back to the live runtime window when the selected model isn't in the static table.
+	 * An unrecognized family (catalog drift, e.g. a selector left over from a dropped model) resolves
+	 * to the curated default row rather than the inflated live window; only a non-positive static
+	 * `maxInputTokens` falls back to the live runtime window.
 	 */
 	getCondenseContextWindow(): number {
 		const family = this.client?.family ?? this.options.vsCodeLmModelSelector?.family
-		const staticModel = family ? vscodeLlmModels[family as keyof typeof vscodeLlmModels] : undefined
+		const staticModel = family
+			? (vscodeLlmModels[family as keyof typeof vscodeLlmModels] ?? vscodeLlmModels[vscodeLlmDefaultModelId])
+			: vscodeLlmModels[vscodeLlmDefaultModelId]
 
 		if (staticModel && typeof staticModel.maxInputTokens === "number" && staticModel.maxInputTokens > 0) {
 			return staticModel.maxInputTokens
