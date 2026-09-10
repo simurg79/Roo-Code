@@ -141,6 +141,85 @@ describe("VsCodeLmHandler", () => {
 			noFamilyHandler.dispose()
 		})
 
+		it.each([
+			["gpt-6-astra", 271783],
+			["grok-4.5", 199783],
+			["grok-4.6", 199784],
+			["gemini-3.7-flash", 935783],
+			["gemini-3.8-flash", 955113],
+			["claude-opus-5", 680456],
+			["gemini-3.6-flash", 935785],
+		])("resolves %s to its measured static ceiling when the live client reports it", (family, expected) => {
+			// The live client wins over the selector, and its inflated maxInputTokens (4096 here stands in
+			// for any advertised value) must be ignored in favour of the curated row.
+			const familyHandler = new VsCodeLmHandler({
+				vsCodeLmModelSelector: { vendor: "copilot", family: "claude-sonnet-4.5" },
+			})
+			familyHandler["client"] = {
+				...mockLanguageModelChat,
+				family,
+			} as unknown as vscode.LanguageModelChat
+
+			expect(familyHandler.getCondenseContextWindow()).toBe(expected)
+			expect(familyHandler.getCondenseContextWindow()).toBe(
+				vscodeLlmModels[family as keyof typeof vscodeLlmModels].maxInputTokens,
+			)
+
+			familyHandler.dispose()
+		})
+
+		it("falls back to the claude-sonnet-4.5 row (167790) for a family absent from the table", () => {
+			// Pins the literal so a change to the default row's own window is caught here rather than
+			// silently redefining what "fallback" means for every drifted selector.
+			const unknownHandler = new VsCodeLmHandler({
+				vsCodeLmModelSelector: { vendor: "copilot", family: "gpt-9-nonexistent" },
+			})
+			unknownHandler["client"] = null
+
+			expect(vscodeLlmDefaultModelId).toBe("claude-sonnet-4.5")
+			expect(unknownHandler.getCondenseContextWindow()).toBe(167790)
+
+			unknownHandler.dispose()
+		})
+
+		it("resolves by family alone, independent of the user-selected vendor", () => {
+			// Vendor is a selection/routing concern only; the window lookup is family-keyed, so two
+			// different vendors selecting the same family MUST agree on the condense budget.
+			const copilotHandler = new VsCodeLmHandler({
+				vsCodeLmModelSelector: { vendor: "copilot", family: "gpt-6-astra" },
+			})
+			const otherVendorHandler = new VsCodeLmHandler({
+				vsCodeLmModelSelector: { vendor: "some-other-vendor", family: "gpt-6-astra" },
+			})
+
+			expect(copilotHandler.getCondenseContextWindow()).toBe(271783)
+			expect(otherVendorHandler.getCondenseContextWindow()).toBe(copilotHandler.getCondenseContextWindow())
+
+			copilotHandler.dispose()
+			otherVendorHandler.dispose()
+		})
+
+		it("leaves getModel().contextWindow on the live client window for the new families", () => {
+			// Regression guard for the split: only the condense gate reads the static table. getModel()
+			// must keep reporting the LIVE window, so the refresh is provably behavior-neutral here.
+			const liveWindow = 123456
+			const astraHandler = new VsCodeLmHandler({
+				vsCodeLmModelSelector: { vendor: "copilot", family: "gpt-6-astra" },
+			})
+			astraHandler["client"] = {
+				...mockLanguageModelChat,
+				family: "gpt-6-astra",
+				maxInputTokens: liveWindow,
+			} as unknown as vscode.LanguageModelChat
+
+			expect(astraHandler.getModel().info.contextWindow).toBe(liveWindow)
+			expect(astraHandler.getModel().info.contextWindow).not.toBe(vscodeLlmModels["gpt-6-astra"].maxInputTokens)
+			// supportsImages still comes from the static row.
+			expect(astraHandler.getModel().info.supportsImages).toBe(true)
+
+			astraHandler.dispose()
+		})
+
 		it("falls back to the live window when the static row's maxInputTokens is non-positive", () => {
 			const family = "claude-opus-4.8"
 			const original = vscodeLlmModels[family].maxInputTokens

@@ -809,6 +809,50 @@ describe("useSelectedModel", () => {
 			expect(result.current.info?.supportsImages).toBe(vscodeLlmModels[listedFamily].supportsImages)
 		})
 
+		it.each([
+			["gpt-6-astra", 271783, true],
+			["grok-4.5", 199783, false],
+			["grok-4.6", 199784, false],
+			["gemini-3.7-flash", 935783, true],
+			["gemini-3.8-flash", 955113, true],
+			["claude-opus-5", 680456, true],
+			["gemini-3.6-flash", 935785, true],
+		])("feeds the gauge %s's static maxInputTokens", (family, expected, supportsImages) => {
+			const apiConfiguration: ProviderSettings = {
+				apiProvider: "vscode-lm",
+				vsCodeLmModelSelector: { vendor: "copilot", family },
+			}
+
+			const wrapper = createWrapper()
+			const { result } = renderHook(() => useSelectedModel(apiConfiguration), { wrapper })
+
+			// The gauge denominator and the condense gate must read the SAME static row, otherwise the
+			// bar fills at a different point than the one that triggers condensing.
+			expect(result.current.info?.contextWindow).toBe(expected)
+			expect(result.current.info?.contextWindow).toBe(
+				vscodeLlmModels[family as keyof typeof vscodeLlmModels].maxInputTokens,
+			)
+			expect(result.current.info?.supportsImages).toBe(supportsImages)
+		})
+
+		it("reads the same row regardless of the user-selected vendor", () => {
+			const wrapper = createWrapper()
+			const forVendor = (vendor: string) =>
+				renderHook(
+					() =>
+						useSelectedModel({
+							apiProvider: "vscode-lm",
+							vsCodeLmModelSelector: { vendor, family: "gemini-3.8-flash" },
+						} as ProviderSettings),
+					{ wrapper },
+				).result.current
+
+			// Vendor only affects the display id; the window lookup is family-keyed.
+			expect(forVendor("copilot").info?.contextWindow).toBe(955113)
+			expect(forVendor("some-other-vendor").info?.contextWindow).toBe(955113)
+			expect(forVendor("some-other-vendor").id).toBe("some-other-vendor/gemini-3.8-flash")
+		})
+
 		it("surfaces supportsImages true for an image-capable family", () => {
 			const apiConfiguration: ProviderSettings = {
 				apiProvider: "vscode-lm",

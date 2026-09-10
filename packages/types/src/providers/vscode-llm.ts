@@ -4,34 +4,11 @@ export type VscodeLlmModelId = keyof typeof vscodeLlmModels
 
 export const vscodeLlmDefaultModelId: VscodeLlmModelId = "claude-sonnet-4.5"
 
-// Rows below were originally enumerated from `vscode.lm.selectChatModels({ vendor: "copilot" })`.
-// The VS Code LM API exposes ONLY `maxInputTokens` (there is no separate context-window field), and
-// that is the single value the runtime/condense gate enforces: getModel() sets
-// contextWindow = Math.max(0, client.maxInputTokens) in src/api/providers/vscode-lm.ts. So for every
-// row `maxInputTokens` IS the enforced context window, and `contextWindow` normally mirrors it
-// (the UI reads maxInputTokens via useSelectedModel.ts). Rows whose advertised window is known to
-// exceed the measured ceiling deliberately diverge: contextWindow records what Copilot advertises
-// while maxInputTokens carries the value the backend actually accepts.
-// These ceilings were measured empirically on 2026-06-18 (VS Code 1.125.0) by binary-searching the
-// single-message "Message exceeds token limit" threshold per model — they are the largest input the
-// backend actually accepts, which for several models is well below the value Copilot advertises:
-//   - claude-opus-4.8:                                   enforced 679560
-//   - claude-opus-4.7 / 4.6, claude-sonnet-4.6,
-//     gemini-3.1-pro-preview, gemini-3.5-flash:          enforced ~197.9K
-//   - gpt-5.5 / gpt-5.4:                                 enforced ~268.4K
-// Additions measured 2026-07-14 (VS Code 1.126.0) with the same single-message binary search:
-//   - claude-sonnet-5:                                   enforced 925449 (near-full window, unlike the older ~197.9K claude rows)
-//   - gpt-5.6-luna:                                      enforced 199753
-//   - gpt-5.6-sol / gpt-5.6-terra:                       enforced 271785
-// Additions sourced 2026-07-26 from the Copilot model-picker cache (`chat.cachedLanguageModels` in
-// VS Code's User/globalStorage/state.vscdb), which persists the metadata `selectChatModels` returns:
-//   - claude-opus-5 / gemini-3.6-flash:                  advertised 935793, NOT yet binary-searched
-// Those two rows keep 935793 in contextWindow as the advertised window, but pin maxInputTokens to
-// 197897 — the lowest enforced ceiling measured on any row here. Trusting an unverified advertised
-// window would overflow the request and hard-fail mid-task, so the conservative floor is used until
-// a binary search establishes the real ceiling (mirrors the claude-opus-4.8 divergence above).
-// Guardrail: these are empirically measured — re-measure (do not hand-tune) if the models change.
-// See GitHub issue simurg79/Roo-Code#10 and myplans/VSCode LM Model Table Integrity/vscode_lm_opus_data_integrity_design.md.
+// contextWindow = advertised window; maxInputTokens = measured single-message accepted ceiling, and
+// it is what the condense gate and the context gauge enforce — so the two deliberately diverge where
+// advertised exceeds measured. Values MUST be re-measured, never hand-tuned or borrowed from a
+// sibling row. Per-row evidence, lower-bound and vendor caveats:
+// myplans/vscode-lm-model-table-integrity/vscode-lm-model-table-integrity-design.md
 export const vscodeLlmModels = {
 	"claude-opus-5": {
 		contextWindow: 935793,
@@ -43,7 +20,7 @@ export const vscodeLlmModels = {
 		version: "claude-opus-5",
 		name: "Claude Opus 5",
 		supportsToolCalling: true,
-		maxInputTokens: 197897,
+		maxInputTokens: 680456,
 	},
 	"claude-opus-4.8": {
 		contextWindow: 679560,
@@ -140,6 +117,18 @@ export const vscodeLlmModels = {
 		name: "Claude Haiku 4.5",
 		supportsToolCalling: true,
 		maxInputTokens: 135790,
+	},
+	"gpt-6-astra": {
+		contextWindow: 871793,
+		supportsImages: true,
+		supportsPromptCache: false,
+		inputPrice: 0,
+		outputPrice: 0,
+		family: "gpt-6-astra",
+		version: "gpt-6-astra",
+		name: "GPT-6 Astra",
+		supportsToolCalling: true,
+		maxInputTokens: 271783,
 	},
 	"gpt-5.6-luna": {
 		contextWindow: 199753,
@@ -249,6 +238,58 @@ export const vscodeLlmModels = {
 		supportsToolCalling: true,
 		maxInputTokens: 12078,
 	},
+	"grok-4.6": {
+		contextWindow: 424794,
+		// Grok image requests failed with a nondiagnostic HTTP 400, so support is unknown; false is a
+		// deliberate disable pending evidence, not a measured absence of capability.
+		supportsImages: false,
+		supportsPromptCache: false,
+		inputPrice: 0,
+		outputPrice: 0,
+		family: "grok-4.6",
+		version: "grok-4.6",
+		name: "Grok 4.6",
+		supportsToolCalling: true,
+		maxInputTokens: 199784,
+	},
+	"grok-4.5": {
+		contextWindow: 424794,
+		// See grok-4.6 above: images disabled pending evidence, not proven unsupported.
+		supportsImages: false,
+		supportsPromptCache: false,
+		inputPrice: 0,
+		outputPrice: 0,
+		family: "grok-4.5",
+		version: "grok-4.5",
+		name: "Grok 4.5",
+		supportsToolCalling: true,
+		maxInputTokens: 199783,
+	},
+	"gemini-3.8-flash": {
+		contextWindow: 982833,
+		supportsImages: true,
+		supportsPromptCache: false,
+		inputPrice: 0,
+		outputPrice: 0,
+		family: "gemini-3.8-flash",
+		version: "gemini-3.8-flash",
+		name: "Gemini 3.8 Flash",
+		supportsToolCalling: true,
+		// Largest accepted trial with no rejection observed: a lower bound, not a measured ceiling.
+		maxInputTokens: 955113,
+	},
+	"gemini-3.7-flash": {
+		contextWindow: 935793,
+		supportsImages: true,
+		supportsPromptCache: false,
+		inputPrice: 0,
+		outputPrice: 0,
+		family: "gemini-3.7-flash",
+		version: "gemini-3.7-flash",
+		name: "Gemini 3.7 Flash",
+		supportsToolCalling: true,
+		maxInputTokens: 935783,
+	},
 	"gemini-3.6-flash": {
 		contextWindow: 935793,
 		supportsImages: true,
@@ -259,7 +300,7 @@ export const vscodeLlmModels = {
 		version: "gemini-3.6-flash",
 		name: "Gemini 3.6 Flash",
 		supportsToolCalling: true,
-		maxInputTokens: 197897,
+		maxInputTokens: 935785,
 	},
 	"gemini-3.1-pro-preview": {
 		contextWindow: 197897,
