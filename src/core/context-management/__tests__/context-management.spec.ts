@@ -1596,7 +1596,7 @@ describe("Context Management", () => {
 		})
 
 		it("should include lastMessageTokens in the calculation", () => {
-			// Usage is measured against available input space (contextWindow - maxTokens = 70000).
+			// Opt-in denominator: available input space (contextWindow - maxTokens = 70000).
 			// Without lastMessageTokens: 34000 / 70000 ~= 49%
 			// With lastMessageTokens: (34000 + 2000) / 70000 ~= 51%
 			const resultWithoutLastMessage = willManageContext({
@@ -1608,6 +1608,7 @@ describe("Context Management", () => {
 				profileThresholds: {},
 				currentProfileId: "default",
 				lastMessageTokens: 0,
+				useAvailableInputForContextPercent: true,
 			})
 			expect(resultWithoutLastMessage).toBe(false)
 
@@ -1620,21 +1621,22 @@ describe("Context Management", () => {
 				profileThresholds: {},
 				currentProfileId: "default",
 				lastMessageTokens: 2000, // Pushes usage just over the 50% threshold
+				useAvailableInputForContextPercent: true,
 			})
 			expect(resultWithLastMessage).toBe(true)
 		})
 	})
 
 	/**
-	 * Regression: the condense percentage must be measured against the AVAILABLE input
-	 * space (contextWindow - reservedForOutput), not the full contextWindow. This is the
-	 * real vscode-lm / claude-opus-4.8 failure: with a large window and a meaningful output
-	 * reserve, the old full-window denominator under-reported usage and condensation never
-	 * fired even though the UI gauge showed the context as effectively full.
+	 * Regression: with the opt-in flag on (vscode-lm only), the condense percentage is measured
+	 * against the AVAILABLE input space (contextWindow - reservedForOutput), not the full
+	 * contextWindow. This is the real vscode-lm / claude-opus-4.8 failure: with a large window and
+	 * a meaningful output reserve, the full-window denominator under-reported usage and
+	 * condensation never fired even though the UI gauge showed the context as effectively full.
 	 * See myplans/VSCode LM Model Table Integrity/vscode_lm_opus_data_integrity_design.md and
 	 * GitHub issue simurg79/Roo-Code#10.
 	 */
-	describe("contextPercent uses available input space (regression)", () => {
+	describe("contextPercent uses available input space (opt-in, regression)", () => {
 		const createModelInfo = (contextWindow: number, maxTokens?: number): ModelInfo => ({
 			contextWindow,
 			supportsPromptCache: true,
@@ -1665,6 +1667,7 @@ describe("Context Management", () => {
 				profileThresholds: {},
 				currentProfileId: "default",
 				lastMessageTokens: 0,
+				useAvailableInputForContextPercent: true,
 			})
 			expect(result).toBe(true)
 		})
@@ -1682,6 +1685,7 @@ describe("Context Management", () => {
 				profileThresholds: {},
 				currentProfileId: "default",
 				lastMessageTokens: 0,
+				useAvailableInputForContextPercent: true,
 			})
 			expect(result).toBe(true)
 		})
@@ -1701,6 +1705,7 @@ describe("Context Management", () => {
 				profileThresholds: {},
 				currentProfileId: "default",
 				lastMessageTokens: 0,
+				useAvailableInputForContextPercent: true,
 			})
 			expect(result).toBe(true)
 		})
@@ -1738,6 +1743,7 @@ describe("Context Management", () => {
 				taskId,
 				profileThresholds: {},
 				currentProfileId: "default",
+				useAvailableInputForContextPercent: true,
 			})
 
 			expect(summarizeSpy).toHaveBeenCalled()
@@ -1745,6 +1751,73 @@ describe("Context Management", () => {
 				messages: mockSummarizeResponse.messages,
 				summary: mockSummary,
 			})
+
+			summarizeSpy.mockRestore()
+		})
+	})
+
+	/**
+	 * Scoping: the available-input denominator is opt-in (vscode-lm only). Every other provider
+	 * keeps dividing by the full context window. The maxTokens <= 0 reserve guard stays global.
+	 */
+	describe("contextPercent denominator is opt-in (default = full window)", () => {
+		const messages: ApiMessage[] = [
+			{ role: "user", content: "First message" },
+			{ role: "assistant", content: "Second message" },
+			{ role: "user", content: "Third message" },
+			{ role: "assistant", content: "Fourth message" },
+			{ role: "user", content: "" },
+		]
+
+		it("willManageContext divides by the full window when the flag is omitted", () => {
+			// Same inputs as the opt-in case above: 100000/200000 = 50% < 70, so it must NOT fire.
+			const result = willManageContext({
+				totalTokens: 100000,
+				contextWindow: 200000,
+				maxTokens: 64000,
+				autoCondenseContext: true,
+				autoCondenseContextPercent: 70,
+				profileThresholds: {},
+				currentProfileId: "default",
+				lastMessageTokens: 0,
+			})
+			expect(result).toBe(false)
+		})
+
+		it("keeps the maxTokens:-1 reserve guard on the default (full-window) path", () => {
+			const result = willManageContext({
+				totalTokens: 85000,
+				contextWindow: 100000,
+				maxTokens: -1,
+				autoCondenseContext: false,
+				autoCondenseContextPercent: 50,
+				profileThresholds: {},
+				currentProfileId: "default",
+				lastMessageTokens: 0,
+			})
+			expect(result).toBe(true)
+		})
+
+		it("manageContext does NOT summarize on the default path where the opt-in math would have", async () => {
+			const summarizeSpy = vi.spyOn(condenseModule, "summarizeConversation")
+
+			const result = await manageContext({
+				messages,
+				totalTokens: 100000,
+				contextWindow: 200000,
+				maxTokens: 64000,
+				apiHandler: mockApiHandler,
+				autoCondenseContext: true,
+				autoCondenseContextPercent: 70,
+				systemPrompt: "System prompt",
+				taskId,
+				profileThresholds: {},
+				currentProfileId: "default",
+			})
+
+			expect(summarizeSpy).not.toHaveBeenCalled()
+			expect(result.summary).toBe("")
+			expect(result.prevContextTokens).toBe(100000)
 
 			summarizeSpy.mockRestore()
 		})

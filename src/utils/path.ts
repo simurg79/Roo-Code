@@ -2,6 +2,8 @@ import * as path from "path"
 import os from "os"
 import * as vscode from "vscode"
 
+import { Package } from "../shared/package"
+
 /*
 The Node.js 'path' module resolves and normalizes paths differently depending on the platform:
 - On Windows, it uses backslashes (\) as the default path separator.
@@ -121,14 +123,14 @@ export const toRelativePath = (filePath: string, cwd: string) => {
  *   (`vscode.workspace.workspaceFolders[0]`). Deterministic — independent of
  *   which file is currently focused.
  *
- * Surfaced to users via the `roo-cline.workspace.rootResolution` setting.
+ * Surfaced to users via the `<extension>.workspace.rootResolution` setting.
  */
 export type WorkspaceRootResolution = "activeEditor" | "firstFolder"
 
 const DEFAULT_ROOT_RESOLUTION: WorkspaceRootResolution = "activeEditor"
 
 /**
- * Read the `roo-cline.workspace.rootResolution` setting safely.
+ * Read the `<extension>.workspace.rootResolution` setting safely.
  *
  * Wrapped in try/catch because:
  *   1. `vscode.workspace.getConfiguration` is unavailable in some test/CLI
@@ -138,11 +140,8 @@ const DEFAULT_ROOT_RESOLUTION: WorkspaceRootResolution = "activeEditor"
  */
 function getRootResolutionStrategy(): WorkspaceRootResolution {
 	try {
-		// Read directly from the `roo-cline` section to avoid importing
-		// `Package` here (path.ts is a low-level utility and we want to keep
-		// it free of circular dependencies on shared/* and package.json).
 		const value = vscode.workspace
-			.getConfiguration("roo-cline")
+			.getConfiguration(Package.name)
 			.get<string>("workspace.rootResolution", DEFAULT_ROOT_RESOLUTION)
 		return value === "firstFolder" ? "firstFolder" : DEFAULT_ROOT_RESOLUTION
 	} catch {
