@@ -294,6 +294,40 @@ describe.each([[RepoPerTaskCheckpointService, "RepoPerTaskCheckpointService"]])(
 				await expect(fs.readFile(untrackedFile, "utf-8")).rejects.toThrow()
 			})
 
+			it("does not modify the workspace when restoring a missing commit", async () => {
+				await fs.writeFile(testFile, "Committed content")
+				const commit = await service.saveCheckpoint("Checkpoint before loss")
+				expect(commit?.commit).toBeTruthy()
+
+				// Uncommitted user work that `git clean` would have destroyed.
+				const untrackedFile = path.join(service.workspaceDir, "precious-untracked.txt")
+				await fs.writeFile(untrackedFile, "Unsaved user work")
+				await fs.writeFile(testFile, "Uncommitted edit")
+
+				const missingCommitHash = "0".repeat(40)
+				await expect(service.restoreCheckpoint(missingCommitHash)).rejects.toThrow(
+					/checkpoint no longer exists/i,
+				)
+
+				expect(await fs.readFile(untrackedFile, "utf-8")).toBe("Unsaved user work")
+				expect(await fs.readFile(testFile, "utf-8")).toBe("Uncommitted edit")
+			})
+
+			it("still restores normally to a valid commit", async () => {
+				await fs.writeFile(testFile, "Checkpointed content")
+				const commit = await service.saveCheckpoint("Valid checkpoint")
+				expect(commit?.commit).toBeTruthy()
+
+				await fs.writeFile(testFile, "Later edit")
+				const laterTrackedFile = path.join(service.workspaceDir, "created-after.txt")
+				await fs.writeFile(laterTrackedFile, "Created after checkpoint")
+				await service.saveCheckpoint("After checkpoint")
+
+				await service.restoreCheckpoint(commit!.commit)
+				expect(await fs.readFile(testFile, "utf-8")).toBe("Checkpointed content")
+				await expect(fs.readFile(laterTrackedFile, "utf-8")).rejects.toThrow()
+			})
+
 			it("does not create a checkpoint for ignored files", async () => {
 				// Create a file that matches an ignored pattern (e.g., .log file).
 				const ignoredFile = path.join(service.workspaceDir, "ignored.log")
