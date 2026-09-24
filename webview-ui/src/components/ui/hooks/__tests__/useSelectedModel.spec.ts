@@ -810,7 +810,7 @@ describe("useSelectedModel", () => {
 		})
 
 		it.each([
-			["gpt-6-astra", 271783, true],
+			["gpt-6-astra", 271789, true],
 			["grok-4.5", 199783, false],
 			["grok-4.6", 199784, false],
 			["gemini-3.7-flash", 935783, true],

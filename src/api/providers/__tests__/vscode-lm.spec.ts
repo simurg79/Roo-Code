@@ -142,7 +142,7 @@ describe("VsCodeLmHandler", () => {
 		})
 
 		it.each([
-			["gpt-6-astra", 271783],
+			["gpt-6-astra", 271789],
 			["grok-4.5", 199783],
 			["grok-4.6", 199784],
 			["gemini-3.7-flash", 935783],
@@ -192,7 +192,7 @@ describe("VsCodeLmHandler", () => {
 				vsCodeLmModelSelector: { vendor: "some-other-vendor", family: "gpt-6-astra" },
 			})
 
-			expect(copilotHandler.getCondenseContextWindow()).toBe(271783)
+			expect(copilotHandler.getCondenseContextWindow()).toBe(271789)
 			expect(otherVendorHandler.getCondenseContextWindow()).toBe(copilotHandler.getCondenseContextWindow())
 
 			copilotHandler.dispose()

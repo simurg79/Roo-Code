@@ -2,9 +2,9 @@ import { describe, it, expect } from "vitest"
 
 import { vscodeLlmModels, vscodeLlmDefaultModelId } from "../providers/vscode-llm.js"
 
-// The five families added and the two refreshed on 2026-09-10 (VS Code 1.137.0).
+// The five families added and the two refreshed on 2026-09-10 (VS Code 1.137.0), with Astra remeasured 2026-09-23.
 const SCOPED_ROWS = {
-	"gpt-6-astra": { contextWindow: 871793, maxInputTokens: 271783, supportsImages: true },
+	"gpt-6-astra": { contextWindow: 921793, maxInputTokens: 271789, supportsImages: true },
 	"grok-4.5": { contextWindow: 424794, maxInputTokens: 199783, supportsImages: false },
 	"grok-4.6": { contextWindow: 424794, maxInputTokens: 199784, supportsImages: false },
 	"gemini-3.7-flash": { contextWindow: 935793, maxInputTokens: 935783, supportsImages: true },
@@ -71,12 +71,13 @@ describe("vscodeLlmModels", () => {
 			expect(model.contextWindow, `${family}: contextWindow`).toBe(expected.contextWindow)
 			expect(model.supportsImages, `${family}: supportsImages`).toBe(expected.supportsImages)
 
-			// Table-wide conventions: prices are 0 because these rows carry no per-token accounting,
-			// and supportsPromptCache is false because no cache is modelled here (not a claim about
-			// the backend). Tool calling is required for Roo to function.
+			// Caching false is a schema default, not a backend claim. Keep legacy zero prices except
+			// Astra's unmeasured prices, whose omission is checked separately below.
 			expect(model.supportsPromptCache, `${family}: supportsPromptCache`).toBe(false)
-			expect(model.inputPrice, `${family}: inputPrice`).toBe(0)
-			expect(model.outputPrice, `${family}: outputPrice`).toBe(0)
+			if (family !== "gpt-6-astra") {
+				expect(model, `${family}: inputPrice`).toHaveProperty("inputPrice", 0)
+				expect(model, `${family}: outputPrice`).toHaveProperty("outputPrice", 0)
+			}
 			expect(model.supportsToolCalling, `${family}: supportsToolCalling`).toBe(true)
 
 			// Provider and gauge look rows up by the live client's family string, so the key, family
@@ -84,6 +85,41 @@ describe("vscodeLlmModels", () => {
 			expect(model.family, `${family}: family`).toBe(family)
 			expect(model.version, `${family}: version`).toBe(family)
 		}
+	})
+
+	it("records the 2026-09-23 Opus 5.5 row at its verified accepted lower bound", () => {
+		// 677108 is the largest ACCEPTED request over 13 trials (VS Code 1.137.0, copilot), not the
+		// exact ceiling — 695778 was rejected and model-declined errors left the bracket open.
+		// Images and tool calling were observed; prompt caching remains unverified.
+		expect(vscodeLlmModels).toHaveProperty("claude-opus-5.5")
+		expect(vscodeLlmModels["claude-opus-5.5"].maxInputTokens).toBe(677108)
+		expect(vscodeLlmModels["claude-opus-5.5"].contextWindow).toBe(871793)
+		expect(vscodeLlmModels["claude-opus-5.5"].family).toBe("claude-opus-5.5")
+		expect(vscodeLlmModels["claude-opus-5.5"].version).toBe("claude-opus-5.5")
+		expect(vscodeLlmModels["claude-opus-5.5"].name).toBe("Claude Opus 5.5")
+		expect(vscodeLlmModels["claude-opus-5.5"].supportsImages).toBe(true)
+		expect(vscodeLlmModels["claude-opus-5.5"].supportsToolCalling).toBe(true)
+		expect(vscodeLlmModels["claude-opus-5.5"].supportsPromptCache).toBe(false)
+		expect(vscodeLlmModels["claude-opus-5.5"].inputPrice).toBe(0)
+		expect(vscodeLlmModels["claude-opus-5.5"].outputPrice).toBe(0)
+	})
+
+	it("records the 2026-09-23 measured GPT-6 Astra row without unmeasured pricing or caching claims", () => {
+		// 271789 accepted with an adjacent rejection at 271790 over 20 trials; images and tool calling
+		// observed. supportsPromptCache `false` is the required-schema default, NOT a verified result.
+		const astra = vscodeLlmModels["gpt-6-astra"]
+		expect(astra.maxInputTokens).toBe(271789)
+		expect(astra.contextWindow).toBe(921793)
+		expect(astra.family).toBe("gpt-6-astra")
+		expect(astra.version).toBe("gpt-6-astra")
+		expect(astra.name).toBe("GPT-6 Astra")
+		expect(astra.supportsImages).toBe(true)
+		expect(astra.supportsToolCalling).toBe(true)
+		expect(astra.supportsPromptCache).toBe(false)
+		// Pricing was never measured, and ModelInfo makes those fields optional, so they are omitted
+		// rather than filled with zeros the way older hand-authored rows were.
+		expect(astra).not.toHaveProperty("inputPrice")
+		expect(astra).not.toHaveProperty("outputPrice")
 	})
 
 	it("keeps both window fields populated and positive for every row", () => {

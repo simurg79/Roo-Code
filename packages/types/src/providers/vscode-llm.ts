@@ -10,6 +10,21 @@ export const vscodeLlmDefaultModelId: VscodeLlmModelId = "claude-sonnet-4.5"
 // sibling row. Per-row evidence, lower-bound and vendor caveats:
 // myplans/vscode-lm-model-table-integrity/vscode-lm-model-table-integrity-design.md
 export const vscodeLlmModels = {
+	// Measured 2026-09-23, VS Code 1.137.0/copilot, 13 trials: accepted 677108, rejected 695778.
+	// Refusals prevent an exact ceiling; keep the accepted lower bound rather than a sibling limit.
+	// Image/tool inputs succeeded; caching `false` is an unverified schema-required default.
+	"claude-opus-5.5": {
+		contextWindow: 871793,
+		supportsImages: true,
+		supportsPromptCache: false,
+		inputPrice: 0,
+		outputPrice: 0,
+		family: "claude-opus-5.5",
+		version: "claude-opus-5.5",
+		name: "Claude Opus 5.5",
+		supportsToolCalling: true,
+		maxInputTokens: 677108,
+	},
 	"claude-opus-5": {
 		contextWindow: 935793,
 		supportsImages: true,
@@ -118,17 +133,17 @@ export const vscodeLlmModels = {
 		supportsToolCalling: true,
 		maxInputTokens: 135790,
 	},
+	// Measured 2026-09-23, VS Code 1.137.0/copilot, 20-trial binary search: 271789 accepted, 271790 rejected.
+	// Image/tool inputs succeeded; caching `false` is an unverified schema-required default.
 	"gpt-6-astra": {
-		contextWindow: 871793,
+		contextWindow: 921793,
 		supportsImages: true,
 		supportsPromptCache: false,
-		inputPrice: 0,
-		outputPrice: 0,
 		family: "gpt-6-astra",
 		version: "gpt-6-astra",
 		name: "GPT-6 Astra",
 		supportsToolCalling: true,
-		maxInputTokens: 271783,
+		maxInputTokens: 271789,
 	},
 	"gpt-5.6-luna": {
 		contextWindow: 199753,
