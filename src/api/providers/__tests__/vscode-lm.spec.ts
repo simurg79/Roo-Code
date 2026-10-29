@@ -142,13 +142,26 @@ describe("VsCodeLmHandler", () => {
 		})
 
 		it.each([
-			["gpt-6-astra", 271789],
+			["gpt-6-astra", 266789],
 			["grok-4.5", 199783],
 			["grok-4.6", 199784],
 			["gemini-3.7-flash", 935783],
 			["gemini-3.8-flash", 955113],
 			["claude-opus-5", 680456],
 			["gemini-3.6-flash", 935785],
+			["claude-sonnet-5.5", 680552],
+			["claude-haiku-5.5", 99784],
+			["grok-4.7", 199751],
+			["gemini-4-argon", 953064],
+			["vscModelF", 921736],
+			["oswe-vscode-modelD", 127783],
+			["gpt-6.1-sol", 269903],
+			["gpt-5.6-sol-fast", 269903],
+			["gpt-6.1-terra", 269123],
+			["gpt-6-luna", 269122],
+			["gpt-6-sol", 269122],
+			["claude-fable-5.1", 660686],
+			["claude-fable-5", 658785],
 		])("resolves %s to its measured static ceiling when the live client reports it", (family, expected) => {
 			// The live client wins over the selector, and its inflated maxInputTokens (4096 here stands in
 			// for any advertised value) must be ignored in favour of the curated row.
@@ -192,7 +205,7 @@ describe("VsCodeLmHandler", () => {
 				vsCodeLmModelSelector: { vendor: "some-other-vendor", family: "gpt-6-astra" },
 			})
 
-			expect(copilotHandler.getCondenseContextWindow()).toBe(271789)
+			expect(copilotHandler.getCondenseContextWindow()).toBe(266789)
 			expect(otherVendorHandler.getCondenseContextWindow()).toBe(copilotHandler.getCondenseContextWindow())
 
 			copilotHandler.dispose()
@@ -623,6 +636,16 @@ describe("VsCodeLmHandler", () => {
 
 			expect(vscodeLlmModels["gpt-4o-mini"].supportsImages).toBe(false)
 			expect(handler.getModel().info.supportsImages).toBe(false)
+		})
+
+		it.each([
+			["grok-4.7", false],
+			["gpt-6.1-sol", true],
+			["claude-fable-5", true],
+		])("resolves supportsImages for the new %s row to %s", (family, expected) => {
+			handler["client"] = { ...mockLanguageModelChat, family } as unknown as vscode.LanguageModelChat
+
+			expect(handler.getModel().info.supportsImages).toBe(expected)
 		})
 
 		it("defaults supportsImages to false for a family missing from the static table", async () => {
