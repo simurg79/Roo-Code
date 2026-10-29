@@ -151,7 +151,8 @@ export const vscodeLlmModels = {
 		supportsToolCalling: true,
 		maxInputTokens: 127783,
 	},
-	// Rows below through claude-fable-5: measured 2026-10-28/29, VS Code 1.142.0/copilot; largest accepted
+	// Rows below through claude-fable-5: captured 2026-10-28 UTC (claude-fable-5: 2026-10-29 UTC),
+	// VS Code 1.142.0/copilot; largest accepted
 	// sizes with nearby explicit rejections. Image/tool requests streamed: acceptance, not understanding
 	// or tool invocation. Prices and caching are unmeasured; caching false is a schema default.
 	"gpt-6.1-sol": {

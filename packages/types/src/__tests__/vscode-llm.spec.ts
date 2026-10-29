@@ -145,7 +145,7 @@ describe("vscodeLlmModels", () => {
 		}
 	})
 
-	it("records the 2026-10-28/29 GPT and Fable rows at their accepted sizes without unmeasured pricing", () => {
+	it("records the GPT and Fable rows captured 2026-10-28 UTC (Fable 5: 2026-10-29 UTC) at their accepted sizes without unmeasured pricing", () => {
 		const expected = {
 			"gpt-6.1-sol": { contextWindow: 921793, maxInputTokens: 269903, name: "GPT-6.1 Sol" },
 			"gpt-5.6-sol-fast": {
