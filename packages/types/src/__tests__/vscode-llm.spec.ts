@@ -13,13 +13,9 @@ const SCOPED_ROWS = {
 	"gemini-3.6-flash": { contextWindow: 935793, maxInputTokens: 935785, supportsImages: true },
 } as const
 
-const REFRESHED_FAMILIES = Object.keys(SCOPED_ROWS) as Array<keyof typeof SCOPED_ROWS>
-
 describe("vscodeLlmModels", () => {
 	it("exposes the opus-4.8 row with its measured maxInputTokens and contextWindow", () => {
-		// claude-opus-4.8 intentionally DIVERGES: maxInputTokens (197897) is the enforced ceiling the
-		// UI reads, contextWindow (679560) the larger advertised window. Assert the on-disk literals
-		// rather than forcing equality.
+		// The two values differ for this row, so pin the exact stored values rather than forcing equality.
 		expect(vscodeLlmModels).toHaveProperty("claude-opus-4.8")
 		expect(vscodeLlmModels["claude-opus-4.8"].contextWindow).toBe(679560)
 		expect(vscodeLlmModels["claude-opus-4.8"].maxInputTokens).toBe(197897)
@@ -51,16 +47,6 @@ describe("vscodeLlmModels", () => {
 		expect(vscodeLlmModels["claude-opus-5"].contextWindow).toBe(935793)
 		expect(vscodeLlmModels["gemini-3.6-flash"].maxInputTokens).toBe(935785)
 		expect(vscodeLlmModels["gemini-3.6-flash"].contextWindow).toBe(935793)
-	})
-
-	it("leaves no 2026-09-10 scoped family pinned to the 197897 placeholder", () => {
-		// Untouched rows (e.g. claude-opus-4.7) legitimately still measure 197897, so this guard is
-		// limited to the families this refresh touched.
-		for (const family of REFRESHED_FAMILIES) {
-			expect(vscodeLlmModels[family].maxInputTokens, `${family} must not be the 197897 placeholder`).not.toBe(
-				197897,
-			)
-		}
 	})
 
 	it("pins every 2026-09-10 row's windows and capability flags", () => {
