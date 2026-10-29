@@ -1,5 +1,27 @@
 # Roo Code Changelog
 
+## 3.54.0
+
+### Minor Changes
+
+- Remove: Roo Code Cloud and eval infrastructure from the extension, CLI, workflows, and package surfaces so the release is focused on the standalone extension (PR #12328 by @mrubens)
+- Remove: All telemetry collection and analytics plumbing across the extension, website, shared types, provider flows, and related tests (PR #12324 by @mrubens)
+- Remove: MDM and organization membership enforcement, including host wiring, webview state, user-facing messages, and locale strings (PR #12323 by @mrubens)
+- Remove: The MCP marketplace, marketplace services, webview marketplace UI, package contributions, and related localized copy (PR #12326 by @mrubens)
+- Update: Extension-facing support, diagnostics, and announcement content for the final Roo Code release, including GitHub help paths and links to Roomote, ZooCode, and Cline (PR #12341 by @brunobergher)
+- Add: A cleaned docs app with GitHub Pages deployment support (PR #12344 by @brunobergher)
+- Fix: Configure the docs GitHub Pages base URL so deployed assets and canonical paths load correctly under the repository Pages path (PR #12370 by @mrubens)
+- Update: Point docs links in the root README, localized READMEs, and web app copy to the current GitHub Pages docs URL (PR #12371 by @mrubens)
+- Remove: Stale `roocode.github.io` docs references, including the old CNAME and outdated docs README and robots.txt URLs (PR #12372 by @mrubens)
+- Update: The website to focus almost entirely on the Roo Code extension and remove cloud, team, enterprise, provider, pricing, Slack, and Linear product pages (PR #12180 by @brunobergher)
+- Remove: Contributor, community, social channel, and tutorial references from README files, docs, website copy, issue templates, and workflows (PR #12347 by @brunobergher)
+- Add image input support to the VS Code Language Model (vscode-lm) provider. Base64 image blocks are now sent as native `LanguageModelDataPart` image parts instead of text placeholders, and image capability is reported from the curated model family table. This raises the minimum supported VS Code version to 1.106.0, the first release where `LanguageModelDataPart` is available in the stable API.
+
+### Patch Changes
+
+- Fix `apply_diff` error reporting so failed diffs are fixable in a single retry. When several diff blocks fail, all of them are now reported together (with per-block labels, the first few in full detail and the rest summarized) instead of only the last one. A mistyped start-line marker such as `:3` in place of `:start_line:3` is now called out as the likely cause, replacing the misleading "the file content may have changed" advice. When only some blocks apply, the response now says how many applied and asks for only the failed blocks to be resent, and includes the actual errors instead of an instruction that could not work.
+- Fix unreliable automatic context condensing on the VS Code LM (vscode-lm) provider. The condense gate now treats the provider's `maxTokens: -1` (unlimited) as the default output reserve and measures usage against available input space, and a new `getCondenseContextWindow()` seam makes the gate use the curated model `maxInputTokens` instead of the inflated live window. Also refreshes the VS Code LM model catalog and default model.
+
 ## 3.53.0
 
 ### Minor Changes
