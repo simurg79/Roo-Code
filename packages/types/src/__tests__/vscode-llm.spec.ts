@@ -175,6 +175,20 @@ describe("vscodeLlmModels", () => {
 		}
 	})
 
+	it("pins Fable 5.5 to the user-requested Fable 5.1 values, not a measurement", () => {
+		const model = vscodeLlmModels["claude-fable-5.5"]
+		expect(model.contextWindow).toBe(935793)
+		expect(model.maxInputTokens).toBe(660686)
+		expect(model.family).toBe("claude-fable-5.5")
+		expect(model.version).toBe("claude-fable-5.5")
+		expect(model.name).toBe("Claude Fable 5.5")
+		expect(model.supportsImages).toBe(true)
+		expect(model.supportsToolCalling).toBe(true)
+		expect(model.supportsPromptCache).toBe(false)
+		expect(model).not.toHaveProperty("inputPrice")
+		expect(model).not.toHaveProperty("outputPrice")
+	})
+
 	it("keeps both window fields populated and positive for every row", () => {
 		// The two fields are ALLOWED to differ (claude-opus-4.8: 679560 vs 197897), so equality is
 		// deliberately NOT asserted. The invariant is positive integers on both fields; a missing or

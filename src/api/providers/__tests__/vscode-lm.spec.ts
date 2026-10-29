@@ -162,7 +162,8 @@ describe("VsCodeLmHandler", () => {
 			["gpt-6-sol", 269122],
 			["claude-fable-5.1", 660686],
 			["claude-fable-5", 658785],
-		])("resolves %s to its measured static ceiling when the live client reports it", (family, expected) => {
+			["claude-fable-5.5", 660686],
+		])("resolves %s to its assigned static budget when the live client reports it", (family, expected) => {
 			// The live client wins over the selector, and its inflated maxInputTokens (4096 here stands in
 			// for any advertised value) must be ignored in favour of the curated row.
 			const familyHandler = new VsCodeLmHandler({

@@ -4,8 +4,10 @@ export type VscodeLlmModelId = keyof typeof vscodeLlmModels
 
 export const vscodeLlmDefaultModelId: VscodeLlmModelId = "claude-sonnet-4.5"
 
-// contextWindow is advertised; maxInputTokens is the assigned input budget, not necessarily a measured ceiling.
+// contextWindow is advertised except for claude-fable-5.5, whose window is borrowed.
+// maxInputTokens is the assigned input budget, not necessarily a measured ceiling.
 // Budgets MUST use measured acceptances; documented safety margins may only lower them, never raise or borrow values.
+// Sole user-approved exception: claude-fable-5.5 borrows claude-fable-5.1's window and budget, not measured for 5.5.
 // [Per-row evidence, lower-bound and vendor caveats](/myplans/vscode-lm-model-table-integrity/vscode-lm-model-table-integrity-design.md)
 export const vscodeLlmModels = {
 	// Measured 2026-09-23, VS Code 1.137.0/copilot, 13 trials: accepted 677108, rejected 695778.
@@ -221,6 +223,17 @@ export const vscodeLlmModels = {
 		name: "Claude Fable 5",
 		supportsToolCalling: true,
 		maxInputTokens: 658785,
+	},
+	// Values copied from claude-fable-5.1 at the user's request; not measured for claude-fable-5.5.
+	"claude-fable-5.5": {
+		contextWindow: 935793,
+		supportsImages: true,
+		supportsPromptCache: false,
+		family: "claude-fable-5.5",
+		version: "claude-fable-5.5",
+		name: "Claude Fable 5.5",
+		supportsToolCalling: true,
+		maxInputTokens: 660686,
 	},
 	"claude-sonnet-5": {
 		contextWindow: 925449,
