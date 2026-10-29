@@ -4,7 +4,7 @@ import { vscodeLlmModels, vscodeLlmDefaultModelId } from "../providers/vscode-ll
 
 // The five families added and the two refreshed on 2026-09-10 (VS Code 1.137.0), with Astra remeasured 2026-09-23.
 const SCOPED_ROWS = {
-	"gpt-6-astra": { contextWindow: 921793, maxInputTokens: 271789, supportsImages: true },
+	"gpt-6-astra": { contextWindow: 921793, maxInputTokens: 266789, supportsImages: true },
 	"grok-4.5": { contextWindow: 424794, maxInputTokens: 199783, supportsImages: false },
 	"grok-4.6": { contextWindow: 424794, maxInputTokens: 199784, supportsImages: false },
 	"gemini-3.7-flash": { contextWindow: 935793, maxInputTokens: 935783, supportsImages: true },
@@ -104,11 +104,10 @@ describe("vscodeLlmModels", () => {
 		expect(vscodeLlmModels["claude-opus-5.5"].outputPrice).toBe(0)
 	})
 
-	it("records the 2026-09-23 measured GPT-6 Astra row without unmeasured pricing or caching claims", () => {
-		// 271789 accepted with an adjacent rejection at 271790 over 20 trials; images and tool calling
-		// observed. supportsPromptCache `false` is the required-schema default, NOT a verified result.
+	it("records GPT-6 Astra with a 5K safety margin and without unmeasured pricing or caching claims", () => {
+		// Includes a 5K safety margin below the accepted 271789; caching false remains a schema default.
 		const astra = vscodeLlmModels["gpt-6-astra"]
-		expect(astra.maxInputTokens).toBe(271789)
+		expect(astra.maxInputTokens).toBe(266789)
 		expect(astra.contextWindow).toBe(921793)
 		expect(astra.family).toBe("gpt-6-astra")
 		expect(astra.version).toBe("gpt-6-astra")
@@ -120,6 +119,74 @@ describe("vscodeLlmModels", () => {
 		// rather than filled with zeros the way older hand-authored rows were.
 		expect(astra).not.toHaveProperty("inputPrice")
 		expect(astra).not.toHaveProperty("outputPrice")
+	})
+
+	it("records the 2026-10-28 rows at their measured accepted sizes without unmeasured pricing", () => {
+		const expected = {
+			"claude-sonnet-5.5": { contextWindow: 871793, maxInputTokens: 680552, supportsImages: true },
+			"claude-haiku-5.5": { contextWindow: 871793, maxInputTokens: 99784, supportsImages: true },
+			"grok-4.7": { contextWindow: 424794, maxInputTokens: 199751, supportsImages: false },
+			"gemini-4-argon": { contextWindow: 982833, maxInputTokens: 953064, supportsImages: true },
+			vscModelF: { contextWindow: 921790, maxInputTokens: 921736, supportsImages: true },
+			"oswe-vscode-modelD": { contextWindow: 127790, maxInputTokens: 127783, supportsImages: true },
+		} as const
+
+		for (const [family, row] of Object.entries(expected)) {
+			const model = vscodeLlmModels[family as keyof typeof expected]
+			expect(model.maxInputTokens, `${family}: maxInputTokens`).toBe(row.maxInputTokens)
+			expect(model.contextWindow, `${family}: contextWindow`).toBe(row.contextWindow)
+			expect(model.supportsImages, `${family}: supportsImages`).toBe(row.supportsImages)
+			expect(model.supportsToolCalling, `${family}: supportsToolCalling`).toBe(true)
+			expect(model.supportsPromptCache, `${family}: supportsPromptCache`).toBe(false)
+			expect(model.family, `${family}: family`).toBe(family)
+			expect(model.version, `${family}: version`).toBe(family)
+			expect(model, `${family}: inputPrice`).not.toHaveProperty("inputPrice")
+			expect(model, `${family}: outputPrice`).not.toHaveProperty("outputPrice")
+		}
+	})
+
+	it("records the GPT and Fable rows captured 2026-10-28 UTC (Fable 5: 2026-10-29 UTC) at their accepted sizes without unmeasured pricing", () => {
+		const expected = {
+			"gpt-6.1-sol": { contextWindow: 921793, maxInputTokens: 269903, name: "GPT-6.1 Sol" },
+			"gpt-5.6-sol-fast": {
+				contextWindow: 921793,
+				maxInputTokens: 269903,
+				name: "GPT-5.6 Sol Fast (Internal only)",
+			},
+			"gpt-6.1-terra": { contextWindow: 871793, maxInputTokens: 269123, name: "GPT-6.1 Terra" },
+			"gpt-6-luna": { contextWindow: 871793, maxInputTokens: 269122, name: "GPT-6 Luna" },
+			"gpt-6-sol": { contextWindow: 871793, maxInputTokens: 269122, name: "GPT-6 Sol" },
+			"claude-fable-5.1": { contextWindow: 935793, maxInputTokens: 660686, name: "Claude Fable 5.1" },
+			"claude-fable-5": { contextWindow: 935793, maxInputTokens: 658785, name: "Claude Fable 5" },
+		} as const
+
+		for (const [family, row] of Object.entries(expected)) {
+			const model = vscodeLlmModels[family as keyof typeof expected]
+			expect(model.maxInputTokens, `${family}: maxInputTokens`).toBe(row.maxInputTokens)
+			expect(model.contextWindow, `${family}: contextWindow`).toBe(row.contextWindow)
+			expect(model.name, `${family}: name`).toBe(row.name)
+			expect(model.supportsImages, `${family}: supportsImages`).toBe(true)
+			expect(model.supportsToolCalling, `${family}: supportsToolCalling`).toBe(true)
+			expect(model.supportsPromptCache, `${family}: supportsPromptCache`).toBe(false)
+			expect(model.family, `${family}: family`).toBe(family)
+			expect(model.version, `${family}: version`).toBe(family)
+			expect(model, `${family}: inputPrice`).not.toHaveProperty("inputPrice")
+			expect(model, `${family}: outputPrice`).not.toHaveProperty("outputPrice")
+		}
+	})
+
+	it("pins Fable 5.5 to the user-requested Fable 5.1 values, not a measurement", () => {
+		const model = vscodeLlmModels["claude-fable-5.5"]
+		expect(model.contextWindow).toBe(935793)
+		expect(model.maxInputTokens).toBe(660686)
+		expect(model.family).toBe("claude-fable-5.5")
+		expect(model.version).toBe("claude-fable-5.5")
+		expect(model.name).toBe("Claude Fable 5.5")
+		expect(model.supportsImages).toBe(true)
+		expect(model.supportsToolCalling).toBe(true)
+		expect(model.supportsPromptCache).toBe(false)
+		expect(model).not.toHaveProperty("inputPrice")
+		expect(model).not.toHaveProperty("outputPrice")
 	})
 
 	it("keeps both window fields populated and positive for every row", () => {

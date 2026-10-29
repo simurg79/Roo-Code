@@ -4,11 +4,11 @@ export type VscodeLlmModelId = keyof typeof vscodeLlmModels
 
 export const vscodeLlmDefaultModelId: VscodeLlmModelId = "claude-sonnet-4.5"
 
-// contextWindow = advertised window; maxInputTokens = measured single-message accepted ceiling, and
-// it is what the condense gate and the context gauge enforce — so the two deliberately diverge where
-// advertised exceeds measured. Values MUST be re-measured, never hand-tuned or borrowed from a
-// sibling row. Per-row evidence, lower-bound and vendor caveats:
-// myplans/vscode-lm-model-table-integrity/vscode-lm-model-table-integrity-design.md
+// contextWindow is advertised except for claude-fable-5.5, whose window is borrowed.
+// maxInputTokens is the assigned input budget, not necessarily a measured ceiling.
+// Budgets MUST use measured acceptances; documented safety margins may only lower them, never raise or borrow values.
+// Sole user-approved exception: claude-fable-5.5 borrows claude-fable-5.1's window and budget, not measured for 5.5.
+// [Per-row evidence, lower-bound and vendor caveats](/myplans/vscode-lm-model-table-integrity/vscode-lm-model-table-integrity-design.md)
 export const vscodeLlmModels = {
 	// Measured 2026-09-23, VS Code 1.137.0/copilot, 13 trials: accepted 677108, rejected 695778.
 	// Refusals prevent an exact ceiling; keep the accepted lower bound rather than a sibling limit.
@@ -85,6 +85,157 @@ export const vscodeLlmModels = {
 		supportsToolCalling: true,
 		maxInputTokens: 167790,
 	},
+	// Rows below through oswe-vscode-modelD: measured 2026-10-28, VS Code 1.142.0/copilot; maxInputTokens is
+	// an explicitly accepted size (the smaller when repeated). Prices and caching are unmeasured.
+	"claude-sonnet-5.5": {
+		contextWindow: 871793,
+		supportsImages: true,
+		supportsPromptCache: false,
+		family: "claude-sonnet-5.5",
+		version: "claude-sonnet-5.5",
+		name: "Claude Sonnet 5.5",
+		supportsToolCalling: true,
+		maxInputTokens: 680552,
+	},
+	"claude-haiku-5.5": {
+		contextWindow: 871793,
+		supportsImages: true,
+		supportsPromptCache: false,
+		family: "claude-haiku-5.5",
+		version: "claude-haiku-5.5",
+		name: "Claude Haiku 5.5",
+		supportsToolCalling: true,
+		maxInputTokens: 99784,
+	},
+	"grok-4.7": {
+		contextWindow: 424794,
+		// Image request failed with a nondiagnostic HTTP 400: disabled pending evidence.
+		supportsImages: false,
+		supportsPromptCache: false,
+		family: "grok-4.7",
+		version: "grok-4.7",
+		name: "Grok 4.7",
+		supportsToolCalling: true,
+		maxInputTokens: 199751,
+	},
+	"gemini-4-argon": {
+		contextWindow: 982833,
+		supportsImages: true,
+		supportsPromptCache: false,
+		family: "gemini-4-argon",
+		version: "gemini-4-argon",
+		name: "Gemini 4 Argon",
+		supportsToolCalling: true,
+		// Accepted at the advertised target; no observed rejection, so only a lower bound.
+		maxInputTokens: 953064,
+	},
+	// Provider lookups need the live family key, not the user-facing id mai-code-2-flash.
+	vscModelF: {
+		contextWindow: 921790,
+		supportsImages: true,
+		supportsPromptCache: false,
+		family: "vscModelF",
+		version: "vscModelF",
+		name: "MAI-Code-2-Flash (Preview)",
+		supportsToolCalling: true,
+		maxInputTokens: 921736,
+	},
+	// Live family string; the user-facing id is mai-code-1.1-flash.
+	"oswe-vscode-modelD": {
+		contextWindow: 127790,
+		supportsImages: true,
+		supportsPromptCache: false,
+		family: "oswe-vscode-modelD",
+		version: "oswe-vscode-modelD",
+		name: "MAI-Code-1.1-Flash",
+		supportsToolCalling: true,
+		maxInputTokens: 127783,
+	},
+	// Rows below through claude-fable-5: captured 2026-10-28 UTC (claude-fable-5: 2026-10-29 UTC),
+	// VS Code 1.142.0/copilot; largest accepted
+	// sizes with nearby explicit rejections. Image/tool requests streamed: acceptance, not understanding
+	// or tool invocation. Prices and caching are unmeasured; caching false is a schema default.
+	"gpt-6.1-sol": {
+		contextWindow: 921793,
+		supportsImages: true,
+		supportsPromptCache: false,
+		family: "gpt-6.1-sol",
+		version: "gpt-6.1-sol",
+		name: "GPT-6.1 Sol",
+		supportsToolCalling: true,
+		maxInputTokens: 269903,
+	},
+	"gpt-5.6-sol-fast": {
+		contextWindow: 921793,
+		supportsImages: true,
+		supportsPromptCache: false,
+		family: "gpt-5.6-sol-fast",
+		version: "gpt-5.6-sol-fast",
+		name: "GPT-5.6 Sol Fast (Internal only)",
+		supportsToolCalling: true,
+		maxInputTokens: 269903,
+	},
+	"gpt-6.1-terra": {
+		contextWindow: 871793,
+		supportsImages: true,
+		supportsPromptCache: false,
+		family: "gpt-6.1-terra",
+		version: "gpt-6.1-terra",
+		name: "GPT-6.1 Terra",
+		supportsToolCalling: true,
+		maxInputTokens: 269123,
+	},
+	"gpt-6-luna": {
+		contextWindow: 871793,
+		supportsImages: true,
+		supportsPromptCache: false,
+		family: "gpt-6-luna",
+		version: "gpt-6-luna",
+		name: "GPT-6 Luna",
+		supportsToolCalling: true,
+		maxInputTokens: 269122,
+	},
+	"gpt-6-sol": {
+		contextWindow: 871793,
+		supportsImages: true,
+		supportsPromptCache: false,
+		family: "gpt-6-sol",
+		version: "gpt-6-sol",
+		name: "GPT-6 Sol",
+		supportsToolCalling: true,
+		maxInputTokens: 269122,
+	},
+	"claude-fable-5.1": {
+		contextWindow: 935793,
+		supportsImages: true,
+		supportsPromptCache: false,
+		family: "claude-fable-5.1",
+		version: "claude-fable-5.1",
+		name: "Claude Fable 5.1",
+		supportsToolCalling: true,
+		maxInputTokens: 660686,
+	},
+	"claude-fable-5": {
+		contextWindow: 935793,
+		supportsImages: true,
+		supportsPromptCache: false,
+		family: "claude-fable-5",
+		version: "claude-fable-5",
+		name: "Claude Fable 5",
+		supportsToolCalling: true,
+		maxInputTokens: 658785,
+	},
+	// Values copied from claude-fable-5.1 at the user's request; not measured for claude-fable-5.5.
+	"claude-fable-5.5": {
+		contextWindow: 935793,
+		supportsImages: true,
+		supportsPromptCache: false,
+		family: "claude-fable-5.5",
+		version: "claude-fable-5.5",
+		name: "Claude Fable 5.5",
+		supportsToolCalling: true,
+		maxInputTokens: 660686,
+	},
 	"claude-sonnet-5": {
 		contextWindow: 925449,
 		supportsImages: true,
@@ -133,7 +284,8 @@ export const vscodeLlmModels = {
 		supportsToolCalling: true,
 		maxInputTokens: 135790,
 	},
-	// Measured 2026-09-23, VS Code 1.137.0/copilot, 20-trial binary search: 271789 accepted, 271790 rejected.
+	// Measured 2026-09-23, VS Code 1.137.0/copilot: 271789 accepted, 271790 rejected.
+	// maxInputTokens is 266789: measured 271789 minus a 5K safety margin.
 	// Image/tool inputs succeeded; caching `false` is an unverified schema-required default.
 	"gpt-6-astra": {
 		contextWindow: 921793,
@@ -143,7 +295,7 @@ export const vscodeLlmModels = {
 		version: "gpt-6-astra",
 		name: "GPT-6 Astra",
 		supportsToolCalling: true,
-		maxInputTokens: 271789,
+		maxInputTokens: 266789,
 	},
 	"gpt-5.6-luna": {
 		contextWindow: 199753,
