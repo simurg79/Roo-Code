@@ -63,6 +63,7 @@
 		"codeIndexingNotConfigured": "Tidak dapat membuat layanan: Pengindeksan kode tidak dikonfigurasi dengan benar"
 	},
 	"orchestrator": {
+		"parserFailed": "Pengindeksan kode berhenti saat mengurai {{filePath}} ({{category}}). Perbaiki file lalu mulai pengindeksan secara manual untuk mencoba lagi, atau nonaktifkan pengindeksan. Ini bukan kesalahan model/penyedia.",
 		"indexingFailedNoBlocks": "Pengindeksan gagal: Tidak ada blok kode yang berhasil diindeks. Ini biasanya menunjukkan masalah konfigurasi embedder.",
 		"indexingFailedCritical": "Pengindeksan gagal: Tidak ada blok kode yang berhasil diindeks meskipun menemukan file untuk diproses. Ini menunjukkan kegagalan kritis embedder.",
 		"fileWatcherStarted": "Pemantau file dimulai.",

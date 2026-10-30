@@ -63,6 +63,7 @@
 		"codeIndexingNotConfigured": "Impossibile creare i servizi: L'indicizzazione del codice non è configurata correttamente"
 	},
 	"orchestrator": {
+		"parserFailed": "L’indicizzazione del codice si è interrotta durante l’analisi di {{filePath}} ({{category}}). Correggi il file e avvia esplicitamente l’indicizzazione per riprovare, oppure disattivala. Non è un errore del modello o del provider.",
 		"indexingFailedNoBlocks": "Indicizzazione fallita: Nessun blocco di codice è stato indicizzato con successo. Questo di solito indica un problema di configurazione dell'embedder.",
 		"indexingFailedCritical": "Indicizzazione fallita: Nessun blocco di codice è stato indicizzato con successo nonostante siano stati trovati file da elaborare. Questo indica un errore critico dell'embedder.",
 		"fileWatcherStarted": "Monitoraggio file avviato.",

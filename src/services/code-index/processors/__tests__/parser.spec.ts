@@ -30,6 +30,7 @@ const mockLanguageParser = {
 	js: {
 		parser: {
 			parse: vi.fn((content: string) => ({
+				delete: vi.fn(),
 				rootNode: {
 					text: content,
 					startPosition: { row: 0 },
@@ -54,6 +55,41 @@ describe("CodeParser", () => {
 		;(loadRequiredLanguageParsers as any).mockResolvedValue(mockLanguageParser as any)
 		// Set up default fs.readFile mock return value
 		vi.mocked(readFile).mockResolvedValue("// default test content")
+	})
+
+	it("releases a tree even when query extraction throws", async () => {
+		const release = vi.fn()
+		const failure = new Error("memory access out of bounds")
+		;(loadRequiredLanguageParsers as any).mockResolvedValue({
+			js: {
+				parser: { parse: () => ({ rootNode: {}, delete: release }) },
+				query: {
+					captures: () => {
+						throw failure
+					},
+				},
+			},
+		})
+		await expect(parser.parseFile("test.js", { content: "function example() { return 123 }" })).rejects.toBe(
+			failure,
+		)
+		expect(release).toHaveBeenCalledOnce()
+	})
+
+	it("keeps fallback chunking scaling proportional to input size", () => {
+		const source = "const example = value => value.toUpperCase();\n".repeat(750)
+		const measure = (content: string) => {
+			const samples: number[] = []
+			for (let sample = 0; sample < 5; sample++) {
+				const started = performance.now()
+				for (let repeat = 0; repeat < 40; repeat++) parser.fallbackContent("test.txt", content, "hash")
+				samples.push(performance.now() - started)
+			}
+			return Math.min(...samples)
+		}
+		for (let warmup = 0; warmup < 20; warmup++) parser.fallbackContent("test.txt", source, "hash")
+		const baseline = measure(source)
+		expect(measure(source.repeat(4)) / baseline).toBeLessThan(9)
 	})
 
 	describe("parseFile", () => {

@@ -63,6 +63,7 @@
 		"codeIndexingNotConfigured": "No es poden crear serveis: La indexació de codi no està configurada correctament"
 	},
 	"orchestrator": {
+		"parserFailed": "La indexació de codi s’ha aturat en analitzar {{filePath}} ({{category}}). Corregeix el fitxer i inicia la indexació explícitament per tornar-ho a provar, o desactiva-la. No és un error del model o proveïdor.",
 		"indexingFailedNoBlocks": "Indexació fallida: No s'ha indexat cap bloc de codi amb èxit. Això normalment indica un problema de configuració de l'embedder.",
 		"indexingFailedCritical": "Indexació fallida: No s'ha indexat cap bloc de codi amb èxit malgrat trobar fitxers per processar. Això indica una fallida crítica de l'embedder.",
 		"fileWatcherStarted": "Monitor de fitxers iniciat.",

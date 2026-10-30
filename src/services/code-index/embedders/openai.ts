@@ -45,7 +45,8 @@ export class OpenAiEmbedder extends OpenAiNativeHandler implements IEmbedder {
 	 * @param model Optional model identifier
 	 * @returns Promise resolving to embedding response
 	 */
-	async createEmbeddings(texts: string[], model?: string): Promise<EmbeddingResponse> {
+	async createEmbeddings(texts: string[], model?: string, signal?: AbortSignal): Promise<EmbeddingResponse> {
+		signal?.throwIfAborted()
 		const modelToUse = model || this.defaultModelId
 
 		// Apply model-specific query prefix if required
@@ -113,7 +114,7 @@ export class OpenAiEmbedder extends OpenAiNativeHandler implements IEmbedder {
 			}
 
 			if (currentBatch.length > 0) {
-				const batchResult = await this._embedBatchWithRetries(currentBatch, modelToUse)
+				const batchResult = await this._embedBatchWithRetries(currentBatch, modelToUse, signal)
 				allEmbeddings.push(...batchResult.embeddings)
 				usage.promptTokens += batchResult.usage.promptTokens
 				usage.totalTokens += batchResult.usage.totalTokens
@@ -132,13 +133,18 @@ export class OpenAiEmbedder extends OpenAiNativeHandler implements IEmbedder {
 	private async _embedBatchWithRetries(
 		batchTexts: string[],
 		model: string,
+		signal?: AbortSignal,
 	): Promise<{ embeddings: number[][]; usage: { promptTokens: number; totalTokens: number } }> {
 		for (let attempts = 0; attempts < MAX_RETRIES; attempts++) {
 			try {
-				const response = await this.embeddingsClient.embeddings.create({
-					input: batchTexts,
-					model: model,
-				})
+				signal?.throwIfAborted()
+				const response = await this.embeddingsClient.embeddings.create(
+					{
+						input: batchTexts,
+						model: model,
+					},
+					signal ? { signal } : undefined,
+				)
 
 				return {
 					embeddings: response.data.map((item) => item.embedding),
@@ -148,6 +154,7 @@ export class OpenAiEmbedder extends OpenAiNativeHandler implements IEmbedder {
 					},
 				}
 			} catch (error: any) {
+				signal?.throwIfAborted()
 				const hasMoreAttempts = attempts < MAX_RETRIES - 1
 
 				// Check if it's a rate limit error

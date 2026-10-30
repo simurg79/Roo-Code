@@ -63,6 +63,7 @@
 		"codeIndexingNotConfigured": "無法建立服務：程式碼索引未正確設定"
 	},
 	"orchestrator": {
+		"parserFailed": "剖析 {{filePath}} 時，程式碼索引已停止（{{category}}）。請修正檔案並手動啟動索引以重試，或停用索引。這不是模型或供應商錯誤。",
 		"indexingFailedNoBlocks": "索引失敗：沒有程式碼區塊被成功索引。這通常表示 Embedder 設定問題。",
 		"indexingFailedCritical": "索引失敗：儘管找到了要處理的檔案，但沒有程式碼區塊被成功索引。這表示 Embedder 出現嚴重故障。",
 		"fileWatcherStarted": "檔案監控已啟動。",

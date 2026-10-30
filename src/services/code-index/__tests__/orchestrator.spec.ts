@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest"
 import { CodeIndexOrchestrator } from "../orchestrator"
+import { ParserFatalError } from "../parser-errors"
 
 // Mock vscode workspace so startIndexing passes workspace check
 vi.mock("vscode", () => {
@@ -92,6 +93,80 @@ describe("CodeIndexOrchestrator - error path cleanup gating", () => {
 			onDidFinishBatchProcessing: vi.fn().mockReturnValue({ dispose: vi.fn() }),
 			dispose: vi.fn(),
 		}
+	})
+
+	it.each([false, true])(
+		"fail-stops a fatal parser during initial/incremental scan (%s), preserves data and drops late callbacks",
+		async (existing) => {
+			vectorStore.initialize.mockResolvedValue(false)
+			vectorStore.hasIndexedData.mockResolvedValue(existing)
+			let lateProgress!: (count: number) => void
+			scanner.scanDirectory.mockImplementation(
+				async (_path: string, _error: unknown, progress: (count: number) => void) => {
+					lateProgress = progress
+					throw new ParserFatalError("parser-abort", "bad.ts")
+				},
+			)
+			const parser = { stop: vi.fn() }
+			const failed = vi.fn()
+			const stopped = vi.fn()
+			const orchestrator = new CodeIndexOrchestrator(
+				configManager,
+				stateManager,
+				workspacePath,
+				cacheManager,
+				vectorStore,
+				scanner,
+				fileWatcher,
+				parser,
+				failed,
+				stopped,
+			)
+			await orchestrator.startIndexing()
+			expect(stateManager.state).toBe("Error")
+			expect(failed).toHaveBeenCalledOnce()
+			expect(parser.stop).toHaveBeenCalledOnce()
+			expect(fileWatcher.dispose).toHaveBeenCalledOnce()
+			expect(cacheManager.clearCacheFile).not.toHaveBeenCalled()
+			expect(vectorStore.clearCollection).not.toHaveBeenCalled()
+			lateProgress(100)
+			expect(stateManager.reportBlockIndexingProgress).not.toHaveBeenCalled()
+			await orchestrator.startIndexing()
+			expect(scanner.scanDirectory).toHaveBeenCalledOnce()
+		},
+	)
+
+	it("fail-stops watcher parsing once and ignores captured late progress", async () => {
+		vectorStore.initialize.mockResolvedValue(false)
+		vectorStore.hasIndexedData.mockResolvedValue(true)
+		scanner.scanDirectory.mockResolvedValue({ stats: { processed: 0, skipped: 0 }, totalBlockCount: 0 })
+		let fatal!: (error: ParserFatalError) => void
+		fileWatcher.onParserFatal = vi.fn((listener) => {
+			fatal = listener
+			return { dispose: vi.fn() }
+		})
+		const failed = vi.fn()
+		const parser = { stop: vi.fn() }
+		const orchestrator = new CodeIndexOrchestrator(
+			configManager,
+			stateManager,
+			workspacePath,
+			cacheManager,
+			vectorStore,
+			scanner,
+			fileWatcher,
+			parser,
+			failed,
+		)
+		await orchestrator.startIndexing()
+		const progress = fileWatcher.onBatchProgressUpdate.mock.calls[0][0]
+		fatal(new ParserFatalError("parse-timeout", "hang.ts"))
+		fatal(new ParserFatalError("parser-abort", "other.ts"))
+		progress({ processedInBatch: 1, totalInBatch: 1 })
+		expect(failed).toHaveBeenCalledOnce()
+		expect(stateManager.state).toBe("Error")
+		expect(stateManager.reportFileQueueProgress).not.toHaveBeenCalled()
+		expect(parser.stop).toHaveBeenCalledOnce()
 	})
 
 	it("should not call clearCollection() or clear cache when initialize() fails (indexing not started)", async () => {

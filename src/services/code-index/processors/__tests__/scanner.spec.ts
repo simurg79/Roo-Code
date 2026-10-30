@@ -2,6 +2,8 @@
 
 import { DirectoryScanner } from "../scanner"
 import { stat } from "fs/promises"
+import { ParserFatalError } from "../../parser-errors"
+import { IndexWriteGate } from "../../index-write-gate"
 
 vi.mock("fs/promises", () => ({
 	default: {
@@ -386,6 +388,128 @@ describe("DirectoryScanner", () => {
 			expect(points[2].payload.segmentHash).toBe("unique-segment-hash-3")
 		})
 
+		it.each(["success", "abort", "failure"])(
+			"keeps a multi-batch file incomplete until every batch succeeds: %s",
+			async (outcome) => {
+				const { listFiles } = await import("../../../glob/list-files")
+				vi.mocked(listFiles).mockResolvedValue([["test/file.js"], false])
+				const blocks = Array.from({ length: 3 }, (_, blockNumber) => ({
+					file_path: "test/file.js",
+					content: `function block${blockNumber}() { return 1 }`,
+					start_line: blockNumber + 1,
+					end_line: blockNumber + 1,
+					identifier: null,
+					type: "function",
+					fileHash: "hash",
+					segmentHash: `segment-${blockNumber}`,
+				}))
+				mockCodeParser.parseFile.mockResolvedValue(blocks)
+				let release!: () => void
+				const held = new Promise<void>((resolve) => {
+					release = resolve
+				})
+				mockVectorStore.upsertPoints.mockImplementation(async (points: any[]) => {
+					if (points[0].payload.segmentHash === "segment-0") {
+						await held
+						if (outcome === "failure") throw new Error("store failure")
+					}
+				})
+				const controller = new AbortController()
+				const scanner = new DirectoryScanner(
+					mockEmbedder,
+					mockVectorStore,
+					mockCodeParser,
+					mockCacheManager,
+					mockIgnoreInstance,
+					1,
+				)
+				const pending = scanner
+					.scanDirectory("/test", vi.fn(), undefined, undefined, controller.signal)
+					.catch((error) => error)
+				await vi.waitFor(() => expect(mockVectorStore.upsertPoints).toHaveBeenCalledTimes(3))
+				expect(mockCacheManager.updateHash).not.toHaveBeenCalled()
+				expect(mockVectorStore.deletePointsByFilePath).toHaveBeenCalledOnce()
+				expect(mockVectorStore.deletePointsByFilePath.mock.invocationCallOrder[0]).toBeLessThan(
+					mockVectorStore.upsertPoints.mock.invocationCallOrder[0],
+				)
+				if (outcome === "abort") controller.abort()
+				release()
+				await pending
+				if (outcome === "success") expect(mockCacheManager.updateHash).toHaveBeenCalledOnce()
+				else expect(mockCacheManager.updateHash).not.toHaveBeenCalled()
+			},
+		)
+
+		it("discards embedding results released after abort without issuing an upsert or hash", async () => {
+			const { listFiles } = await import("../../../glob/list-files")
+			vi.mocked(listFiles).mockResolvedValue([["test/file.js"], false])
+			mockCodeParser.parseFile.mockResolvedValue([
+				{
+					file_path: "test/file.js",
+					content: "function test() { return 1 }",
+					start_line: 1,
+					end_line: 1,
+					identifier: null,
+					type: "function",
+					fileHash: "hash",
+					segmentHash: "segment",
+				},
+			])
+			let release!: (value: any) => void
+			mockEmbedder.createEmbeddings.mockImplementation(
+				() =>
+					new Promise((resolve) => {
+						release = resolve
+					}),
+			)
+			const controller = new AbortController()
+			const pending = scanner
+				.scanDirectory("/test", undefined, undefined, undefined, controller.signal)
+				.catch((error) => error)
+			await vi.waitFor(() => expect(mockEmbedder.createEmbeddings).toHaveBeenCalledOnce())
+			controller.abort()
+			release({ embeddings: [[1, 2, 3]] })
+			await pending
+			expect(mockVectorStore.upsertPoints).not.toHaveBeenCalled()
+			expect(mockCacheManager.updateHash).not.toHaveBeenCalled()
+		})
+
+		it("reconciles an uncertain unchanged file before replacement upserts", async () => {
+			const { listFiles } = await import("../../../glob/list-files")
+			vi.mocked(listFiles).mockResolvedValue([["test/file.js"], false])
+			const gate = new IndexWriteGate()
+			await gate
+				.run(new AbortController().signal, () => Promise.reject(new Error("timeout")), ["test/file.js"])
+				.catch(() => undefined)
+			const { createHash } = await import("crypto")
+			mockCacheManager.getHash.mockReturnValue(createHash("sha256").update("test content").digest("hex"))
+			const scanner = new DirectoryScanner(
+				mockEmbedder,
+				mockVectorStore,
+				mockCodeParser,
+				mockCacheManager,
+				mockIgnoreInstance,
+				1,
+				gate,
+			)
+			await scanner.scanDirectory("/test")
+			expect(mockCodeParser.parseFile).toHaveBeenCalledOnce()
+			expect(mockVectorStore.deletePointsByFilePath).toHaveBeenCalledWith("test/file.js")
+			expect(mockCacheManager.deleteHash).toHaveBeenCalledWith("test/file.js")
+			expect(gate.needsReconciliation("test/file.js")).toBe(false)
+		})
+
+		it("propagates fatal parser errors without treating them as per-file errors", async () => {
+			const { listFiles } = await import("../../../glob/list-files")
+			vi.mocked(listFiles).mockResolvedValue([["test/file.js"], false])
+			const fatal = new ParserFatalError("parser-abort", "test/file.js")
+			mockCodeParser.parseFile.mockRejectedValue(fatal)
+			const onError = vi.fn()
+			await expect(scanner.scanDirectory("/test", onError)).rejects.toBe(fatal)
+			expect(onError).not.toHaveBeenCalled()
+			expect(mockCacheManager.updateHash).not.toHaveBeenCalled()
+		})
+
 		it("should stop processing files when signal is aborted", async () => {
 			const { listFiles } = await import("../../../glob/list-files")
 			vi.mocked(listFiles).mockResolvedValue([["test/file1.js", "test/file2.js", "test/file3.js"], false])
@@ -394,11 +518,10 @@ describe("DirectoryScanner", () => {
 			const controller = new AbortController()
 			controller.abort()
 
-			const result = await scanner.scanDirectory("/test", undefined, undefined, undefined, controller.signal)
-
-			// No files should have been processed since signal was already aborted
+			await expect(
+				scanner.scanDirectory("/test", undefined, undefined, undefined, controller.signal),
+			).rejects.toMatchObject({ name: "AbortError" })
 			expect(mockCodeParser.parseFile).not.toHaveBeenCalled()
-			expect(result.stats.processed).toBe(0)
 		})
 
 		it("should stop processing batches when signal is aborted mid-scan", async () => {
@@ -443,7 +566,9 @@ describe("DirectoryScanner", () => {
 			const controller = new AbortController()
 			controller.abort()
 
-			await scanner.scanDirectory("/test", undefined, undefined, undefined, controller.signal)
+			await expect(
+				scanner.scanDirectory("/test", undefined, undefined, undefined, controller.signal),
+			).rejects.toMatchObject({ name: "AbortError" })
 
 			// Deleted file cleanup should not have run
 			expect(mockVectorStore.deletePointsByFilePath).not.toHaveBeenCalled()

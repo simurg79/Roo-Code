@@ -63,6 +63,7 @@
 		"codeIndexingNotConfigured": "Impossible de créer les services : L'indexation du code n'est pas correctement configurée"
 	},
 	"orchestrator": {
+		"parserFailed": "L’indexation du code s’est arrêtée pendant l’analyse de {{filePath}} ({{category}}). Corrige le fichier et relance explicitement l’indexation, ou désactive-la. Ce n’est pas une erreur de modèle ou de fournisseur.",
 		"indexingFailedNoBlocks": "Échec de l'indexation : Aucun bloc de code n'a été indexé avec succès. Cela indique généralement un problème de configuration de l'embedder.",
 		"indexingFailedCritical": "Échec de l'indexation : Aucun bloc de code n'a été indexé avec succès malgré la découverte de fichiers à traiter. Cela indique une défaillance critique de l'embedder.",
 		"fileWatcherStarted": "Surveillant de fichiers démarré.",

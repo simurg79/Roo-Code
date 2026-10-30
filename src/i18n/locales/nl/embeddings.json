@@ -63,6 +63,7 @@
 		"codeIndexingNotConfigured": "Kan geen services maken: Code-indexering is niet correct geconfigureerd"
 	},
 	"orchestrator": {
+		"parserFailed": "Code-indexering is gestopt tijdens het parseren van {{filePath}} ({{category}}). Herstel het bestand en start de indexering zelf opnieuw, of schakel indexering uit. Dit is geen model-/providerfout.",
 		"indexingFailedNoBlocks": "Indexering mislukt: Geen codeblokken werden succesvol geïndexeerd. Dit duidt meestal op een embedder configuratieprobleem.",
 		"indexingFailedCritical": "Indexering mislukt: Geen codeblokken werden succesvol geïndexeerd ondanks het vinden van bestanden om te verwerken. Dit duidt op een kritieke embedder fout.",
 		"fileWatcherStarted": "Bestandsmonitor gestart.",

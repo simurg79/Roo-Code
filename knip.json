@@ -12,7 +12,7 @@
 	],
 	"workspaces": {
 		"src": {
-			"entry": ["extension.ts"],
+			"entry": ["extension.ts", "services/code-index/parse-worker.ts"],
 			"project": ["**/*.ts"]
 		},
 		"webview-ui": {

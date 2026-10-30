@@ -63,6 +63,7 @@
 		"codeIndexingNotConfigured": "No se pueden crear servicios: La indexación de código no está configurada correctamente"
 	},
 	"orchestrator": {
+		"parserFailed": "La indexación de código se detuvo al analizar {{filePath}} ({{category}}). Corrige el archivo e inicia la indexación explícitamente para reintentar, o desactívala. No es un error del modelo o proveedor.",
 		"indexingFailedNoBlocks": "Indexación fallida: No se indexaron exitosamente bloques de código. Esto usualmente indica un problema de configuración del incrustador.",
 		"indexingFailedCritical": "Indexación fallida: No se indexaron exitosamente bloques de código a pesar de encontrar archivos para procesar. Esto indica una falla crítica del incrustador.",
 		"fileWatcherStarted": "Monitor de archivos iniciado.",

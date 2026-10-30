@@ -82,6 +82,19 @@ describe("OpenAiEmbedder", () => {
 	describe("createEmbeddings", () => {
 		const testModelId = "text-embedding-3-small"
 
+		it("passes cancellation to the SDK and does not retry an aborted request", async () => {
+			const controller = new AbortController()
+			mockEmbeddingsCreate.mockImplementation(async (_request, options) => {
+				expect((options as { signal: AbortSignal }).signal).toBe(controller.signal)
+				controller.abort()
+				throw new DOMException("Cancelled", "AbortError")
+			})
+			await expect(embedder.createEmbeddings(["text"], undefined, controller.signal)).rejects.toMatchObject({
+				name: "AbortError",
+			})
+			expect(mockEmbeddingsCreate).toHaveBeenCalledOnce()
+		})
+
 		it("should create embeddings for a single text", async () => {
 			const testTexts = ["Hello world"]
 			const mockResponse = {
@@ -92,10 +105,13 @@ describe("OpenAiEmbedder", () => {
 
 			const result = await embedder.createEmbeddings(testTexts)
 
-			expect(mockEmbeddingsCreate).toHaveBeenCalledWith({
-				input: testTexts,
-				model: testModelId,
-			})
+			expect(mockEmbeddingsCreate).toHaveBeenCalledWith(
+				{
+					input: testTexts,
+					model: testModelId,
+				},
+				undefined,
+			)
 			expect(result).toEqual({
 				embeddings: [[0.1, 0.2, 0.3]],
 				usage: { promptTokens: 10, totalTokens: 15 },
@@ -112,10 +128,13 @@ describe("OpenAiEmbedder", () => {
 
 			const result = await embedder.createEmbeddings(testTexts)
 
-			expect(mockEmbeddingsCreate).toHaveBeenCalledWith({
-				input: testTexts,
-				model: testModelId,
-			})
+			expect(mockEmbeddingsCreate).toHaveBeenCalledWith(
+				{
+					input: testTexts,
+					model: testModelId,
+				},
+				undefined,
+			)
 			expect(result).toEqual({
 				embeddings: [
 					[0.1, 0.2, 0.3],
@@ -136,10 +155,13 @@ describe("OpenAiEmbedder", () => {
 
 			await embedder.createEmbeddings(testTexts, customModel)
 
-			expect(mockEmbeddingsCreate).toHaveBeenCalledWith({
-				input: testTexts,
-				model: customModel,
-			})
+			expect(mockEmbeddingsCreate).toHaveBeenCalledWith(
+				{
+					input: testTexts,
+					model: customModel,
+				},
+				undefined,
+			)
 		})
 
 		it("should handle missing usage data gracefully", async () => {
@@ -195,10 +217,13 @@ describe("OpenAiEmbedder", () => {
 				expect(console.warn).toHaveBeenCalledWith(expect.stringContaining(`exceeds maximum token limit`))
 
 				// Verify only normal texts were processed
-				expect(mockEmbeddingsCreate).toHaveBeenCalledWith({
-					input: [normalText, "another normal"],
-					model: testModelId,
-				})
+				expect(mockEmbeddingsCreate).toHaveBeenCalledWith(
+					{
+						input: [normalText, "another normal"],
+						model: testModelId,
+					},
+					undefined,
+				)
 				expect(result.embeddings).toHaveLength(2)
 			})
 

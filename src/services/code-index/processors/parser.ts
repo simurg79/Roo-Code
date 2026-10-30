@@ -7,7 +7,7 @@ import { parseMarkdown } from "../../tree-sitter/markdownParser"
 import { ICodeParser, CodeBlock } from "../interfaces"
 import { scannerExtensions, shouldUseFallbackChunking } from "../shared/supported-extensions"
 import { MAX_BLOCK_CHARS, MIN_BLOCK_CHARS, MIN_CHUNK_REMAINDER_CHARS, MAX_CHARS_TOLERANCE_FACTOR } from "../constants"
-import { sanitizeErrorMessage } from "../shared/validation-helpers"
+import { isParserAbort, throwIfAborted } from "../parser-errors"
 
 /**
  * Implementation of the code parser interface
@@ -15,8 +15,16 @@ import { sanitizeErrorMessage } from "../shared/validation-helpers"
 export class CodeParser implements ICodeParser {
 	private loadedParsers: LanguageParser = {}
 	private pendingLoads: Map<string, Promise<LanguageParser>> = new Map()
-	// Markdown files are now supported using the custom markdown parser
-	// which extracts headers and sections for semantic indexing
+	public fallbackNeeded = false
+	constructor(
+		private readonly parseInWorker?: (
+			filePath: string,
+			content: string,
+			fileHash: string,
+			signal?: AbortSignal,
+		) => Promise<CodeBlock[]>,
+		private readonly sourceDirectory?: string,
+	) {}
 
 	/**
 	 * Parses a code file into code blocks
@@ -29,8 +37,11 @@ export class CodeParser implements ICodeParser {
 		options?: {
 			content?: string
 			fileHash?: string
+			signal?: AbortSignal
 		},
 	): Promise<CodeBlock[]> {
+		this.fallbackNeeded = false
+		throwIfAborted(options?.signal)
 		// Get file extension
 		const ext = path.extname(filePath).toLowerCase()
 
@@ -43,7 +54,7 @@ export class CodeParser implements ICodeParser {
 		let content: string
 		let fileHash: string
 
-		if (options?.content) {
+		if (options?.content !== undefined) {
 			content = options.content
 			fileHash = options.fileHash || this.createFileHash(content)
 		} else {
@@ -57,6 +68,16 @@ export class CodeParser implements ICodeParser {
 		}
 
 		// Parse the file
+		throwIfAborted(options?.signal)
+		const extension = path.extname(filePath).toLowerCase()
+		if (
+			this.parseInWorker &&
+			extension !== ".md" &&
+			extension !== ".markdown" &&
+			!shouldUseFallbackChunking(extension)
+		) {
+			return this.parseInWorker(filePath, content, fileHash, options?.signal)
+		}
 		return this.parseContent(filePath, content, fileHash)
 	}
 
@@ -85,6 +106,10 @@ export class CodeParser implements ICodeParser {
 	 * @param fileHash File hash
 	 * @returns Array of code blocks
 	 */
+	public fallbackContent(filePath: string, content: string, fileHash: string): CodeBlock[] {
+		return this._performFallbackChunking(filePath, content, fileHash, new Set())
+	}
+
 	private async parseContent(filePath: string, content: string, fileHash: string): Promise<CodeBlock[]> {
 		const ext = path.extname(filePath).slice(1).toLowerCase()
 		const seenSegmentHashes = new Set<string>()
@@ -106,11 +131,12 @@ export class CodeParser implements ICodeParser {
 				try {
 					await pendingLoad
 				} catch (error) {
+					if (isParserAbort(error)) throw error
 					console.error(`Error in pending parser load for ${filePath}:`, error)
 					return []
 				}
 			} else {
-				const loadPromise = loadRequiredLanguageParsers([filePath])
+				const loadPromise = loadRequiredLanguageParsers([filePath], this.sourceDirectory, this.sourceDirectory)
 				this.pendingLoads.set(ext, loadPromise)
 				try {
 					const newParsers = await loadPromise
@@ -118,6 +144,7 @@ export class CodeParser implements ICodeParser {
 						this.loadedParsers = { ...this.loadedParsers, ...newParsers }
 					}
 				} catch (error) {
+					if (isParserAbort(error)) throw error
 					console.error(`Error loading language parser for ${filePath}:`, error)
 					return []
 				} finally {
@@ -134,82 +161,90 @@ export class CodeParser implements ICodeParser {
 
 		const tree = language.parser.parse(content)
 
-		// We don't need to get the query string from languageQueries since it's already loaded
-		// in the language object
-		const captures = tree ? language.query.captures(tree.rootNode) : []
+		try {
+			// We don't need to get the query string from languageQueries since it's already loaded
+			// in the language object
+			const captures = tree ? language.query.captures(tree.rootNode) : []
 
-		// Check if captures are empty
-		if (captures.length === 0) {
-			if (content.length >= MIN_BLOCK_CHARS) {
-				// Perform fallback chunking if content is large enough
-				const blocks = this._performFallbackChunking(filePath, content, fileHash, seenSegmentHashes)
-				return blocks
-			} else {
-				// Return empty if content is too small for fallback
-				return []
-			}
-		}
-
-		const results: CodeBlock[] = []
-
-		// Process captures if not empty
-		const queue: Node[] = Array.from(captures).map((capture) => capture.node)
-
-		while (queue.length > 0) {
-			const currentNode = queue.shift()!
-			// const lineSpan = currentNode.endPosition.row - currentNode.startPosition.row + 1 // Removed as per lint error
-
-			// Check if the node meets the minimum character requirement
-			if (currentNode.text.length >= MIN_BLOCK_CHARS) {
-				// If it also exceeds the maximum character limit, try to break it down
-				if (currentNode.text.length > MAX_BLOCK_CHARS * MAX_CHARS_TOLERANCE_FACTOR) {
-					if (currentNode.children.filter((child) => child !== null).length > 0) {
-						// If it has children, process them instead
-						queue.push(...currentNode.children.filter((child) => child !== null))
-					} else {
-						// If it's a leaf node, chunk it
-						const chunkedBlocks = this._chunkLeafNodeByLines(
-							currentNode,
-							filePath,
-							fileHash,
-							seenSegmentHashes,
-						)
-						results.push(...chunkedBlocks)
-					}
+			// Check if captures are empty
+			if (captures.length === 0) {
+				if (this.sourceDirectory) {
+					this.fallbackNeeded = true
+					return []
+				}
+				if (content.length >= MIN_BLOCK_CHARS) {
+					// Perform fallback chunking if content is large enough
+					const blocks = this._performFallbackChunking(filePath, content, fileHash, seenSegmentHashes)
+					return blocks
 				} else {
-					// Node meets min chars and is within max chars, create a block
-					const identifier =
-						currentNode.childForFieldName("name")?.text ||
-						currentNode.children.find((c) => c?.type === "identifier")?.text ||
-						null
-					const type = currentNode.type
-					const start_line = currentNode.startPosition.row + 1
-					const end_line = currentNode.endPosition.row + 1
-					const content = currentNode.text
-					const contentPreview = content.slice(0, 100)
-					const segmentHash = createHash("sha256")
-						.update(`${filePath}-${start_line}-${end_line}-${content.length}-${contentPreview}`)
-						.digest("hex")
-
-					if (!seenSegmentHashes.has(segmentHash)) {
-						seenSegmentHashes.add(segmentHash)
-						results.push({
-							file_path: filePath,
-							identifier,
-							type,
-							start_line,
-							end_line,
-							content,
-							segmentHash,
-							fileHash,
-						})
-					}
+					// Return empty if content is too small for fallback
+					return []
 				}
 			}
-			// Nodes smaller than minBlockChars are ignored
-		}
 
-		return results
+			const results: CodeBlock[] = []
+
+			// Process captures if not empty
+			const queue: Node[] = Array.from(captures).map((capture) => capture.node)
+
+			for (let queueIndex = 0; queueIndex < queue.length; queueIndex++) {
+				const currentNode = queue[queueIndex]
+				// const lineSpan = currentNode.endPosition.row - currentNode.startPosition.row + 1 // Removed as per lint error
+
+				// Check if the node meets the minimum character requirement
+				if (currentNode.text.length >= MIN_BLOCK_CHARS) {
+					// If it also exceeds the maximum character limit, try to break it down
+					if (currentNode.text.length > MAX_BLOCK_CHARS * MAX_CHARS_TOLERANCE_FACTOR) {
+						if (currentNode.children.filter((child) => child !== null).length > 0) {
+							// If it has children, process them instead
+							queue.push(...currentNode.children.filter((child) => child !== null))
+						} else {
+							// If it's a leaf node, chunk it
+							const chunkedBlocks = this._chunkLeafNodeByLines(
+								currentNode,
+								filePath,
+								fileHash,
+								seenSegmentHashes,
+							)
+							results.push(...chunkedBlocks)
+						}
+					} else {
+						// Node meets min chars and is within max chars, create a block
+						const identifier =
+							currentNode.childForFieldName("name")?.text ||
+							currentNode.children.find((c) => c?.type === "identifier")?.text ||
+							null
+						const type = currentNode.type
+						const start_line = currentNode.startPosition.row + 1
+						const end_line = currentNode.endPosition.row + 1
+						const content = currentNode.text
+						const contentPreview = content.slice(0, 100)
+						const segmentHash = createHash("sha256")
+							.update(`${filePath}-${start_line}-${end_line}-${content.length}-${contentPreview}`)
+							.digest("hex")
+
+						if (!seenSegmentHashes.has(segmentHash)) {
+							seenSegmentHashes.add(segmentHash)
+							results.push({
+								file_path: filePath,
+								identifier,
+								type,
+								start_line,
+								end_line,
+								content,
+								segmentHash,
+								fileHash,
+							})
+						}
+					}
+				}
+				// Nodes smaller than minBlockChars are ignored
+			}
+
+			return results
+		} finally {
+			tree?.delete()
+		}
 	}
 
 	/**
@@ -228,6 +263,8 @@ export class CodeParser implements ICodeParser {
 		let currentChunkLength = 0
 		let chunkStartLineIndex = 0 // 0-based index within the `lines` array
 		const effectiveMaxChars = MAX_BLOCK_CHARS * MAX_CHARS_TOLERANCE_FACTOR
+		const lineOffsets = [0]
+		for (const line of lines) lineOffsets.push(lineOffsets[lineOffsets.length - 1] + line.length + 1)
 
 		const finalizeChunk = (endLineIndex: number) => {
 			if (currentChunkLength >= MIN_BLOCK_CHARS && currentChunkLines.length > 0) {
@@ -311,10 +348,7 @@ export class CodeParser implements ICodeParser {
 			if (currentChunkLength > 0 && currentChunkLength + lineLength > effectiveMaxChars) {
 				// Re-balancing Logic
 				let splitIndex = i - 1
-				let remainderLength = 0
-				for (let j = i; j < lines.length; j++) {
-					remainderLength += lines[j].length + (j < lines.length - 1 ? 1 : 0)
-				}
+				const remainderLength = lineOffsets[lines.length] - lineOffsets[i] - 1
 
 				if (
 					currentChunkLength >= MIN_BLOCK_CHARS &&
@@ -322,10 +356,8 @@ export class CodeParser implements ICodeParser {
 					currentChunkLines.length > 1
 				) {
 					for (let k = i - 2; k >= chunkStartLineIndex; k--) {
-						const potentialChunkLines = lines.slice(chunkStartLineIndex, k + 1)
-						const potentialChunkLength = potentialChunkLines.join("\n").length + 1
-						const potentialNextChunkLines = lines.slice(k + 1)
-						const potentialNextChunkLength = potentialNextChunkLines.join("\n").length + 1
+						const potentialChunkLength = lineOffsets[k + 1] - lineOffsets[chunkStartLineIndex]
+						const potentialNextChunkLength = lineOffsets[lines.length] - lineOffsets[k + 1]
 
 						if (
 							potentialChunkLength >= MIN_BLOCK_CHARS &&

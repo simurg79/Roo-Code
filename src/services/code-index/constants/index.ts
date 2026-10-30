@@ -1,6 +1,8 @@
 import { CODEBASE_INDEX_DEFAULTS } from "@roo-code/types"
 
 /**Parser */
+export const PARSE_TIMEOUT_MS = 10_000
+export const INDEX_STOP_LIMIT_MS = 2_000
 export const MAX_BLOCK_CHARS = 1000
 export const MIN_BLOCK_CHARS = 50
 export const MIN_CHUNK_REMAINDER_CHARS = 200 // Minimum characters for the *next* chunk after a split

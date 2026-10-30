@@ -63,6 +63,7 @@
 		"codeIndexingNotConfigured": "Cannot create services: Code indexing is not properly configured"
 	},
 	"orchestrator": {
+		"parserFailed": "Code indexing stopped while parsing {{filePath}} ({{category}}). Fix the file and explicitly start indexing to retry, or disable indexing. This is not a model/provider error.",
 		"indexingFailedNoBlocks": "Indexing failed: No code blocks were successfully indexed. This usually indicates an embedder configuration issue.",
 		"indexingFailedCritical": "Indexing failed: No code blocks were successfully indexed despite finding files to process. This indicates a critical embedder failure.",
 		"fileWatcherStarted": "File watcher started.",
