@@ -28,6 +28,8 @@ import {
 import { isPathInIgnoredDirectory } from "../../glob/ignore-utils"
 import { sanitizeErrorMessage } from "../shared/validation-helpers"
 import { Package } from "../../../shared/package"
+import { IndexWriteGate } from "../index-write-gate"
+import { ParserFatalError, throwIfAborted } from "../parser-errors"
 
 export class DirectoryScanner implements IDirectoryScanner {
 	private readonly batchSegmentThreshold: number
@@ -39,6 +41,7 @@ export class DirectoryScanner implements IDirectoryScanner {
 		private readonly cacheManager: CacheManager,
 		private readonly ignoreInstance: Ignore,
 		batchSegmentThreshold?: number,
+		private readonly writeGate = new IndexWriteGate(),
 	) {
 		// Get the configurable batch size from VSCode settings, fallback to default
 		// If not provided in constructor, try to get from VSCode settings
@@ -71,6 +74,11 @@ export class DirectoryScanner implements IDirectoryScanner {
 		onFileParsed?: (fileBlockCount: number) => void,
 		signal?: AbortSignal,
 	): Promise<{ stats: { processed: number; skipped: number }; totalBlockCount: number }> {
+		signal ??= new AbortController().signal
+		await this.writeGate.ready(signal)
+		const fileCompletions = new Map<string, string>()
+		const failedFiles = new Set<string>()
+		let fatalError: ParserFatalError | undefined
 		const directoryPath = directory
 		// Capture workspace context at scan start
 		const scanWorkspace = getWorkspacePathForContext(directoryPath)
@@ -127,7 +135,7 @@ export class DirectoryScanner implements IDirectoryScanner {
 		const parsePromises = supportedPaths.map((filePath) =>
 			parseLimiter(async () => {
 				// Check abort signal before processing each file
-				if (signal?.aborted) return
+				if (signal?.aborted || fatalError) return
 
 				try {
 					// Check file size
@@ -149,14 +157,28 @@ export class DirectoryScanner implements IDirectoryScanner {
 					// Check against cache
 					const cachedFileHash = this.cacheManager.getHash(filePath)
 					const isNewFile = !cachedFileHash
-					if (cachedFileHash === currentFileHash) {
+					if (cachedFileHash === currentFileHash && !this.writeGate.needsReconciliation(filePath)) {
 						// File is unchanged
 						skippedCount++
 						return
 					}
 
 					// File is new or changed - parse it using the injected parser function
-					const blocks = await this.codeParser.parseFile(filePath, { content, fileHash: currentFileHash })
+					const blocks = await this.codeParser.parseFile(filePath, {
+						content,
+						fileHash: currentFileHash,
+						signal,
+					})
+					throwIfAborted(signal)
+					if (fatalError) throw fatalError
+					// Cleanup must precede every replacement batch, not just the batch carrying the hash.
+					if (this.qdrantClient) {
+						await this.writeGate.run(signal!, () => this.qdrantClient.deletePointsByFilePath(filePath), [
+							filePath,
+						])
+					}
+					await this.writeGate.run(signal!, () => this.cacheManager.deleteHash(filePath), [filePath])
+					fileCompletions.set(filePath, currentFileHash)
 					const fileBlockCount = blocks.length
 					onFileParsed?.(fileBlockCount)
 					processedCount++
@@ -209,6 +231,8 @@ export class DirectoryScanner implements IDirectoryScanner {
 												scanWorkspace,
 												onError,
 												onBlocksIndexed,
+												signal,
+												failedFiles,
 											),
 										)
 										activeBatchPromises.add(batchPromise)
@@ -241,9 +265,13 @@ export class DirectoryScanner implements IDirectoryScanner {
 						}
 					} else {
 						// Only update hash if not being processed in a batch
-						await this.cacheManager.updateHash(filePath, currentFileHash)
+						throwIfAborted(signal)
 					}
 				} catch (error) {
+					if (error instanceof ParserFatalError) {
+						fatalError = error
+						throw error
+					}
 					// Re-throw AbortError — it's not a file processing error, just a user-initiated stop
 					if (error instanceof DOMException && error.name === "AbortError") {
 						throw error
@@ -294,7 +322,16 @@ export class DirectoryScanner implements IDirectoryScanner {
 
 				// Queue final batch processing
 				const batchPromise = batchLimiter(() =>
-					this.processBatch(batchBlocks, batchTexts, batchFileInfos, scanWorkspace, onError, onBlocksIndexed),
+					this.processBatch(
+						batchBlocks,
+						batchTexts,
+						batchFileInfos,
+						scanWorkspace,
+						onError,
+						onBlocksIndexed,
+						signal,
+						failedFiles,
+					),
 				)
 				activeBatchPromises.add(batchPromise)
 
@@ -310,6 +347,13 @@ export class DirectoryScanner implements IDirectoryScanner {
 
 		// Wait for all batch processing to complete
 		await Promise.all(activeBatchPromises)
+
+		throwIfAborted(signal)
+		for (const [filePath, fileHash] of fileCompletions) {
+			if (failedFiles.has(filePath)) continue
+			await this.writeGate.run(signal, () => this.cacheManager.updateHash(filePath, fileHash), [filePath])
+			this.writeGate.reconciled(filePath)
+		}
 
 		// Check abort signal before handling deleted files
 		if (signal?.aborted) {
@@ -329,8 +373,14 @@ export class DirectoryScanner implements IDirectoryScanner {
 				// File was deleted or is no longer supported/indexed
 				if (this.qdrantClient) {
 					try {
-						await this.qdrantClient.deletePointsByFilePath(cachedFilePath)
-						await this.cacheManager.deleteHash(cachedFilePath)
+						await this.writeGate.run(
+							signal,
+							() => this.qdrantClient.deletePointsByFilePath(cachedFilePath),
+							[cachedFilePath],
+						)
+						await this.writeGate.run(signal, () => this.cacheManager.deleteHash(cachedFilePath), [
+							cachedFilePath,
+						])
 					} catch (error: any) {
 						const errorMessage = error instanceof Error ? error.message : String(error)
 
@@ -375,6 +425,8 @@ export class DirectoryScanner implements IDirectoryScanner {
 		scanWorkspace: string,
 		onError?: (error: Error) => void,
 		onBlocksIndexed?: (indexedCount: number) => void,
+		signal = new AbortController().signal,
+		failedFiles = new Set<string>(),
 	): Promise<void> {
 		if (batchBlocks.length === 0) return
 
@@ -385,36 +437,11 @@ export class DirectoryScanner implements IDirectoryScanner {
 		while (attempts < MAX_BATCH_RETRIES && !success) {
 			attempts++
 			try {
-				// --- Deletion Step ---
-				const uniqueFilePaths = [
-					...new Set(
-						batchFileInfos
-							.filter((info) => !info.isNew) // Only modified files (not new)
-							.map((info) => info.filePath),
-					),
-				]
-				if (uniqueFilePaths.length > 0) {
-					try {
-						await this.qdrantClient.deletePointsByMultipleFilePaths(uniqueFilePaths)
-					} catch (deleteError: any) {
-						const errorMessage = deleteError instanceof Error ? deleteError.message : String(deleteError)
-
-						console.error(
-							`[DirectoryScanner] Failed to delete points for ${uniqueFilePaths.length} files before upsert in workspace ${scanWorkspace}:`,
-							deleteError,
-						)
-
-						// Re-throw with workspace context
-						throw new Error(
-							`Failed to delete points for ${uniqueFilePaths.length} files. Workspace: ${scanWorkspace}. ${errorMessage}`,
-							{ cause: deleteError },
-						)
-					}
-				}
-				// --- End Deletion Step ---
+				throwIfAborted(signal)
 
 				// Create embeddings for batch
-				const { embeddings } = await this.embedder.createEmbeddings(batchTexts)
+				const { embeddings } = await this.embedder.createEmbeddings(batchTexts, undefined, signal)
+				throwIfAborted(signal)
 
 				// Prepare points for Qdrant
 				const points = batchBlocks.map((block, index) => {
@@ -437,15 +464,19 @@ export class DirectoryScanner implements IDirectoryScanner {
 				})
 
 				// Upsert points to Qdrant
-				await this.qdrantClient.upsertPoints(points)
+				await this.writeGate.run(signal, () => this.qdrantClient.upsertPoints(points), [
+					...new Set(batchBlocks.map((block) => block.file_path)),
+				])
+				throwIfAborted(signal)
 				onBlocksIndexed?.(batchBlocks.length)
 
 				// Update hashes for successfully processed files in this batch
-				for (const fileInfo of batchFileInfos) {
-					await this.cacheManager.updateHash(fileInfo.filePath, fileInfo.fileHash)
-				}
 				success = true
 			} catch (error) {
+				if (signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+					for (const block of batchBlocks) failedFiles.add(block.file_path)
+					return
+				}
 				lastError = error as Error
 				console.error(
 					`[DirectoryScanner] Error processing batch (attempt ${attempts}) in workspace ${scanWorkspace}:`,
@@ -460,6 +491,7 @@ export class DirectoryScanner implements IDirectoryScanner {
 		}
 
 		if (!success && lastError) {
+			for (const block of batchBlocks) failedFiles.add(block.file_path)
 			console.error(`[DirectoryScanner] Failed to process batch after ${MAX_BATCH_RETRIES} attempts`)
 			if (onError) {
 				// Preserve the original error message from embedders which now have detailed i18n messages

@@ -13,6 +13,7 @@ import fs from "fs/promises"
 import ignore from "ignore"
 import path from "path"
 import { t } from "../../i18n"
+import { IndexWriteGate } from "./index-write-gate"
 
 export class CodeIndexManager {
 	// --- Singleton Implementation ---
@@ -28,6 +29,11 @@ export class CodeIndexManager {
 
 	// Flag to prevent race conditions during error recovery
 	private _isRecoveringFromError = false
+	private parserFailed = false
+	private parserFailureMessage = ""
+	private servicesStopped = false
+	private disabledSinceFailure = false
+	private readonly writeGate = new IndexWriteGate()
 
 	public static getInstance(context: vscode.ExtensionContext, workspacePath?: string): CodeIndexManager | undefined {
 		// Resolve the workspace folder to get both fsPath and the real URI
@@ -108,6 +114,13 @@ export class CodeIndexManager {
 
 	public async setWorkspaceEnabled(enabled: boolean): Promise<void> {
 		await this.context.workspaceState.update(this._workspaceEnabledKey(), enabled)
+		if (!enabled) {
+			this.disabledSinceFailure = true
+			this.stopIndexing()
+		} else if (this.disabledSinceFailure) {
+			this.parserFailed = false
+			this.disabledSinceFailure = false
+		}
 	}
 
 	public get autoEnableDefault(): boolean {
@@ -168,9 +181,8 @@ export class CodeIndexManager {
 
 		// 2. Check if feature is enabled
 		if (!this.isFeatureEnabled) {
-			if (this._orchestrator) {
-				this._orchestrator.stopWatcher()
-			}
+			this.disabledSinceFailure = true
+			this.stopIndexing()
 			return { requiresRestart }
 		}
 
@@ -187,6 +199,15 @@ export class CodeIndexManager {
 			return { requiresRestart }
 		}
 
+		if (this.disabledSinceFailure) {
+			this.parserFailed = false
+			this.disabledSinceFailure = false
+		}
+		if (this.parserFailed) {
+			this._stateManager.setSystemState("Error", this.parserFailureMessage)
+			return { requiresRestart }
+		}
+
 		// 5. CacheManager Initialization
 		if (!this._cacheManager) {
 			this._cacheManager = new CacheManager(this.context, this.workspacePath)
@@ -194,7 +215,7 @@ export class CodeIndexManager {
 		}
 
 		// 6. Determine if Core Services Need Recreation
-		const needsServiceRecreation = !this._serviceFactory || requiresRestart
+		const needsServiceRecreation = !this._serviceFactory || requiresRestart || this.servicesStopped
 
 		if (needsServiceRecreation) {
 			await this._recreateServices()
@@ -224,9 +245,10 @@ export class CodeIndexManager {
 			return
 		}
 
-		// Check if we're in error state and recover if needed
-		const currentStatus = this.getCurrentStatus()
-		if (currentStatus.systemStatus === "Error") {
+		if (this.parserFailed || this.servicesStopped) {
+			this.parserFailed = false
+			await this._recreateServices()
+		} else if (this.getCurrentStatus().systemStatus === "Error") {
 			await this.recoverFromError()
 
 			// After recovery, we need to reinitialize since recoverFromError clears all services
@@ -244,6 +266,7 @@ export class CodeIndexManager {
 	public stopIndexing(): void {
 		if (this._orchestrator) {
 			this._orchestrator.stopIndexing()
+			this.servicesStopped = true
 		}
 	}
 
@@ -256,6 +279,7 @@ export class CodeIndexManager {
 		}
 		if (this._orchestrator) {
 			this._orchestrator.stopWatcher()
+			this.servicesStopped = true
 		}
 	}
 
@@ -281,6 +305,7 @@ export class CodeIndexManager {
 
 		this._isRecoveringFromError = true
 		try {
+			this._orchestrator?.stopIndexing()
 			// Clear error state
 			this._stateManager.setSystemState("Standby", "")
 		} catch (error) {
@@ -317,7 +342,6 @@ export class CodeIndexManager {
 		}
 		this.assertInitialized()
 		await this._orchestrator!.clearIndexData()
-		await this._cacheManager!.clearCacheFile()
 	}
 
 	// --- Private Helpers ---
@@ -358,6 +382,7 @@ export class CodeIndexManager {
 			this._configManager!,
 			this.workspacePath,
 			this._cacheManager!,
+			this.writeGate,
 		)
 
 		const ignoreInstance = ignore()
@@ -384,7 +409,7 @@ export class CodeIndexManager {
 		await rooIgnoreController.initialize()
 
 		// (Re)Create shared service instances
-		const { embedder, vectorStore, scanner, fileWatcher } = this._serviceFactory.createServices(
+		const { embedder, vectorStore, scanner, fileWatcher, parser } = this._serviceFactory.createServices(
 			this.context,
 			this._cacheManager!,
 			ignoreInstance,
@@ -408,7 +433,17 @@ export class CodeIndexManager {
 			vectorStore,
 			scanner,
 			fileWatcher,
+			parser,
+			(_error, message) => {
+				this.parserFailed = true
+				this.parserFailureMessage = message
+			},
+			() => {
+				this.servicesStopped = true
+			},
+			this.writeGate,
 		)
+		this.servicesStopped = false
 
 		// (Re)Initialize search service
 		this._searchService = new CodeIndexSearchService(
@@ -437,12 +472,18 @@ export class CodeIndexManager {
 
 			// If feature is disabled, stop the service (including any active scan)
 			if (!isFeatureEnabled) {
+				this.disabledSinceFailure = true
 				this.stopIndexing()
 				this._stateManager.setSystemState("Standby", "Code indexing is disabled")
 				return
 			}
 
-			if (requiresRestart && isFeatureEnabled && isFeatureConfigured) {
+			if (this.disabledSinceFailure) {
+				this.parserFailed = false
+				this.disabledSinceFailure = false
+			}
+			if (this.parserFailed) return
+			if ((requiresRestart || this.servicesStopped) && isFeatureEnabled && isFeatureConfigured) {
 				try {
 					// Ensure cacheManager is initialized before recreating services
 					if (!this._cacheManager) {
@@ -452,6 +493,7 @@ export class CodeIndexManager {
 
 					// Recreate services with new configuration
 					await this._recreateServices()
+					if (this.isWorkspaceEnabled) void this._orchestrator?.startIndexing()
 				} catch (error) {
 					// Error state already set in _recreateServices
 					console.error("Failed to recreate services:", error)

@@ -3,6 +3,7 @@
 import * as vscode from "vscode"
 
 import { FileWatcher } from "../file-watcher"
+import { ParserFatalError } from "../../parser-errors"
 
 // Mock dependencies
 vi.mock("../../cache-manager")
@@ -122,6 +123,105 @@ describe("FileWatcher", () => {
 			mockEmbedder,
 			mockVectorStore,
 			mockIgnoreInstance,
+			undefined,
+			undefined,
+			{ parseFile: vi.fn().mockResolvedValue([]) },
+		)
+	})
+
+	describe("attempt ownership", () => {
+		function createWatcher(parser: any, signal?: AbortSignal) {
+			const watcher = new FileWatcher(
+				"/mock/workspace",
+				mockContext,
+				mockCacheManager,
+				mockEmbedder,
+				mockVectorStore,
+				mockIgnoreInstance,
+				{ validateAccess: () => true } as any,
+				1,
+				parser,
+			)
+			return { watcher, initialize: () => watcher.initialize(signal) }
+		}
+
+		it("reports a fatal parser once, disposes events, and starts no more queued files", async () => {
+			const fatal = new ParserFatalError("parser-abort", "/mock/workspace/bad.ts")
+			const parser = { parseFile: vi.fn().mockRejectedValue(fatal) }
+			const { watcher, initialize } = createWatcher(parser)
+			await initialize()
+			const report = vi.spyOn((watcher as any).parserFatal, "fire")
+			await expect(watcher.processFile("/mock/workspace/bad.ts")).rejects.toBe(fatal)
+			expect(report).toHaveBeenCalledOnce()
+			expect(mockWatcher.dispose).toHaveBeenCalledOnce()
+			await mockOnDidChange({ fsPath: "/mock/workspace/next.ts" })
+			await (watcher as any).triggerBatchProcessing()
+			expect(parser.parseFile).toHaveBeenCalledOnce()
+			expect(mockVectorStore.upsertPoints).not.toHaveBeenCalled()
+		})
+
+		it("drops embeddings released after the attempt stops", async () => {
+			const parser = {
+				parseFile: vi.fn().mockResolvedValue([
+					{
+						file_path: "/mock/workspace/file.ts",
+						content: "function test() {}",
+						start_line: 1,
+						end_line: 1,
+					},
+				]),
+			}
+			const controller = new AbortController()
+			const { watcher, initialize } = createWatcher(parser, controller.signal)
+			await initialize()
+			let release!: (value: any) => void
+			mockEmbedder.createEmbeddings.mockImplementation(
+				() =>
+					new Promise((resolve) => {
+						release = resolve
+					}),
+			)
+			const pending = (watcher as any)
+				.processBatch(new Map([["file", { uri: { fsPath: "/mock/workspace/file.ts" }, type: "change" }]]))
+				.catch((error: Error) => error)
+			await vi.waitFor(() => expect(mockEmbedder.createEmbeddings).toHaveBeenCalledOnce())
+			controller.abort()
+			watcher.dispose()
+			release({ embeddings: [[1, 2, 3]] })
+			await pending
+			expect(mockVectorStore.upsertPoints).not.toHaveBeenCalled()
+			expect(mockVectorStore.deletePointsByFilePath).not.toHaveBeenCalled()
+			expect(mockCacheManager.updateHash).not.toHaveBeenCalled()
+		})
+
+		it.each(["fatal", "cancel", "disable"])(
+			"a replacement watcher processes scan-following changes after %s",
+			async () => {
+				const parser = {
+					parseFile: vi.fn().mockResolvedValue([
+						{
+							file_path: "/mock/workspace/file.ts",
+							content: "function test() {}",
+							start_line: 1,
+							end_line: 1,
+						},
+					]),
+				}
+				const old = createWatcher(parser)
+				await old.initialize()
+				old.watcher.dispose()
+				const replacement = createWatcher(parser)
+				await replacement.initialize()
+				await mockOnDidChange({ fsPath: "/mock/workspace/file.ts" })
+				await (replacement.watcher as any).triggerBatchProcessing()
+				expect(mockVectorStore.upsertPoints).toHaveBeenCalledOnce()
+				expect(mockCacheManager.updateHash).toHaveBeenCalledOnce()
+				expect((replacement.watcher as any)._onBatchProgressUpdate.fire).toHaveBeenCalled()
+				expect(mockVectorStore.deletePointsByFilePath.mock.invocationCallOrder[0]).toBeLessThan(
+					mockVectorStore.upsertPoints.mock.invocationCallOrder[0],
+				)
+				replacement.watcher.dispose()
+			},
 		)
 	})
 

@@ -1,5 +1,6 @@
 import * as vscode from "vscode"
 import { PointStruct } from "./vector-store"
+import type { ParserFatalError } from "../parser-errors"
 
 /**
  * Interface for code file parser
@@ -18,6 +19,7 @@ export interface ICodeParser {
 			maxBlockLines?: number
 			content?: string
 			fileHash?: string
+			signal?: AbortSignal
 		},
 	): Promise<CodeBlock[]>
 }
@@ -54,7 +56,8 @@ export interface IFileWatcher extends vscode.Disposable {
 	/**
 	 * Initializes the file watcher
 	 */
-	initialize(): Promise<void>
+	initialize(signal?: AbortSignal): Promise<void>
+	readonly onParserFatal?: vscode.Event<ParserFatalError>
 
 	/**
 	 * Event emitted when a batch of files begins processing.

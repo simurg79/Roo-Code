@@ -19,7 +19,10 @@ import {
 	PointStruct,
 	BatchProcessingSummary,
 } from "../interfaces"
-import { codeParser } from "./parser"
+import { ParseWorkerClient } from "../parse-worker-client"
+import type { ICodeParser } from "../interfaces"
+import { IndexWriteGate } from "../index-write-gate"
+import { ParserFatalError, throwIfAborted } from "../parser-errors"
 import { CacheManager } from "../cache-manager"
 import { generateNormalizedAbsolutePath, generateRelativeFilePath } from "../shared/get-relative-path"
 import { isPathInIgnoredDirectory } from "../../glob/ignore-utils"
@@ -39,6 +42,13 @@ export class FileWatcher implements IFileWatcher {
 	private readonly FILE_PROCESSING_CONCURRENCY_LIMIT = 10
 	private readonly batchSegmentThreshold: number
 
+	private readonly localAbortController = new AbortController()
+	private signal = this.localAbortController.signal
+	private processingBatch = false
+	private disposed = false
+	private fatalReported = false
+	private readonly parserFatal = new vscode.EventEmitter<ParserFatalError>()
+	public readonly onParserFatal = this.parserFatal.event
 	private readonly _onDidStartBatchProcessing = new vscode.EventEmitter<string[]>()
 	private readonly _onBatchProgressUpdate = new vscode.EventEmitter<{
 		processedInBatch: number
@@ -79,6 +89,8 @@ export class FileWatcher implements IFileWatcher {
 		ignoreInstance?: Ignore,
 		ignoreController?: RooIgnoreController,
 		batchSegmentThreshold?: number,
+		private readonly parser: ICodeParser = new ParseWorkerClient(),
+		private readonly writeGate = new IndexWriteGate(),
 	) {
 		this.ignoreController = ignoreController || new RooIgnoreController(workspacePath)
 		if (ignoreInstance) {
@@ -103,7 +115,10 @@ export class FileWatcher implements IFileWatcher {
 	/**
 	 * Initializes the file watcher
 	 */
-	async initialize(): Promise<void> {
+	async initialize(signal?: AbortSignal): Promise<void> {
+		if (this.disposed) throw new DOMException("Indexing aborted", "AbortError")
+		this.signal = signal ?? this.signal
+		throwIfAborted(this.signal)
 		// Create file watcher
 		const filePattern = new vscode.RelativePattern(
 			this.workspacePath,
@@ -121,6 +136,10 @@ export class FileWatcher implements IFileWatcher {
 	 * Disposes the file watcher
 	 */
 	dispose(): void {
+		if (this.disposed) return
+		this.disposed = true
+		this.localAbortController.abort()
+		this.parserFatal.dispose()
 		this.fileWatcher?.dispose()
 		if (this.batchProcessDebounceTimer) {
 			clearTimeout(this.batchProcessDebounceTimer)
@@ -136,6 +155,7 @@ export class FileWatcher implements IFileWatcher {
 	 * @param uri URI of the created file
 	 */
 	private async handleFileCreated(uri: vscode.Uri): Promise<void> {
+		if (this.disposed || this.signal.aborted) return
 		this.accumulatedEvents.set(uri.fsPath, { uri, type: "create" })
 		this.scheduleBatchProcessing()
 	}
@@ -145,6 +165,7 @@ export class FileWatcher implements IFileWatcher {
 	 * @param uri URI of the changed file
 	 */
 	private async handleFileChanged(uri: vscode.Uri): Promise<void> {
+		if (this.disposed || this.signal.aborted) return
 		this.accumulatedEvents.set(uri.fsPath, { uri, type: "change" })
 		this.scheduleBatchProcessing()
 	}
@@ -154,6 +175,7 @@ export class FileWatcher implements IFileWatcher {
 	 * @param uri URI of the deleted file
 	 */
 	private async handleFileDeleted(uri: vscode.Uri): Promise<void> {
+		if (this.disposed || this.signal.aborted) return
 		this.accumulatedEvents.set(uri.fsPath, { uri, type: "delete" })
 		this.scheduleBatchProcessing()
 	}
@@ -162,6 +184,7 @@ export class FileWatcher implements IFileWatcher {
 	 * Schedules batch processing with debounce
 	 */
 	private scheduleBatchProcessing(): void {
+		if (this.disposed || this.signal.aborted) return
 		if (this.batchProcessDebounceTimer) {
 			clearTimeout(this.batchProcessDebounceTimer)
 		}
@@ -172,7 +195,7 @@ export class FileWatcher implements IFileWatcher {
 	 * Triggers processing of accumulated events
 	 */
 	private async triggerBatchProcessing(): Promise<void> {
-		if (this.accumulatedEvents.size === 0) {
+		if (this.disposed || this.signal.aborted || this.processingBatch || this.accumulatedEvents.size === 0) {
 			return
 		}
 
@@ -182,30 +205,18 @@ export class FileWatcher implements IFileWatcher {
 		const filePathsInBatch = Array.from(eventsToProcess.keys())
 		this._onDidStartBatchProcessing.fire(filePathsInBatch)
 
-		await this.processBatch(eventsToProcess)
-	}
-
-	/**
-	 * Processes a batch of accumulated events
-	 * @param eventsToProcess Map of events to process
-	 */
-	private async _handleBatchDeletions(
-		batchResults: FileProcessingResult[],
-		processedCountInBatch: number,
-		totalFilesInBatch: number,
-		pathsToExplicitlyDelete: string[],
-		filesToUpsertDetails: Array<{ path: string; uri: vscode.Uri; originalType: "create" | "change" }>,
-	): Promise<{ overallBatchError?: Error; clearedPaths: Set<string>; processedCount: number }> {
-		let overallBatchError: Error | undefined
-		const allPathsToClearFromDB = new Set<string>(pathsToExplicitlyDelete)
-
-		for (const fileDetail of filesToUpsertDetails) {
-			if (fileDetail.originalType === "change") {
-				allPathsToClearFromDB.add(fileDetail.path)
+		this.processingBatch = true
+		try {
+			await this.processBatch(eventsToProcess)
+		} catch (error) {
+			if (error instanceof ParserFatalError) this.reportFatal(error)
+			else if (!this.signal.aborted && !this.disposed) {
+				this._onDidFinishBatchProcessing.fire({ processedFiles: [], batchError: error as Error })
 			}
+		} finally {
+			this.processingBatch = false
+			if (this.accumulatedEvents.size > 0) this.scheduleBatchProcessing()
 		}
-
-		return { overallBatchError, clearedPaths: allPathsToClearFromDB, processedCount: processedCountInBatch }
 	}
 
 	private async _processFilesAndPrepareUpserts(
@@ -236,6 +247,7 @@ export class FileWatcher implements IFileWatcher {
 					const result = await this.processFile(fileDetail.path)
 					return { path: fileDetail.path, result: result, error: undefined }
 				} catch (e) {
+					if (e instanceof ParserFatalError || (e instanceof Error && e.name === "AbortError")) throw e
 					const error = e as Error
 					console.error(`[FileWatcher] Unhandled exception processing file ${fileDetail.path}:`, e)
 					return { path: fileDetail.path, result: undefined, error: error }
@@ -243,6 +255,17 @@ export class FileWatcher implements IFileWatcher {
 			})
 
 			const settledChunkResults = await Promise.allSettled(chunkProcessingPromises)
+			const fatal = settledChunkResults.find(
+				(result) => result.status === "rejected" && result.reason instanceof ParserFatalError,
+			)
+			if (fatal?.status === "rejected") throw fatal.reason
+			throwIfAborted(this.signal)
+			if (this.disposed)
+				return {
+					pointsForBatchUpsert: [],
+					successfullyProcessedForUpsert: [],
+					processedCount: processedCountInBatch,
+				}
 
 			for (const settledResult of settledChunkResults) {
 				let resultPath: string | undefined
@@ -293,11 +316,12 @@ export class FileWatcher implements IFileWatcher {
 				if (!pathsToExplicitlyDelete.includes(resultPath || "")) {
 					processedCountInBatch++
 				}
-				this._onBatchProgressUpdate.fire({
-					processedInBatch: processedCountInBatch,
-					totalInBatch: totalFilesInBatch,
-					currentFile: resultPath,
-				})
+				if (processedCountInBatch < totalFilesInBatch)
+					this._onBatchProgressUpdate.fire({
+						processedInBatch: processedCountInBatch,
+						totalInBatch: totalFilesInBatch,
+						currentFile: resultPath,
+					})
 			}
 		}
 
@@ -308,22 +332,15 @@ export class FileWatcher implements IFileWatcher {
 		}
 	}
 
-	private async _executeBatchUpsertOperations(
-		pointsForBatchUpsert: PointStruct[],
-		successfullyProcessedForUpsert: Array<{ path: string; newHash?: string }>,
-		batchResults: FileProcessingResult[],
-		overallBatchError?: Error,
-	): Promise<Error | undefined> {
-		return overallBatchError
-	}
-
 	private async processBatch(
 		eventsToProcess: Map<string, { uri: vscode.Uri; type: "create" | "change" | "delete" }>,
 	): Promise<void> {
+		throwIfAborted(this.signal)
+		await this.writeGate.ready(this.signal)
 		const batchResults: FileProcessingResult[] = []
 		let processedCountInBatch = 0
 		const totalFilesInBatch = eventsToProcess.size
-		let overallBatchError: Error | undefined
+		const overallBatchError: Error | undefined = undefined
 
 		// Initial progress update
 		this._onBatchProgressUpdate.fire({
@@ -348,17 +365,6 @@ export class FileWatcher implements IFileWatcher {
 			}
 		}
 
-		// Phase 1: Handle deletions
-		const { overallBatchError: deletionError, processedCount: deletionCount } = await this._handleBatchDeletions(
-			batchResults,
-			processedCountInBatch,
-			totalFilesInBatch,
-			pathsToExplicitlyDelete,
-			filesToUpsertDetails,
-		)
-		overallBatchError = deletionError
-		processedCountInBatch = deletionCount
-
 		// Phase 2: Process files and prepare upserts
 		const {
 			pointsForBatchUpsert,
@@ -373,14 +379,37 @@ export class FileWatcher implements IFileWatcher {
 		)
 		processedCountInBatch = upsertCount
 
-		// Phase 3: Execute batch upsert
-		overallBatchError = await this._executeBatchUpsertOperations(
-			pointsForBatchUpsert,
-			successfullyProcessedForUpsert,
-			batchResults,
-			overallBatchError,
-		)
-
+		throwIfAborted(this.signal)
+		if (this.disposed) return
+		const replacementPaths = successfullyProcessedForUpsert.map((file) => file.path)
+		const cleanupPaths = [...new Set([...pathsToExplicitlyDelete, ...replacementPaths])]
+		for (const filePath of cleanupPaths) {
+			if (this.vectorStore) {
+				await this.writeGate.run(this.signal, () => this.vectorStore!.deletePointsByFilePath(filePath), [
+					filePath,
+				])
+			}
+			await this.writeGate.run(this.signal, () => this.cacheManager.deleteHash(filePath), [filePath])
+		}
+		if (this.vectorStore) {
+			for (
+				let pointOffset = 0;
+				pointOffset < pointsForBatchUpsert.length;
+				pointOffset += this.batchSegmentThreshold
+			) {
+				const points = pointsForBatchUpsert.slice(pointOffset, pointOffset + this.batchSegmentThreshold)
+				await this.writeGate.run(this.signal, () => this.vectorStore!.upsertPoints(points), replacementPaths)
+			}
+		}
+		for (const file of successfullyProcessedForUpsert) {
+			if (file.newHash)
+				await this.writeGate.run(this.signal, () => this.cacheManager.updateHash(file.path, file.newHash!), [
+					file.path,
+				])
+			this.writeGate.reconciled(file.path)
+			batchResults.push({ path: file.path, status: "success" })
+		}
+		throwIfAborted(this.signal)
 		// Finalize
 		this._onDidFinishBatchProcessing.fire({
 			processedFiles: batchResults,
@@ -405,8 +434,17 @@ export class FileWatcher implements IFileWatcher {
 	 * @param filePath Path to the file to process
 	 * @returns Promise resolving to processing result
 	 */
+	private reportFatal(error: ParserFatalError): void {
+		if (this.fatalReported || this.disposed || this.signal.aborted) return
+		this.fatalReported = true
+		this.parserFatal.fire(error)
+		this.dispose()
+	}
+
 	async processFile(filePath: string): Promise<FileProcessingResult> {
 		try {
+			throwIfAborted(this.signal)
+			await this.writeGate.ready(this.signal)
 			// Get relative path for ignore checks
 			const relativeFilePath = generateRelativeFilePath(filePath, this.workspacePath)
 
@@ -450,7 +488,7 @@ export class FileWatcher implements IFileWatcher {
 			const newHash = createHash("sha256").update(content).digest("hex")
 
 			// Check if file has changed
-			if (this.cacheManager.getHash(filePath) === newHash) {
+			if (this.cacheManager.getHash(filePath) === newHash && !this.writeGate.needsReconciliation(filePath)) {
 				return {
 					path: filePath,
 					status: "skipped" as const,
@@ -459,13 +497,16 @@ export class FileWatcher implements IFileWatcher {
 			}
 
 			// Parse file
-			const blocks = await codeParser.parseFile(filePath, { content, fileHash: newHash })
+			const blocks = await this.parser.parseFile(filePath, { content, fileHash: newHash, signal: this.signal })
+			throwIfAborted(this.signal)
 
 			// Prepare points for batch processing
 			let pointsToUpsert: PointStruct[] = []
 			if (this.embedder && blocks.length > 0) {
 				const texts = blocks.map((block) => block.content)
-				const { embeddings } = await this.embedder.createEmbeddings(texts)
+				const { embeddings } = await this.embedder.createEmbeddings(texts, undefined, this.signal)
+
+				throwIfAborted(this.signal)
 
 				pointsToUpsert = blocks.map((block, index) => {
 					const normalizedAbsolutePath = generateNormalizedAbsolutePath(block.file_path, this.workspacePath)
@@ -492,6 +533,11 @@ export class FileWatcher implements IFileWatcher {
 				pointsToUpsert,
 			}
 		} catch (error) {
+			if (error instanceof ParserFatalError) {
+				this.reportFatal(error)
+				throw error
+			}
+			if (error instanceof Error && error.name === "AbortError") throw error
 			return {
 				path: filePath,
 				status: "local_error" as const,

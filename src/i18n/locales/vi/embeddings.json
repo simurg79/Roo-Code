@@ -63,6 +63,7 @@
 		"codeIndexingNotConfigured": "Không thể tạo dịch vụ: Lập chỉ mục mã không được cấu hình đúng cách"
 	},
 	"orchestrator": {
+		"parserFailed": "Lập chỉ mục mã đã dừng khi phân tích {{filePath}} ({{category}}). Sửa tệp rồi tự khởi động lại việc lập chỉ mục để thử lại, hoặc tắt lập chỉ mục. Đây không phải lỗi mô hình/nhà cung cấp.",
 		"indexingFailedNoBlocks": "Lập chỉ mục thất bại: Không có khối mã nào được lập chỉ mục thành công. Điều này thường cho thấy vấn đề cấu hình embedder.",
 		"indexingFailedCritical": "Lập chỉ mục thất bại: Không có khối mã nào được lập chỉ mục thành công mặc dù đã tìm thấy tệp để xử lý. Điều này cho thấy lỗi nghiêm trọng của embedder.",
 		"fileWatcherStarted": "Trình theo dõi tệp đã khởi động.",

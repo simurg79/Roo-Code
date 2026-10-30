@@ -71,6 +71,13 @@ describe("QdrantVectorStore", () => {
 		vectorStore = new QdrantVectorStore(mockWorkspacePath, mockQdrantUrl, mockVectorSize, mockApiKey)
 	})
 
+	it("propagates rejected deletions so the write gate can reconcile their uncertain outcome", async () => {
+		vi.spyOn(vectorStore, "collectionExists").mockResolvedValue(true)
+		const failure = new Error("delete request timed out")
+		mockQdrantClientInstance.delete.mockRejectedValueOnce(failure)
+		await expect(vectorStore.deletePointsByFilePath("/test/workspace/file.ts")).rejects.toBe(failure)
+	})
+
 	it("should correctly initialize QdrantClient and collectionName in constructor", () => {
 		expect(QdrantClient).toHaveBeenCalledTimes(1)
 		expect(QdrantClient).toHaveBeenCalledWith({

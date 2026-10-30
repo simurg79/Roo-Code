@@ -63,6 +63,7 @@
 		"codeIndexingNotConfigured": "Kann keine Dienste erstellen: Code-Indizierung ist nicht richtig konfiguriert"
 	},
 	"orchestrator": {
+		"parserFailed": "Die Code-Indexierung wurde beim Parsen von {{filePath}} angehalten ({{category}}). Korrigiere die Datei und starte die Indexierung ausdrücklich erneut oder deaktiviere sie. Dies ist kein Modell-/Anbieterfehler.",
 		"indexingFailedNoBlocks": "Indizierung fehlgeschlagen: Keine Code-Blöcke wurden erfolgreich indiziert. Dies deutet normalerweise auf ein Embedder-Konfigurationsproblem hin.",
 		"indexingFailedCritical": "Indizierung fehlgeschlagen: Keine Code-Blöcke wurden erfolgreich indiziert, obwohl zu verarbeitende Dateien gefunden wurden. Dies deutet auf einen kritischen Embedder-Fehler hin.",
 		"fileWatcherStarted": "Datei-Watcher gestartet.",

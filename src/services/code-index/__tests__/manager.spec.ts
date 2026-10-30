@@ -153,6 +153,77 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 		CodeIndexManager.disposeAll()
 	})
 
+	describe("parser failure lifecycle", () => {
+		it("blocks automatic initialize and settings recreation while latched", async () => {
+			const internal = manager as any
+			internal.parserFailed = true
+			internal.parserFailureMessage = "Parsing bad.ts failed; retry or disable indexing"
+			internal._configManager = {
+				loadConfiguration: vi.fn().mockResolvedValue({ requiresRestart: true }),
+				isFeatureEnabled: true,
+				isFeatureConfigured: true,
+			}
+			const recreate = vi.spyOn(internal, "_recreateServices")
+			await manager.initialize({} as any)
+			await manager.handleSettingsChange()
+			expect(recreate).not.toHaveBeenCalled()
+			expect(internal._stateManager.setSystemState).toHaveBeenCalledWith("Error", internal.parserFailureMessage)
+		})
+
+		it.each(["fatal", "cancel", "disable"])(
+			"replaces a stopped service set on explicit restart: %s",
+			async (reason) => {
+				const internal = manager as any
+				internal._configManager = { isFeatureEnabled: true, isFeatureConfigured: true }
+				internal._cacheManager = {}
+				internal._searchService = {}
+				internal._stateManager.getCurrentStatus.mockReturnValue({ systemStatus: "Standby" })
+				const old = { startIndexing: vi.fn(), stopIndexing: vi.fn() }
+				internal._orchestrator = old
+				if (reason === "fatal") {
+					internal.parserFailed = true
+					internal.servicesStopped = true
+				} else if (reason === "cancel") manager.stopIndexing()
+				else {
+					await manager.setWorkspaceEnabled(false)
+					await manager.setWorkspaceEnabled(true)
+				}
+				const replacement = { startIndexing: vi.fn() }
+				vi.spyOn(internal, "_recreateServices").mockImplementation(async () => {
+					internal._orchestrator = replacement
+					internal.servicesStopped = false
+				})
+				await manager.startIndexing()
+				expect(internal._recreateServices).toHaveBeenCalledOnce()
+				expect(replacement.startIndexing).toHaveBeenCalledOnce()
+				expect(old.startIndexing).not.toHaveBeenCalled()
+				expect(internal.parserFailed).toBe(false)
+				internal._orchestrator = undefined
+			},
+		)
+		// Real post-failure state is Error; the test above forces Standby and so skips recoverFromError.
+		it("starts the replacement orchestrator on retry while state is still Error", async () => {
+			const internal = manager as any
+			internal._configManager = { isFeatureEnabled: true, isFeatureConfigured: true }
+			internal._cacheManager = {}
+			internal._searchService = {}
+			internal._stateManager.getCurrentStatus.mockReturnValue({ systemStatus: "Error" })
+			internal._orchestrator = { startIndexing: vi.fn(), stopIndexing: vi.fn() }
+			internal.parserFailed = true
+			internal.servicesStopped = true
+			const replacement = { startIndexing: vi.fn(), stopIndexing: vi.fn() }
+			vi.spyOn(internal, "_recreateServices").mockImplementation(async () => {
+				internal._orchestrator = replacement
+				internal.servicesStopped = false
+			})
+			await manager.startIndexing()
+			expect(replacement.stopIndexing).not.toHaveBeenCalled()
+			expect(replacement.startIndexing).toHaveBeenCalledOnce()
+			expect(internal._orchestrator).toBe(replacement)
+			internal._orchestrator = undefined
+		})
+	})
+
 	describe("handleSettingsChange", () => {
 		it("should not throw when called on uninitialized manager (regression test)", async () => {
 			// This is the core regression test: handleSettingsChange() should not throw
