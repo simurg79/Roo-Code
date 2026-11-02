@@ -305,6 +305,41 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 			internal._orchestrator = undefined
 		})
 
+		it.each(["resolves", "rejects"])("retry waits for an in-flight clear that %s", async (outcome) => {
+			const internal = manager as any
+			internal._configManager = { isFeatureEnabled: true, isFeatureConfigured: true }
+			internal._cacheManager = {}
+			internal._searchService = {}
+			let settle!: () => void
+			const pendingClear = new Promise<void>((resolve, reject) => {
+				settle = outcome === "resolves" ? resolve : () => reject(new Error("delete failed"))
+			})
+			const old = { clearIndexData: vi.fn(() => pendingClear), stopWatcher: vi.fn() }
+			internal._orchestrator = old
+			const createServices = vi.fn(() => ({
+				embedder: {},
+				vectorStore: {},
+				scanner: {},
+				fileWatcher: { dispose: vi.fn() },
+			}))
+			MockedCodeIndexServiceFactory.mockImplementation(
+				() => ({ createServices, validateEmbedder: vi.fn().mockResolvedValue({ valid: true }) }) as any,
+			)
+			const clear = manager.clearIndexData().catch(() => {})
+			internal.servicesStopped = true
+			const retry = manager.startIndexing()
+			await new Promise((resolve) => setTimeout(resolve, 20))
+			expect(createServices).not.toHaveBeenCalled()
+			expect(internal._orchestrator).toBeUndefined()
+			settle()
+			await clear
+			await retry
+			expect(createServices).toHaveBeenCalledOnce()
+			expect(internal._orchestrator).not.toBe(old)
+			expect(internal._orchestrator.startIndexing).toHaveBeenCalledOnce()
+			internal._orchestrator = undefined
+		})
+
 		it("preserves the shared allocator across recreation and fences an old attempt's callbacks", async () => {
 			const internal = manager as any
 			internal._cacheManager = {}

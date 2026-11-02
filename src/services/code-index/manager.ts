@@ -39,6 +39,7 @@ export class CodeIndexManager {
 	private generationAllocator?: GenerationAllocator
 	private currentAttempt = 0
 	private readonly idleStop = Promise.resolve()
+	private clearing: Promise<void> = Promise.resolve()
 
 	public static getInstance(context: vscode.ExtensionContext, workspacePath?: string): CodeIndexManager | undefined {
 		// Resolve the workspace folder to get both fsPath and the real URI
@@ -350,7 +351,9 @@ export class CodeIndexManager {
 			return
 		}
 		this.assertInitialized()
-		await this._orchestrator!.clearIndexData()
+		const clearing = this._orchestrator!.clearIndexData()
+		this.clearing = clearing.catch(() => {})
+		await clearing
 	}
 
 	// --- Private Helpers ---
@@ -420,6 +423,8 @@ export class CodeIndexManager {
 		// Create RooIgnoreController instance
 		const rooIgnoreController = new RooIgnoreController(workspacePath)
 		await rooIgnoreController.initialize()
+		// Clear publishes Standby before deleteCollection() settles; a retry must not write concurrently.
+		await this.clearing
 
 		if (!isCurrentAttempt()) return
 
