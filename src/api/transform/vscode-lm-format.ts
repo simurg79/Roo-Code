@@ -45,12 +45,77 @@ export function sanitizeSurrogates(text: string): string {
 	return text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD")
 }
 
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g
+const HAS_LONE_SURROGATE = new RegExp(LONE_SURROGATE.source)
+
+export function sanitizeIdentifierSurrogates(identifier: string): string {
+	// Escape before encoding to avoid re-escaping generated markers.
+	return identifier
+		.replace(/\uFFFD/g, "\uFFFDFFFD")
+		.replace(LONE_SURROGATE, (unit) => `\uFFFD${unit.charCodeAt(0).toString(16).toUpperCase()}`)
+}
+
+const TOOL_NAME_MARKER = /_u(?:u|[0-9A-Fa-f]{4})/
+
+export function sanitizeToolNameSurrogates(name: string): string {
+	if (!HAS_LONE_SURROGATE.test(name) && !TOOL_NAME_MARKER.test(name)) {
+		return name
+	}
+	// Escape before encoding to distinguish literal "_u" from markers.
+	return name
+		.replace(/_u/g, "_uu")
+		.replace(LONE_SURROGATE, (unit) => `_u${unit.charCodeAt(0).toString(16).toUpperCase()}`)
+}
+
+export function decodeToolNameSurrogates(name: string): string {
+	let decoded = ""
+	let index = 0
+	while (index < name.length) {
+		if (name[index] === "_" && name[index + 1] === "u") {
+			if (name[index + 2] === "u") {
+				decoded += "_u"
+				index += 3
+				continue
+			}
+			const hex = name.slice(index + 2, index + 6)
+			if (/^[0-9A-Fa-f]{4}$/.test(hex)) {
+				decoded += String.fromCharCode(parseInt(hex, 16))
+				index += 6
+				continue
+			}
+		}
+		decoded += name[index]
+		index += 1
+	}
+	return decoded
+}
+
+export function sanitizeSurrogatesDeep(value: unknown): unknown {
+	if (typeof value === "string") {
+		return sanitizeSurrogates(value)
+	}
+	if (Array.isArray(value)) {
+		return value.map(sanitizeSurrogatesDeep)
+	}
+	if (value && typeof value === "object") {
+		return Object.fromEntries(
+			Object.entries(value as Record<string, unknown>).map(([key, nested]) => [
+				sanitizeSurrogates(key),
+				sanitizeSurrogatesDeep(nested),
+			]),
+		)
+	}
+	return value
+}
+
 const SUPPORTED_IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"])
 
-function convertImagePart(part: {
-	source?: { type?: string; media_type?: string; data?: string }
-}): vscode.LanguageModelTextPart | vscode.LanguageModelDataPart {
+function convertImagePart(
+	part: { source?: { type?: string; media_type?: string; data?: string } },
+	supportsImages: boolean,
+): vscode.LanguageModelTextPart | vscode.LanguageModelDataPart {
 	if (
+		supportsImages &&
 		part.source?.type === "base64" &&
 		part.source.data &&
 		part.source.media_type &&
@@ -61,6 +126,9 @@ function convertImagePart(part: {
 		// Buffer.from never throws on malformed base64 — it yields empty/garbage bytes — so an empty
 		// result is the only signal that decoding failed, and it falls through to a visible placeholder.
 		if (bytes.length > 0) {
+			if (typeof vscode.LanguageModelDataPart?.image !== "function") {
+				throw new Error("Roo Code: Image input requires a newer version of VS Code that can send image data.")
+			}
 			return vscode.LanguageModelDataPart.image(bytes, part.source.media_type)
 		}
 	}
@@ -72,6 +140,7 @@ function convertImagePart(part: {
 
 export function convertToVsCodeLmMessages(
 	anthropicMessages: Anthropic.Messages.MessageParam[],
+	options: { supportsImages?: boolean } = {},
 ): vscode.LanguageModelChatMessage[] {
 	const vsCodeLmMessages: vscode.LanguageModelChatMessage[] = []
 
@@ -115,18 +184,21 @@ export function convertToVsCodeLmMessages(
 								? [new vscode.LanguageModelTextPart(sanitizeSurrogates(toolMessage.content))]
 								: (toolMessage.content?.map((part) => {
 										if (part.type === "image") {
-											return convertImagePart(part)
+											return convertImagePart(part, options.supportsImages === true)
 										}
 										return new vscode.LanguageModelTextPart(sanitizeSurrogates(part.text))
 									}) ?? [new vscode.LanguageModelTextPart("")])
 
-						return new vscode.LanguageModelToolResultPart(toolMessage.tool_use_id, toolContentParts)
+						return new vscode.LanguageModelToolResultPart(
+							sanitizeIdentifierSurrogates(toolMessage.tool_use_id),
+							toolContentParts,
+						)
 					}),
 
 					// Convert non-tool messages to TextParts after tool messages
 					...nonToolMessages.map((part) => {
 						if (part.type === "image") {
-							return convertImagePart(part)
+							return convertImagePart(part, options.supportsImages === true)
 						}
 						return new vscode.LanguageModelTextPart(sanitizeSurrogates(part.text))
 					}),
@@ -168,9 +240,9 @@ export function convertToVsCodeLmMessages(
 					...toolMessages.map(
 						(toolMessage) =>
 							new vscode.LanguageModelToolCallPart(
-								toolMessage.id,
-								toolMessage.name,
-								asObjectSafe(toolMessage.input),
+								sanitizeIdentifierSurrogates(toolMessage.id),
+								sanitizeToolNameSurrogates(toolMessage.name),
+								sanitizeSurrogatesDeep(asObjectSafe(toolMessage.input)) as object,
 							),
 					),
 				]

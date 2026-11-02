@@ -192,6 +192,13 @@ These would change the recommendation:
 - **Does the provider-identifier migration have a mechanical codemod in Zoo's history?** If so,
   that migration drops from large to routine and could move up to IMPORT NOW.
 
+## Sync log
+
+| Date       | Scope                                                                                                                            | Record                                                                                                                                                                                                            |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-09-10 | Previous sync                                                                                                                    | Fork PR #18                                                                                                                                                                                                       |
+| 2026-11-02 | Zoo PRs #1605, #1188, #1608, #1606, #2196 (VS Code LM), #2053 (diff failure reports), hand-ported. #2159, #2228, #2269 deferred. | Branch `feat/port-zoo-review-changes-2`; [VS Code LM design](/myplans/vscode-lm-compatibility/vscode-lm-compatibility-design.md), [diff design](/myplans/diff-failure-reporting/diff-failure-reporting-design.md) |
+
 ## Related local documents
 
 - [`docs/design/per-mode-mcp-settings.md`](../design/per-mode-mcp-settings.md)

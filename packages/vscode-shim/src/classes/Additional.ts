@@ -127,7 +127,16 @@ export class LanguageModelDataPart {
 	}
 
 	static json(value: unknown, mimeType: string = "application/json"): LanguageModelDataPart {
-		return new LanguageModelDataPart(new TextEncoder().encode(JSON.stringify(value)), mimeType)
+		let serialized: string | undefined
+		try {
+			serialized = JSON.stringify(value)
+		} catch {
+			throw new TypeError("LanguageModelDataPart.json: supplied value cannot be represented as JSON")
+		}
+		if (serialized === undefined) {
+			throw new TypeError("LanguageModelDataPart.json: supplied value cannot be represented as JSON")
+		}
+		return new LanguageModelDataPart(new TextEncoder().encode(serialized), mimeType)
 	}
 }
 

@@ -8,8 +8,18 @@ import type { ApiHandlerOptions } from "../../shared/api"
 import { SELECTOR_SEPARATOR, stringifyVsCodeLmModelSelector } from "../../shared/vsCodeSelectorUtils"
 import { normalizeToolSchema } from "../../utils/json-schema"
 
-import { ApiStream } from "../transform/stream"
-import { convertToVsCodeLmMessages, extractTextCountFromMessage } from "../transform/vscode-lm-format"
+import { ApiStream, ApiStreamChunk } from "../transform/stream"
+import {
+	convertToVsCodeLmMessages,
+	extractTextCountFromMessage,
+	sanitizeSurrogates,
+	sanitizeSurrogatesDeep,
+	sanitizeToolNameSurrogates,
+} from "../transform/vscode-lm-format"
+
+import { CONTEXT_WINDOW_EXCEEDED_STATUS } from "../../core/context/context-management/context-error-handling"
+
+import { QuotingScanState } from "./vscode-lm-quoting"
 
 import { BaseProvider } from "./base-provider"
 import type { SingleCompletionHandler, ApiHandlerCreateMessageMetadata } from "../index"
@@ -25,129 +35,281 @@ function convertToVsCodeLmTools(tools: OpenAI.Chat.ChatCompletionTool[]): vscode
 	return tools
 		.filter((tool) => tool.type === "function")
 		.map((tool) => ({
-			name: tool.function.name,
-			description: tool.function.description || "",
+			name: sanitizeToolNameSurrogates(tool.function.name),
+			description: sanitizeSurrogates(tool.function.description || ""),
 			inputSchema: tool.function.parameters
-				? normalizeToolSchema(tool.function.parameters as Record<string, unknown>)
+				? (sanitizeSurrogatesDeep(
+						normalizeToolSchema(tool.function.parameters as Record<string, unknown>),
+					) as object)
 				: undefined,
 		}))
 }
 
-/**
- * Recovery for leaked tool calls
- * ------------------------------
- * Some VS Code LM backends — notably GitHub Copilot serving Anthropic Claude models —
- * intermittently stream a tool call as PLAIN TEXT using Anthropic's internal function-call
- * XML instead of emitting a structured `LanguageModelToolCallPart`. The leaked text looks
- * like this (sometimes without the outer `<function_calls>` wrapper and often prefixed by a
- * stray decode-artifact token, which is what makes the upstream parser miss it):
- *
- *   <invoke name="update_todo_list">
- *   <parameter name="todos">[x] ...</parameter>
- *   </invoke>
- *
- * When this happens the assistant turn contains no tool_use block, so Roo reports
- * "no tools used" and the task stalls in a retry loop. The helpers below detect the leaked
- * markup mid-stream and replay it as a real tool call. Recovery is deliberately
- * conservative: only `<invoke>` blocks whose name matches a tool we actually offered this
- * turn are treated as calls; everything else is passed through unchanged as text.
- */
-const LEAKED_TOOL_CALL_START = /<(?:antml:)?(?:function_calls|invoke)\b/i
-const LEAKED_INVOKE_BLOCK = /<(?:antml:)?invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/(?:antml:)?invoke\s*>/gi
-const LEAKED_INVOKE_PARAM = /<(?:antml:)?parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/(?:antml:)?parameter\s*>/gi
+const LEAKED_TOOL_CALL_START = /<\/?(?:antml:)?function_calls(?:\s|>)|<(?:antml:)?invoke\s+name="/i
+let salvageRequestIndex = 0
 
-/**
- * Returns the length of a trailing `<partial-tag` fragment that might be the start of a
- * leaked tool-call marker split across stream chunks. Such a tail is held back until more
- * text arrives so the marker can be detected intact.
- */
+const MAX_PARTIAL_INVOKE_CARRY = 64
+
 export function trailingPartialToolMarkerLength(text: string): number {
-	const match = text.match(/<(?:antml:)?[a-zA-Z_]*$/)
-	return match ? match[0].length : 0
+	const tailStart = text.lastIndexOf("<")
+	const tail = text.slice(tailStart).toLowerCase()
+	if (
+		tailStart !== -1 &&
+		[
+			"<function_calls",
+			"</function_calls",
+			"<antml:function_calls",
+			"</antml:function_calls",
+			"<invoke",
+			"<antml:invoke",
+		].some((marker) => marker.startsWith(tail))
+	) {
+		return tail.length
+	}
+
+	if (/<(?:antml:)?invoke\s+(?:n(?:a(?:m(?:e(?:=)?)?)?)?)?$/i.test(text)) {
+		return text.length - tailStart
+	}
+	const partialTag = text.match(/<(?:antml:)?[a-zA-Z_]*$/)
+	if (partialTag) {
+		return partialTag[0].length <= MAX_PARTIAL_INVOKE_CARRY ? partialTag[0].length : 0
+	}
+
+	const partialInvoke = text.match(/<(?:antml:)?invoke\b[^<>]*$/i)
+	return partialInvoke && partialInvoke[0].length <= MAX_PARTIAL_INVOKE_CARRY ? partialInvoke[0].length : 0
 }
 
-function parseLeakedInvokeParams(body: string): Record<string, string> {
-	const input: Record<string, string> = {}
-	LEAKED_INVOKE_PARAM.lastIndex = 0
-	let match: RegExpExecArray | null
-	while ((match = LEAKED_INVOKE_PARAM.exec(body)) !== null) {
-		input[match[1]] = match[2].trim()
+function narrationSuffixes(text: string): Uint8Array {
+	const matchingOpeners = new Map<number, number>()
+	const pendingOpeners: number[] = []
+	for (let index = 0; index < text.length; index++) {
+		if (text[index] === "\n") pendingOpeners.length = 0
+		else if (text[index] === "<") pendingOpeners.push(index)
+		else if (text[index] === ">" && pendingOpeners.length) matchingOpeners.set(index, pendingOpeners.pop()!)
+	}
+	const suffixes = new Uint8Array(text.length + 1)
+	let skippedUntil = text.length
+	let hasNarration = false
+	for (let index = text.length - 1; index >= 0; index--) {
+		if (text[index] === "\n") {
+			hasNarration = false
+			skippedUntil = index
+		} else if (index < skippedUntil) {
+			const opener = matchingOpeners.get(index)
+			if (opener !== undefined) skippedUntil = opener
+			else if (text[index].trim()) hasNarration = true
+		}
+		suffixes[index] = Number(hasNarration)
+	}
+	return suffixes
+}
+
+function isQuotedAsCode(suffixes: Uint8Array, endIndex: number, scan: QuotingScanState): boolean {
+	if (scan.isInsideCodeFence() || scan.hasOddBacktickCountOnLine()) {
+		return true
+	}
+
+	if (suffixes[endIndex]) {
+		return true
+	}
+
+	return scan.hasQuotingCue()
+}
+
+export type LeakedToolSchemas = ReadonlyMap<string, Record<string, unknown> | undefined>
+
+function structuredParamCheck(declaredType: string): ((parsed: unknown) => boolean) | undefined {
+	const checks: Record<string, (parsed: unknown) => boolean> = {
+		object: (parsed) => typeof parsed === "object" && !Array.isArray(parsed),
+		array: (parsed) => Array.isArray(parsed),
+		number: (parsed) => Number.isFinite(parsed),
+		integer: (parsed) => Number.isInteger(parsed),
+		boolean: (parsed) => typeof parsed === "boolean",
+	}
+
+	return Object.hasOwn(checks, declaredType) ? checks[declaredType] : undefined
+}
+
+type DeclaredType = { type: string; nullable: boolean }
+
+function resolveTypeUnion(types: string[]): DeclaredType | undefined {
+	const nullable = types.includes("null")
+	const nonNullTypes = types.filter((entry) => entry !== "null")
+
+	if (nonNullTypes.length === 0) {
+		return nullable ? { type: "null", nullable } : undefined
+	}
+
+	return nonNullTypes.length === 1 ? { type: nonNullTypes[0], nullable } : undefined
+}
+
+function declaredParamType(schema: Record<string, unknown> | undefined, paramName: string): DeclaredType | undefined {
+	const properties = schema?.["properties"] as Record<string, unknown> | undefined
+	const property = properties?.[paramName] as Record<string, unknown> | undefined
+	const type = property?.["type"]
+	if (typeof type === "string") {
+		return { type, nullable: false }
+	}
+	if (Array.isArray(type)) {
+		return resolveTypeUnion(type.filter((entry): entry is string => typeof entry === "string"))
+	}
+	const alternatives = property?.["anyOf"]
+	if (Array.isArray(alternatives)) {
+		const branchTypes: string[] = []
+		for (const alternative of alternatives) {
+			const branchType = (alternative as Record<string, unknown> | null)?.["type"]
+
+			if (typeof branchType !== "string") {
+				return undefined
+			}
+			branchTypes.push(branchType)
+		}
+		return resolveTypeUnion(branchTypes)
+	}
+	return undefined
+}
+
+function convertLeakedParamValue(raw: string, declared: DeclaredType | undefined): { value: unknown } | undefined {
+	if (declared === undefined || declared.type === "string") {
+		return { value: raw }
+	}
+
+	if (declared.type === "null") {
+		return raw === "null" ? { value: null } : undefined
+	}
+	const matchesDeclaredType = structuredParamCheck(declared.type)
+	if (!matchesDeclaredType) {
+		return undefined
+	}
+
+	let parsed: unknown
+	try {
+		parsed = JSON.parse(raw)
+	} catch {
+		return undefined
+	}
+
+	if (parsed === null) {
+		return declared.nullable ? { value: null } : undefined
+	}
+
+	return matchesDeclaredType(parsed) ? { value: parsed } : undefined
+}
+
+function parseLeakedInvokeParams(
+	body: string,
+	schema: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+	const input: Record<string, unknown> = Object.create(null)
+	const openerPattern = /<(?:antml:)?parameter\s+name="([^"]+)"\s*>/gi
+	const closerPattern = /<\/(?:antml:)?parameter\s*>/gi
+	let consumedUpTo = 0
+	for (let opener = openerPattern.exec(body); opener; opener = openerPattern.exec(body)) {
+		if (body.slice(consumedUpTo, opener.index).trim()) return undefined
+		const valueStart = opener.index + opener[0].length
+		closerPattern.lastIndex = valueStart
+		const closer = closerPattern.exec(body)
+		if (!closer) return undefined
+		const raw = body.slice(valueStart, closer.index)
+		if (/<(?:antml:)?parameter\b/i.test(raw)) return undefined
+		const name = opener[1]
+		if (Object.hasOwn(input, name)) return undefined
+		const converted = convertLeakedParamValue(raw.trim(), declaredParamType(schema, name))
+		if (!converted) return undefined
+		input[name] = converted.value
+		consumedUpTo = closer.index + closer[0].length
+		openerPattern.lastIndex = consumedUpTo
+	}
+
+	if (body.slice(consumedUpTo).trim()) {
+		return undefined
+	}
+	if (schema !== undefined) {
+		const props = schema.properties
+		if (props === null || props === undefined || typeof props !== "object" || Array.isArray(props)) {
+			return undefined
+		}
+		for (const parameterName of Object.keys(input)) {
+			if (!Object.hasOwn(props as Record<string, unknown>, parameterName)) {
+				return undefined
+			}
+		}
 	}
 	return input
 }
 
-/**
- * Extracts complete leaked `<invoke>` tool-call blocks from `text`. Only blocks whose name
- * is present in `validToolNames` are returned as calls; all other text (including `<invoke>`
- * blocks for unknown names) is returned as `leftoverText` so legitimate prose is preserved.
- * Bare `<function_calls>` wrapper tags are stripped from the leftover text.
- */
 export function extractLeakedToolCalls(
 	text: string,
-	validToolNames: ReadonlySet<string>,
-): { calls: Array<{ name: string; input: Record<string, string> }>; leftoverText: string } {
-	const calls: Array<{ name: string; input: Record<string, string> }> = []
+	validTools: ReadonlySet<string> | LeakedToolSchemas,
+	precedingText = "",
+): { calls: Array<{ name: string; input: Record<string, unknown> }>; leftoverText: string } {
+	const scan = new QuotingScanState()
+	scan.advance(precedingText)
+	return extractLeakedToolCallsWithState(text, validTools, scan)
+}
+
+function extractLeakedToolCallsWithState(
+	text: string,
+	validTools: ReadonlySet<string> | LeakedToolSchemas,
+	scan: QuotingScanState,
+): { calls: Array<{ name: string; input: Record<string, unknown> }>; leftoverText: string } {
+	const schemaFor = (name: string) =>
+		validTools instanceof Map ? (validTools.get(name) as Record<string, unknown> | undefined) : undefined
+	const calls: Array<{ name: string; input: Record<string, unknown> }> = []
+
 	let leftover = ""
 	let lastIndex = 0
 
-	LEAKED_INVOKE_BLOCK.lastIndex = 0
-	let match: RegExpExecArray | null
-	while ((match = LEAKED_INVOKE_BLOCK.exec(text)) !== null) {
-		leftover += text.slice(lastIndex, match.index)
-		const name = match[1]
-		if (validToolNames.has(name)) {
-			calls.push({ name, input: parseLeakedInvokeParams(match[2]) })
-		} else {
-			// Not one of our tools — keep the block as literal text.
-			leftover += match[0]
+	let scannedUpTo = 0
+
+	const openPattern = /<(?:antml:)?invoke\s+name="([^"]+)"\s*>/gi
+	const closePattern = /<\/(?:antml:)?invoke\s*>/gi
+	const suffixes = narrationSuffixes(text)
+	for (let open = openPattern.exec(text); open !== null; open = openPattern.exec(text)) {
+		const bodyStart = open.index + open[0].length
+		closePattern.lastIndex = bodyStart
+		const close = closePattern.exec(text)
+
+		if (!close) {
+			break
 		}
-		lastIndex = match.index + match[0].length
+		const blockEnd = close.index + close[0].length
+		leftover += text.slice(lastIndex, open.index)
+		const name = open[1]
+		scan.advance(text.slice(scannedUpTo, open.index))
+
+		scannedUpTo = blockEnd
+		const recoverable =
+			validTools.has(name) && scan.isInsideFunctionCallsWrapper() && !isQuotedAsCode(suffixes, blockEnd, scan)
+
+		const input = recoverable
+			? parseLeakedInvokeParams(text.slice(bodyStart, close.index), schemaFor(name))
+			: undefined
+		if (input) {
+			calls.push({ name, input })
+		} else {
+			leftover += text.slice(open.index, blockEnd)
+		}
+		lastIndex = blockEnd
+		openPattern.lastIndex = blockEnd
 	}
 	leftover += text.slice(lastIndex)
+	scan.advance(text.slice(scannedUpTo))
 
-	// Remove bare function-call wrapper tags left behind (cosmetic; also avoids re-teaching
-	// the model this format when the turn is later sent back as history).
-	leftover = leftover.replace(/<\/?(?:antml:)?function_calls\s*>/gi, "")
+	if (calls.length > 0) {
+		leftover = leftover.replace(/<\/?(?:antml:)?function_calls\s*>/gi, "")
+	}
 
 	return { calls, leftoverText: leftover }
 }
 
-/**
- * Context-window safety for Copilot's backend
- * -------------------------------------------
- * When Roo sends messages through the VS Code LM API, GitHub Copilot's backend enforces its own
- * context window. For third-party `sendRequest` callers it trims an over-window request in a way
- * that is NOT tool-pair-aware: it can drop the assistant message holding a `tool_use` while
- * keeping the matching `tool_result`, after which Anthropic rejects the request with
- * "messages.0.content.0: unexpected tool_use_id ... Each tool_result block must have a
- * corresponding tool_use block in the previous message." A single oversized MCP tool result
- * (e.g. a large build log or file dump) in the most-recent turn is enough to push a freshly
- * condensed request over the window — and condensing cannot shrink the newest turn.
- *
- * To keep trimming on OUR side — where tool_use/tool_result pairing is preserved — we shrink
- * oversized `tool_result` payloads before sending so the request fits the window. Only
- * `tool_result` text is truncated (never `tool_use`, assistant text, summaries, or environment
- * details), and only when the request would otherwise exceed the budget, so normal-sized
- * requests are left untouched.
- */
-
-/**
- * Conservative characters-per-token ratio used to turn a token window into a character budget.
- * The token-dense JSON, logs, and code that dominate oversized tool results tokenize to fewer
- * characters per token than prose, so we intentionally under-count (3, not the ~4 typical of
- * English) to keep the resulting budget on the safe side of the enforced window.
- */
 const VSCODE_LM_BUDGET_CHARS_PER_TOKEN = 3
 
-/**
- * Fraction of the context window the *entire* input (system prompt + tool schemas + conversation)
- * is allowed to occupy. The remaining headroom absorbs char/token estimation variance and any
- * output/overhead the backend reserves.
- */
 const VSCODE_LM_INPUT_BUDGET_FRACTION = 0.8
 
-/** A tool_result is never shrunk below this many characters, so a truncated result stays useful. */
 const MIN_TOOL_RESULT_CHARS = 2000
+
+const IMAGE_PLACEHOLDER_CHARS = 64
 
 function readToolResultText(block: Anthropic.Messages.ContentBlockParam): string | undefined {
 	if (!block || (block as { type?: string }).type !== "tool_result") {
@@ -170,7 +332,6 @@ function writeToolResultText(block: Anthropic.Messages.ContentBlockParam, text: 
 	const toolResult = block as Anthropic.Messages.ToolResultBlockParam
 	const content = toolResult.content
 	if (Array.isArray(content)) {
-		// Preserve any non-text parts (e.g. images) and collapse the text into one truncated part.
 		const nonText = content.filter((part) => (part as { type?: string })?.type !== "text")
 		toolResult.content = [{ type: "text", text }, ...nonText] as typeof content
 		return
@@ -178,11 +339,10 @@ function writeToolResultText(block: Anthropic.Messages.ContentBlockParam, text: 
 	toolResult.content = text
 }
 
-/**
- * Middle-out truncate `text` to at most `maxChars`, keeping the head and tail and replacing the
- * middle with a marker noting how many characters were removed. Head/tail are preserved because
- * logs and file dumps carry the most signal at their start (structure) and end (recent output).
- */
+function trimTrailingHighSurrogate(text: string): string {
+	return text.length > 0 && (text.charCodeAt(text.length - 1) & 0xfc00) === 0xd800 ? text.slice(0, -1) : text
+}
+
 export function middleOutTruncate(text: string, maxChars: number): string {
 	if (maxChars <= 0) {
 		return ""
@@ -194,24 +354,26 @@ export function middleOutTruncate(text: string, maxChars: number): string {
 	const buildMarker = (removed: number) =>
 		`\n\n[... ${removed.toLocaleString("en-US")} characters truncated to fit the model context window ...]\n\n`
 
-	// Reserve room for the marker, sized against the original length so the result never grows.
 	const reservedMarkerLength = buildMarker(text.length).length
-	const keep = Math.max(0, maxChars - reservedMarkerLength)
+
+	if (maxChars <= reservedMarkerLength) {
+		return trimTrailingHighSurrogate(text.slice(0, maxChars))
+	}
+	const keep = maxChars - reservedMarkerLength
 	const headLength = Math.ceil(keep / 2)
 	const tailLength = keep - headLength
-	let head = text.slice(0, headLength)
-	// Don't end the head on a lone high surrogate — its low half is in the removed middle, and a lone
-	// surrogate cannot be encoded as UTF-8 (the backend 400s the whole request). Drop the split half.
-	if (head.length > 0 && (head.charCodeAt(head.length - 1) & 0xfc00) === 0xd800) {
-		head = head.slice(0, -1)
-	}
+	const head = trimTrailingHighSurrogate(text.slice(0, headLength))
 	let tail = tailLength > 0 ? text.slice(text.length - tailLength) : ""
-	// Likewise, don't start the tail on a lone low surrogate (its high half is in the removed middle).
+
 	if (tail.length > 0 && (tail.charCodeAt(0) & 0xfc00) === 0xdc00) {
 		tail = tail.slice(1)
 	}
 	const removed = text.length - head.length - tail.length
 	return `${head}${buildMarker(removed)}${tail}`
+}
+
+export function estimateMessagesChars(messages: Anthropic.Messages.MessageParam[]): number {
+	return messages.reduce((sum, message) => sum + estimateContentChars(message.content), 0)
 }
 
 function estimateContentChars(content: Anthropic.Messages.MessageParam["content"]): number {
@@ -231,66 +393,59 @@ function estimateContentChars(content: Anthropic.Messages.MessageParam["content"
 		} else if (type === "tool_use") {
 			total += JSON.stringify((block as Anthropic.Messages.ToolUseBlockParam).input ?? {}).length
 		} else if (type === "image") {
-			total += 8 // "[IMAGE]" placeholder — VS Code LM drops image data anyway.
+			total += IMAGE_PLACEHOLDER_CHARS
 		}
 	}
 	return total
 }
 
-/**
- * Shrinks oversized `tool_result` payloads (largest first, middle-out) until the conversation fits
- * `budgetChars`. Mutates the tool_result blocks of the supplied messages in place — callers pass a
- * cloned array (see `createMessage`) so stored history is never mutated. Returns the same array for
- * convenience. A no-op when the conversation already fits.
- */
 export function truncateToolResultsToFitWindow(
 	messages: Anthropic.Messages.MessageParam[],
 	budgetChars: number,
-): Anthropic.Messages.MessageParam[] {
+): { messages: Anthropic.Messages.MessageParam[]; remainingChars: number } {
+	const initialTotal = () => messages.reduce((sum, message) => sum + estimateContentChars(message.content), 0)
 	if (!Number.isFinite(budgetChars) || budgetChars <= 0) {
-		return messages
+		return { messages, remainingChars: initialTotal() }
 	}
 
-	let total = messages.reduce((sum, message) => sum + estimateContentChars(message.content), 0)
+	let total = initialTotal()
 	if (total <= budgetChars) {
-		return messages
+		return { messages, remainingChars: total }
 	}
 
-	// Collect every truncatable tool_result block, largest first.
-	const toolResultBlocks: Anthropic.Messages.ContentBlockParam[] = []
+	const blockText = new Map<Anthropic.Messages.ContentBlockParam, string>()
 	for (const message of messages) {
 		if (!Array.isArray(message.content)) {
 			continue
 		}
 		for (const block of message.content) {
-			if (readToolResultText(block) !== undefined) {
-				toolResultBlocks.push(block)
+			const text = readToolResultText(block)
+			if (text !== undefined) {
+				blockText.set(block, text)
 			}
 		}
 	}
-	toolResultBlocks.sort((a, b) => (readToolResultText(b)?.length ?? 0) - (readToolResultText(a)?.length ?? 0))
+	const toolResultBlocks = [...blockText.keys()]
+	toolResultBlocks.sort((a, b) => (blockText.get(b)?.length ?? 0) - (blockText.get(a)?.length ?? 0))
 
 	for (const block of toolResultBlocks) {
 		if (total <= budgetChars) {
 			break
 		}
-		const text = readToolResultText(block)
+		const text = blockText.get(block)
 		if (text === undefined || text.length <= MIN_TOOL_RESULT_CHARS) {
 			continue
 		}
 
 		const overage = total - budgetChars
 		const target = Math.max(MIN_TOOL_RESULT_CHARS, text.length - overage)
-		if (target >= text.length) {
-			continue
-		}
 
 		const truncated = middleOutTruncate(text, target)
 		total -= text.length - truncated.length
 		writeToolResultText(block, truncated)
 	}
 
-	return messages
+	return { messages, remainingChars: total }
 }
 
 /**
@@ -637,24 +792,34 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 			content: this.cleanMessageContent(msg.content),
 		}))
 
-		// Keep context-window trimming on OUR side. Copilot's backend trims an over-window request
-		// without preserving tool_use/tool_result pairing, which orphans a tool_result and triggers a
-		// 400 ("messages.0.content.0: unexpected tool_use_id"). Shrink oversized tool_result payloads
-		// so the request fits the window before we hand it off. See truncateToolResultsToFitWindow.
 		const contextWindowTokens = this.getCondenseContextWindow()
 		if (Number.isFinite(contextWindowTokens) && contextWindowTokens > 0) {
 			const toolSchemaChars = metadata?.tools ? JSON.stringify(metadata.tools).length : 0
-			const messagesBudgetChars =
+			const rawBudgetChars =
 				contextWindowTokens * VSCODE_LM_INPUT_BUDGET_FRACTION * VSCODE_LM_BUDGET_CHARS_PER_TOKEN -
 				systemPrompt.length -
 				toolSchemaChars
-			truncateToolResultsToFitWindow(cleanedMessages, messagesBudgetChars)
+
+			const messagesBudgetChars = Math.max(MIN_TOOL_RESULT_CHARS, rawBudgetChars)
+			const { remainingChars } = truncateToolResultsToFitWindow(cleanedMessages, messagesBudgetChars)
+
+			if (remainingChars > rawBudgetChars) {
+				throw Object.assign(
+					new Error(
+						"Roo Code <Language Model API>: The request is too large for this model's context window " +
+							`(estimated ${remainingChars.toLocaleString("en-US")} characters against a budget of ` +
+							`${Math.max(0, Math.floor(rawBudgetChars)).toLocaleString("en-US")}), and it cannot be reduced further without ` +
+							"breaking tool-call pairing. Condense the conversation or start a new task.",
+					),
+					{ status: CONTEXT_WINDOW_EXCEEDED_STATUS },
+				)
+			}
 		}
 
 		// Convert Anthropic messages to VS Code LM messages
 		const vsCodeLmMessages: vscode.LanguageModelChatMessage[] = [
-			vscode.LanguageModelChatMessage.Assistant(systemPrompt),
-			...convertToVsCodeLmMessages(cleanedMessages),
+			vscode.LanguageModelChatMessage.Assistant(sanitizeSurrogates(systemPrompt)),
+			...convertToVsCodeLmMessages(cleanedMessages, { supportsImages: this.getModel().info.supportsImages }),
 		]
 
 		// Initialize cancellation token for the request
@@ -666,19 +831,82 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 		// Accumulate the text and count at the end of the stream to reduce token counting overhead.
 		let accumulatedText: string = ""
 
-		// Leaked tool-call recovery state (see `extractLeakedToolCalls`). Only enabled when we
-		// actually offered tools this turn, so it can never misfire on plain conversations.
-		const providedToolNames = new Set(
-			(metadata?.tools ?? [])
-				.filter((tool) => tool.type === "function")
-				.map((tool) => tool.function.name)
-				.filter((name) => name.length > 0),
-		)
-		const salvageLeakedToolCalls = providedToolNames.size > 0
-		let salvageBuffering = false
-		let salvageBuffer = ""
+		const providedTools = (metadata?.tools ?? [])
+			.filter((tool) => tool.type === "function")
+			.filter((tool) => tool.function.name.length > 0)
+		const providedToolSchemas = new Map<string, Record<string, unknown> | undefined>()
+		const encodedToolAliases = new Map<string, string>()
+		const ambiguousNames = new Set<string>()
+		const declaredNames = new Map<string, string>()
+		for (const tool of providedTools) {
+			const originalName = tool.function.name
+			const encodedName = sanitizeToolNameSurrogates(originalName)
+			declaredNames.set(encodedName, originalName)
+			for (const alias of new Set([originalName, encodedName])) {
+				if (providedToolSchemas.has(alias)) {
+					ambiguousNames.add(alias)
+				} else {
+					providedToolSchemas.set(alias, tool.function.parameters as Record<string, unknown> | undefined)
+					encodedToolAliases.set(alias, originalName)
+				}
+			}
+		}
+		for (const alias of ambiguousNames) providedToolSchemas.delete(alias)
+		const salvageLeakedToolCalls = providedToolSchemas.size > 0
+		let salvageBuffer: string[] | undefined
 		let salvageCarry = ""
+		let salvageCarryIsInvokeWhitespace = false
+		let salvagePrecedingText: string[] = []
+		const salvageScan = new QuotingScanState()
 		let salvagedToolCallIndex = 0
+		const salvageRequestId = salvageRequestIndex++
+
+		const parseSalvage = (span: string): ApiStreamChunk[] => {
+			const drained: ApiStreamChunk[] = []
+			const { calls, leftoverText } = extractLeakedToolCallsWithState(span, providedToolSchemas, salvageScan)
+			if (leftoverText) {
+				drained.push({ type: "text", text: leftoverText })
+			}
+			for (const call of calls) {
+				const originalName = encodedToolAliases.get(call.name) ?? call.name
+				console.warn(
+					"Roo Code <Language Model API>: Recovered a tool call the model emitted as text instead of a structured tool call:",
+					{ name: originalName, params: Object.keys(call.input) },
+				)
+				drained.push({
+					type: "tool_call",
+					id: `vscodelm-salvaged-${salvageRequestId}-${salvagedToolCallIndex++}`,
+					name: originalName,
+					arguments: JSON.stringify(call.input),
+				})
+			}
+			return drained
+		}
+
+		const flushSalvage = (): ApiStreamChunk[] => {
+			if (this.currentRequestCancellation?.token.isCancellationRequested) {
+				salvageBuffer = undefined
+				salvageCarry = ""
+				return []
+			}
+			if (!salvageLeakedToolCalls) {
+				return []
+			}
+
+			salvageScan.advance(salvagePrecedingText.join(""))
+			salvagePrecedingText = []
+			if (!salvageBuffer) {
+				const carried = salvageCarry
+				salvageCarry = ""
+				salvageCarryIsInvokeWhitespace = false
+				salvageScan.advance(carried)
+				return carried ? [{ type: "text", text: carried }] : []
+			}
+
+			const buffered = salvageBuffer.join("")
+			salvageBuffer = undefined
+			return parseSalvage(buffered)
+		}
 
 		try {
 			// Create the response stream with required options
@@ -711,12 +939,17 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 						continue
 					}
 
-					// Once we've seen the start of a leaked tool-call block, buffer the rest of the
-					// stream so the full markup can be parsed and replayed as a structured call.
-					if (salvageBuffering) {
-						salvageBuffer += chunk.value
+					if (salvageBuffer) {
+						salvageBuffer.push(chunk.value)
 						continue
 					}
+
+					// Unfinished invokes allow unlimited whitespace; avoid rescanning it per chunk.
+					if (salvageCarryIsInvokeWhitespace && /^\s*$/.test(chunk.value)) {
+						salvageCarry += chunk.value
+						continue
+					}
+					salvageCarryIsInvokeWhitespace = false
 
 					// Watch for the start of a leaked tool-call block, carrying a small tail across
 					// chunks so a marker split across chunk boundaries is still detected.
@@ -725,20 +958,23 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 					if (markerMatch) {
 						const before = combined.slice(0, markerMatch.index)
 						if (before) {
+							salvagePrecedingText.push(before)
 							yield { type: "text", text: before }
 						}
-						salvageBuffering = true
-						salvageBuffer = combined.slice(markerMatch.index)
+						salvageBuffer = [combined.slice(markerMatch.index)]
 						salvageCarry = ""
 					} else {
 						const carryLength = trailingPartialToolMarkerLength(combined)
 						const emit = carryLength > 0 ? combined.slice(0, combined.length - carryLength) : combined
 						salvageCarry = carryLength > 0 ? combined.slice(combined.length - carryLength) : ""
+						salvageCarryIsInvokeWhitespace = /^<(?:antml:)?invoke\s+$/i.test(salvageCarry)
 						if (emit) {
+							salvagePrecedingText.push(emit)
 							yield { type: "text", text: emit }
 						}
 					}
 				} else if (chunk instanceof vscode.LanguageModelToolCallPart) {
+					yield* flushSalvage()
 					try {
 						// Validate tool call parameters
 						if (!chunk.name || typeof chunk.name !== "string") {
@@ -771,7 +1007,7 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 							yield {
 								type: "tool_call",
 								id: chunk.callId,
-								name: chunk.name,
+								name: declaredNames.get(chunk.name) ?? chunk.name,
 								arguments: argumentsString,
 							}
 						}
@@ -785,36 +1021,7 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 				}
 			}
 
-			// Flush any leaked tool-call recovery state accumulated during streaming.
-			if (salvageLeakedToolCalls) {
-				// A carried tail that never became a marker is just ordinary text.
-				if (!salvageBuffering && salvageCarry) {
-					yield { type: "text", text: salvageCarry }
-				}
-
-				if (salvageBuffering && salvageBuffer) {
-					const { calls, leftoverText } = extractLeakedToolCalls(salvageBuffer, providedToolNames)
-
-					// Emit surrounding prose first so recovered tool calls come last, matching the
-					// ordering of a normal native tool-calling turn.
-					if (leftoverText) {
-						yield { type: "text", text: leftoverText }
-					}
-
-					for (const call of calls) {
-						console.warn(
-							"Roo Code <Language Model API>: Recovered a tool call the model emitted as text instead of a structured tool call:",
-							{ name: call.name, params: Object.keys(call.input) },
-						)
-						yield {
-							type: "tool_call",
-							id: `vscodelm-salvaged-${Date.now()}-${salvagedToolCallIndex++}`,
-							name: call.name,
-							arguments: JSON.stringify(call.input),
-						}
-					}
-				}
-			}
+			yield* flushSalvage()
 
 			// Count tokens in the accumulated text after stream completion
 			const totalOutputTokens: number = await this.internalCountTokens(accumulatedText)
@@ -943,7 +1150,7 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 		try {
 			const client = await this.getClient()
 			const response = await client.sendRequest(
-				[vscode.LanguageModelChatMessage.User(prompt)],
+				[vscode.LanguageModelChatMessage.User(sanitizeSurrogates(prompt))],
 				{},
 				new vscode.CancellationTokenSource().token,
 			)

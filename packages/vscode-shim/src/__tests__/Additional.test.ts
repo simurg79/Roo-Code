@@ -399,6 +399,40 @@ describe("FileSystemError", () => {
 		})
 	})
 
+	describe("JSON data parts", () => {
+		it.each([false, 0, "", null, { nested: [1, "two"] }])("serializes %j", (value) => {
+			const part = LanguageModelDataPart.json(value)
+			expect(part.mimeType).toBe("application/json")
+			expect(new TextDecoder().decode(part.data)).toBe(JSON.stringify(value))
+		})
+
+		it.each([
+			undefined,
+			() => {},
+			Symbol("value"),
+			1n,
+			{
+				toJSON() {
+					throw new Error("failure")
+				},
+			},
+			{
+				toJSON() {
+					return undefined
+				},
+			},
+		])("rejects unrepresentable values consistently", (value) => {
+			expect(() => LanguageModelDataPart.json(value)).toThrow(TypeError)
+			expect(() => LanguageModelDataPart.json(value)).toThrow("supplied value cannot be represented as JSON")
+		})
+
+		it("rejects circular data without producing a part", () => {
+			const value: { self?: unknown } = {}
+			value.self = value
+			expect(() => LanguageModelDataPart.json(value)).toThrow("supplied value cannot be represented as JSON")
+		})
+	})
+
 	describe("Unavailable()", () => {
 		it("should create Unavailable error", () => {
 			const error = FileSystemError.Unavailable("Resource unavailable")
