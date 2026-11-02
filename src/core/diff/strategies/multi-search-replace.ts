@@ -2,8 +2,8 @@ import { distance } from "fastest-levenshtein"
 
 import { ToolProgressStatus } from "@roo-code/types"
 
-import { addLineNumbers, everyLineHasLineNumbers, stripLineNumbers } from "../../../integrations/misc/extract-text"
-import { ToolUse, DiffStrategy, DiffResult } from "../../../shared/tools"
+import { everyLineHasLineNumbers, stripLineNumbers } from "../../../integrations/misc/extract-text"
+import { ToolUse, DiffStrategy, DiffResult, DiffFailureDiagnostic, formatDiffFailure } from "../../../shared/tools"
 import { normalizeString } from "../../../utils/text-normalization"
 
 const BUFFER_LINES = 40 // Number of extra context lines to show before and after matches
@@ -115,29 +115,36 @@ export class MultiSearchReplaceDiffStrategy implements DiffStrategy {
 		const SEARCH_PREFIX = "<<<<<<<"
 		const REPLACE_PREFIX = ">>>>>>>"
 
-		const reportMergeConflictError = (found: string, _expected: string) => ({
-			success: false,
-			error:
-				`ERROR: Special marker '${found}' found in your diff content at line ${state.line}:\n` +
-				"\n" +
-				`When removing merge conflict markers like '${found}' from files, you MUST escape them\n` +
-				"in your SEARCH section by prepending a backslash (\\) at the beginning of the line:\n" +
-				"\n" +
-				"CORRECT FORMAT:\n\n" +
-				"<<<<<<< SEARCH\n" +
-				"content before\n" +
-				`\\${found}    <-- Note the backslash here in this example\n` +
-				"content after\n" +
-				"=======\n" +
-				"replacement content\n" +
-				">>>>>>> REPLACE\n" +
-				"\n" +
-				"Without escaping, the system confuses your content with diff syntax markers.\n" +
-				"You may use multiple diff blocks in a single diff request, but ANY of ONLY the following separators that occur within SEARCH or REPLACE content must be escaped, as follows:\n" +
-				`\\${SEARCH}\n` +
-				`\\${SEP}\n` +
-				`\\${REPLACE}\n`,
-		})
+		const reportMergeConflictError = (marker: string, _expected: string) => {
+			const found = marker.startsWith(SEARCH_PREFIX)
+				? SEARCH_PREFIX
+				: marker.startsWith(REPLACE_PREFIX)
+					? REPLACE_PREFIX
+					: SEP
+			return {
+				success: false,
+				error:
+					`ERROR: Special marker '${found}' found in your diff content at line ${state.line}:\n` +
+					"\n" +
+					`When removing merge conflict markers like '${found}' from files, you MUST escape them\n` +
+					"in your SEARCH section by prepending a backslash (\\) at the beginning of the line:\n" +
+					"\n" +
+					"CORRECT FORMAT:\n\n" +
+					"<<<<<<< SEARCH\n" +
+					"content before\n" +
+					`\\${found}    <-- Note the backslash here in this example\n` +
+					"content after\n" +
+					"=======\n" +
+					"replacement content\n" +
+					">>>>>>> REPLACE\n" +
+					"\n" +
+					"Without escaping, the system confuses your content with diff syntax markers.\n" +
+					"You may use multiple diff blocks in a single diff request, but ANY of ONLY the following separators that occur within SEARCH or REPLACE content must be escaped, as follows:\n" +
+					`\\${SEARCH}\n` +
+					`\\${SEP}\n` +
+					`\\${REPLACE}\n`,
+			}
+		}
 
 		const reportInvalidDiffError = (found: string, expected: string) => ({
 			success: false,
@@ -253,6 +260,7 @@ export class MultiSearchReplaceDiffStrategy implements DiffStrategy {
 			return {
 				success: false,
 				error: validseq.error!,
+				diagnostic: { reason: "invalid_format" },
 			}
 		}
 
@@ -296,7 +304,8 @@ export class MultiSearchReplaceDiffStrategy implements DiffStrategy {
 		if (matches.length === 0) {
 			return {
 				success: false,
-				error: `Invalid diff format - missing required sections\n\nDebug Info:\n- Expected Format: <<<<<<< SEARCH\\n:start_line: start line\\n-------\\n[search content]\\n=======\\n[replace content]\\n>>>>>>> REPLACE\n- Tip: Make sure to include start_line/SEARCH/=======/REPLACE sections with correct markers on new lines`,
+				error: formatDiffFailure({ reason: "invalid_format" }),
+				diagnostic: { reason: "invalid_format" },
 			}
 		}
 		// Detect line ending from original content
@@ -337,14 +346,9 @@ export class MultiSearchReplaceDiffStrategy implements DiffStrategy {
 
 			// Validate that search and replace content are not identical
 			if (searchContent === replaceContent) {
-				// [apply_diff diagnostics] TEMP: confirm no-op block detection in multi-block diffs.
-				console.warn(
-					`[apply_diff diagnostics] identical SEARCH/REPLACE block` +
-						` startLine=${replacement.startLine}` +
-						` searchPreview=${JSON.stringify(searchContent.slice(0, 80))}`,
-				)
 				diffResults.push({
 					success: false,
+					diagnostic: { reason: "identical_content", line: startLine },
 					error:
 						`Search and replace content are identical - no changes would be made\n\n` +
 						`Debug Info:\n` +
@@ -362,17 +366,15 @@ export class MultiSearchReplaceDiffStrategy implements DiffStrategy {
 			if (searchLines.length === 0) {
 				diffResults.push({
 					success: false,
+					diagnostic: { reason: "empty_search", line: startLine },
 					error: `Empty search content is not allowed\n\nDebug Info:\n- Search content cannot be empty\n- For insertions, provide a specific line using :start_line: and include content to search for\n- For example, match a single line to insert before/after it`,
 				})
 				continue
 			}
 
-			let endLine = replacement.startLine + searchLines.length - 1
-
 			// Initialize search variables
 			let matchIndex = -1
 			let bestMatchScore = 0
-			let bestMatchContent = ""
 			let searchChunk = searchLines.join("\n")
 
 			// Determine search bounds
@@ -392,7 +394,6 @@ export class MultiSearchReplaceDiffStrategy implements DiffStrategy {
 				if (similarity >= this.fuzzyThreshold) {
 					matchIndex = exactStartIndex
 					bestMatchScore = similarity
-					bestMatchContent = originalChunk
 				} else {
 					// Set bounds for buffered search
 					searchStartIndex = Math.max(0, startLine - (this.bufferLines + 1))
@@ -402,14 +403,14 @@ export class MultiSearchReplaceDiffStrategy implements DiffStrategy {
 
 			// If no match found yet, try middle-out search within bounds
 			if (matchIndex === -1) {
-				const {
-					bestScore,
-					bestMatchIndex,
-					bestMatchContent: midContent,
-				} = fuzzySearch(resultLines, searchChunk, searchStartIndex, searchEndIndex)
+				const { bestScore, bestMatchIndex } = fuzzySearch(
+					resultLines,
+					searchChunk,
+					searchStartIndex,
+					searchEndIndex,
+				)
 				matchIndex = bestMatchIndex
 				bestMatchScore = bestScore
-				bestMatchContent = midContent
 			}
 
 			// Try aggressive line number stripping as a fallback if regular matching fails
@@ -422,67 +423,33 @@ export class MultiSearchReplaceDiffStrategy implements DiffStrategy {
 				const aggressiveSearchChunk = aggressiveSearchLines.join("\n")
 
 				// Try middle-out search again with aggressive stripped content (respecting the same search bounds)
-				const {
-					bestScore,
-					bestMatchIndex,
-					bestMatchContent: aggContent,
-				} = fuzzySearch(resultLines, aggressiveSearchChunk, searchStartIndex, searchEndIndex)
+				const { bestScore, bestMatchIndex } = fuzzySearch(
+					resultLines,
+					aggressiveSearchChunk,
+					searchStartIndex,
+					searchEndIndex,
+				)
 				if (bestMatchIndex !== -1 && bestScore >= this.fuzzyThreshold) {
 					matchIndex = bestMatchIndex
 					bestMatchScore = bestScore
-					bestMatchContent = aggContent
 					// Replace the original search/replace with their stripped versions
 					searchContent = aggressiveSearchContent
 					replaceContent = aggressiveReplaceContent
 					searchLines = aggressiveSearchLines
 					replaceLines = replaceContent ? replaceContent.split(/\r?\n/) : []
 				} else {
-					// No match found with either method
-					const originalContentSection =
-						startLine !== undefined && endLine !== undefined
-							? `\n\nOriginal Content:\n${addLineNumbers(
-									resultLines
-										.slice(
-											Math.max(0, startLine - 1 - this.bufferLines),
-											Math.min(resultLines.length, endLine + this.bufferLines),
-										)
-										.join("\n"),
-									Math.max(1, startLine - this.bufferLines),
-								)}`
-							: `\n\nOriginal Content:\n${addLineNumbers(resultLines.join("\n"))}`
-
-					const bestMatchSection = bestMatchContent
-						? `\n\nBest Match Found:\n${addLineNumbers(bestMatchContent, matchIndex + 1)}`
-						: `\n\nBest Match Found:\n(no match)`
-
-					const lineRange = startLine ? ` at line: ${startLine}` : ""
-
-					// A mistyped start-line marker (":3", "start_line:3") is not recognized by
-					// the parser, so it becomes the first line of the search text - and the
-					// following "-------" is swallowed too - making an exact match impossible.
-					const hintLines = searchChunk.split("\n")
-					const firstSearchLine = hintLines[0]?.trim() ?? ""
-					const separatorSwallowed = hintLines[1]?.trim() === "-------"
-					const malformedMarkerHint = /^(?::\s*\d{1,9}:?|:?\s*start[_-]?line\s*:?\s*\d{1,9}:?)$/i.test(
-						firstSearchLine,
-					)
-						? `\n- LIKELY CAUSE: the first line of your search content is "${firstSearchLine}", which looks like a malformed start-line marker and was therefore searched for as literal file text${separatorSwallowed ? ', together with the "-------" line after it' : ""}. The only recognized form is ":start_line:<number>" on the line immediately after "<<<<<<< SEARCH", optionally followed by a "-------" line. Remove or correct that line and retry.`
-						: ""
-
-					diffResults.push({
-						success: false,
-						error:
-							`No sufficiently similar match found${lineRange} ` +
-							`(${Math.floor(bestMatchScore * 100)}% similar, needs ${Math.floor(this.fuzzyThreshold * 100)}%)\n\n` +
-							`Debug Info:\n` +
-							`- Similarity Score: ${Math.floor(bestMatchScore * 100)}%\n` +
-							`- Required Threshold: ${Math.floor(this.fuzzyThreshold * 100)}%\n` +
-							`- Search Range: ${startLine ? `starting at line ${startLine}` : "start to end"}\n` +
-							`- Tried both standard and aggressive line number stripping${malformedMarkerHint}\n` +
-							`- Tip: Use the read_file tool to get the latest content of the file before attempting ` +
-							`to use the apply_diff tool again, as the file content may have changed\n\n` +
-							`Search Content:\n${searchChunk}${bestMatchSection}${originalContentSection}`,
-					})
+					const firstSearchLine = searchLines[0].trim()
+					const diagnostic: DiffFailureDiagnostic = {
+						reason: "no_match",
+						line: startLine || undefined,
+						similarity: bestMatchScore,
+						threshold: this.fuzzyThreshold,
+						malformedMarker:
+							firstSearchLine.length <= 64 &&
+							/^(?::\s*\d{1,9}:?|:?\s*start[_-]?line\s*:?\s*\d{1,9}:?)$/i.test(firstSearchLine),
+						separatorSwallowed: searchLines[1]?.trim() === "-------",
+					}
+					diffResults.push({ success: false, diagnostic, error: formatDiffFailure(diagnostic) })
 					continue
 				}
 			}
@@ -539,12 +506,14 @@ export class MultiSearchReplaceDiffStrategy implements DiffStrategy {
 			return {
 				success: false,
 				failParts: diffResults,
+				blockCount: replacements.length,
 			}
 		}
 		return {
 			success: true,
 			content: finalContent,
 			failParts: diffResults,
+			blockCount: replacements.length,
 		}
 	}
 
@@ -558,11 +527,13 @@ export class MultiSearchReplaceDiffStrategy implements DiffStrategy {
 					return { icon, text: `${searchBlockCount}` }
 				}
 			} else if (result) {
-				const searchBlockCount = (diffContent.match(/SEARCH/g) || []).length
-				if (result.failParts?.length) {
+				const searchBlockCount =
+					result.blockCount ?? (diffContent.match(/^<<<<<<< SEARCH>?[^\S\n]*$/gm) || []).length
+				const failureCount = result.failParts?.filter((part) => !part.success).length ?? 0
+				if (failureCount > 0) {
 					return {
 						icon,
-						text: `${searchBlockCount - result.failParts.length}/${searchBlockCount}`,
+						text: `${Math.max(0, searchBlockCount - failureCount)}/${searchBlockCount}`,
 					}
 				} else {
 					return { icon, text: `${searchBlockCount}` }

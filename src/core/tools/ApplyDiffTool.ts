@@ -11,7 +11,7 @@ import { RecordSource } from "../context-tracking/FileContextTrackerTypes"
 import { unescapeHtmlEntities } from "../../utils/text-normalization"
 import { EXPERIMENT_IDS, experiments } from "../../shared/experiments"
 import { computeDiffStats, sanitizeUnifiedDiff } from "../diff/stats"
-import type { DiffResult, ToolUse } from "../../shared/tools"
+import { formatDiffFailure, type DiffResult, type ToolUse } from "../../shared/tools"
 
 import { BaseTool, ToolCallbacks } from "./BaseTool"
 
@@ -20,17 +20,9 @@ interface ApplyDiffParams {
 	diff: string
 }
 
-// Each failed block embeds a slice of the file, so only the first N are shown in
-// full; the rest are abbreviated to keep the error payload bounded.
 const DETAILED_APPLY_DIFF_FAILURES = 5
-
-// A single detailed failure can embed the whole file, so cap its rendered size.
 const MAX_DETAILED_FAILURE_CHARACTERS = 4000
-
-// Abbreviated failures are one line each, but a single line can still be very long.
 const MAX_SUMMARY_FAILURE_CHARACTERS = 200
-
-// Beyond this many failures even one-line summaries dominate the payload.
 const MAX_ABBREVIATED_FAILURES = 50
 
 export class ApplyDiffTool extends BaseTool<"apply_diff"> {
@@ -102,16 +94,15 @@ export class ApplyDiffTool extends BaseTool<"apply_diff"> {
 					const failedParts = diffResult.failParts.filter((part) => !part.success)
 					const summary =
 						failedParts.length > 1
-							? `${failedParts.length} diff blocks failed to apply. All of them are reported below and must be fixed before retrying.\n\n`
+							? `${failedParts.length} diff blocks failed to apply. Fix the failures below before retrying.\n\n`
 							: ""
 
-					formattedError = `<error_details>\n${summary}${this.formatFailedParts(failedParts)}\n</error_details>`
+					formattedError = `Unable to apply diff to file: ${absolutePath}\n\n<error_details>\n${summary}${this.formatFailedParts(failedParts)}\n</error_details>`
 				} else {
-					const errorDetails = diffResult.details ? JSON.stringify(diffResult.details, null, 2) : ""
-
-					formattedError = `Unable to apply diff to file: ${absolutePath}\n\n<error_details>\n${
-						diffResult.error
-					}${errorDetails ? `\n\nDetails:\n${errorDetails}` : ""}\n</error_details>`
+					formattedError = `Unable to apply diff to file: ${absolutePath}\n\n<error_details>\n${this.truncate(
+						formatDiffFailure(diffResult.diagnostic),
+						MAX_DETAILED_FAILURE_CHARACTERS,
+					)}\n</error_details>`
 				}
 
 				if (currentCount >= 2) {
@@ -239,8 +230,8 @@ export class ApplyDiffTool extends BaseTool<"apply_diff"> {
 			// Used to determine if we should wait for busy terminal to update before sending api request
 			task.didEditFile = true
 
-			// Counted by regex, so a literal `<<<<<<< SEARCH` inside block content inflates it: the `X of Y` count is advisory.
-			const searchBlocks = (diffContent.match(/<<<<<<< SEARCH/g) || []).length
+			const searchBlocks =
+				diffResult.blockCount ?? (diffContent.match(/^<<<<<<< SEARCH>?[^\S\n]*$/gm) || []).length
 			const unappliedParts = diffResult.failParts?.filter((part) => !part.success) ?? []
 			let partFailHint = ""
 
@@ -248,8 +239,8 @@ export class ApplyDiffTool extends BaseTool<"apply_diff"> {
 				const appliedBlocks = Math.max(0, searchBlocks - unappliedParts.length)
 				partFailHint =
 					`Applied ${appliedBlocks} of ${searchBlocks} diff blocks to ${absolutePath}. ` +
-					`The other ${unappliedParts.length} did NOT apply, so those changes are NOT in the file. ` +
-					`Fix the failures below and resend ONLY the blocks that failed; the blocks that already applied will no longer match.\n\n` +
+					`The other ${unappliedParts.length} did NOT apply. Inspect the saved file before retrying, since an earlier block may already contain the intended change. ` +
+					`Fix the failures below and resend ONLY the failed blocks that are still needed; Roo has already applied the successful blocks.\n\n` +
 					`<error_details>\n${this.formatFailedParts(unappliedParts)}\n</error_details>\n\n`
 			}
 
@@ -289,18 +280,17 @@ export class ApplyDiffTool extends BaseTool<"apply_diff"> {
 	private formatFailedParts(failedParts: Extract<DiffResult, { success: false }>[]): string {
 		const renderedCount = Math.min(failedParts.length, MAX_ABBREVIATED_FAILURES)
 		const sections = failedParts.slice(0, renderedCount).map((failPart, index) => {
-			const label = failedParts.length > 1 ? `--- Diff block ${index + 1} of ${failedParts.length} ---\n` : ""
-			const error = failPart.error ?? "Unknown apply_diff failure"
+			const label = failedParts.length > 1 ? `--- Failure ${index + 1} of ${failedParts.length} ---\n` : ""
+			// Render only structured diagnostics; raw strategy errors and details may expose file text.
+			const error = formatDiffFailure(failPart.diagnostic)
 
 			if (index >= DETAILED_APPLY_DIFF_FAILURES) {
-				const summaryLine = error.split("\n")[0]
+				const firstLineEnd = error.indexOf("\n")
+				const summaryLine = firstLineEnd === -1 ? error : error.slice(0, firstLineEnd)
 				return `${label}${this.truncate(summaryLine, MAX_SUMMARY_FAILURE_CHARACTERS)}`
 			}
 
-			const errorDetails = failPart.details ? JSON.stringify(failPart.details, null, 2) : ""
-			const detailedSection = `${label}${error}${errorDetails ? `\n\nDetails:\n${errorDetails}` : ""}`
-
-			return this.truncate(detailedSection, MAX_DETAILED_FAILURE_CHARACTERS)
+			return this.truncate(`${label}${error}`, MAX_DETAILED_FAILURE_CHARACTERS)
 		})
 
 		const trailers: string[] = []

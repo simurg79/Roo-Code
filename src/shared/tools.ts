@@ -339,11 +339,57 @@ export const TOOL_ALIASES: Record<string, ToolName> = {
 	search_and_replace: "edit",
 } as const
 
+export interface DiffFailureDiagnostic {
+	reason: "no_match" | "identical_content" | "empty_search" | "invalid_format"
+	line?: number
+	similarity?: number
+	threshold?: number
+	malformedMarker?: boolean
+	separatorSwallowed?: boolean
+}
+
+export function formatDiffFailure(diagnostic?: DiffFailureDiagnostic): string {
+	const finiteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value)
+	const line = finiteNumber(diagnostic?.line) ? ` at line: ${diagnostic.line}` : ""
+	switch (diagnostic?.reason) {
+		case "no_match": {
+			const scores =
+				finiteNumber(diagnostic.similarity) && finiteNumber(diagnostic.threshold)
+					? ` (${Math.floor(diagnostic.similarity * 100)}% similar, needs ${Math.floor(diagnostic.threshold * 100)}%)` +
+						`\n\nDebug Info:\n- Similarity Score: ${Math.floor(diagnostic.similarity * 100)}%` +
+						`\n- Required Threshold: ${Math.floor(diagnostic.threshold * 100)}%`
+					: ""
+			const markerHint =
+				diagnostic.malformedMarker === true
+					? "\n- LIKELY CAUSE: the first line of your search content looks like a malformed start-line marker and was therefore searched for as literal file text" +
+						(diagnostic.separatorSwallowed === true ? ', together with the "-------" line after it' : "") +
+						'. The only recognized form is ":start_line:<number>" immediately after "<<<<<<< SEARCH". Remove or correct that line and retry.'
+					: ""
+			return (
+				`No sufficiently similar match found${line}${scores}\n` +
+				"- Tried both standard and aggressive line number stripping" +
+				markerHint +
+				"\n- Tip: Use the read_file tool to get the latest content before using apply_diff again, as the file content may have changed."
+			)
+		}
+		case "identical_content":
+			return `Search and replace content are identical${line} - no changes would be made. Use read_file to verify the intended change.`
+		case "empty_search":
+			return `Empty search content is not allowed${line}. Include a complete line to search for.`
+		case "invalid_format":
+			return "Invalid diff format. Roo requires SEARCH, separator and REPLACE marker lines in order. Check line markers and escape literal diff markers before retrying."
+		default:
+			return "Roo could not apply this diff block. Use read_file to check the current file and retry only the edits still needed."
+	}
+}
+
 export type DiffResult =
-	| { success: true; content: string; failParts?: DiffResult[] }
+	| { success: true; content: string; failParts?: DiffResult[]; blockCount?: number }
 	| ({
 			success: false
 			error?: string
+			blockCount?: number
+			diagnostic?: DiffFailureDiagnostic
 			details?: {
 				similarity?: number
 				threshold?: number
