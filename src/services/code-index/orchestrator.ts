@@ -8,15 +8,19 @@ import { CacheManager } from "./cache-manager"
 import { t } from "../../i18n"
 import { ParserFatalError, throwIfAborted } from "./parser-errors"
 import { IndexWriteGate } from "./index-write-gate"
+import { GenerationAllocator } from "./generation-allocator"
+import { INDEX_STOP_LIMIT_MS } from "./constants"
 
-/**
- * Manages the code indexing workflow, coordinating between different services and managers.
- */
 export class CodeIndexOrchestrator {
 	private _fileWatcherSubscriptions: vscode.Disposable[] = []
-	private _isProcessing: boolean = false
+	private _isProcessing = false
 	private _abortController: AbortController | null = null
-
+	private scanPromise?: Promise<void>
+	private stopPromise?: Promise<void>
+	private readonly idleStop = Promise.resolve()
+	private incompleteScan = false
+	private incompleteBatch = false
+	private watcherBatchPending = false
 	public stopped = false
 	private parserFailure?: ParserFatalError
 
@@ -28,413 +32,243 @@ export class CodeIndexOrchestrator {
 		private readonly vectorStore: IVectorStore,
 		private readonly scanner: DirectoryScanner,
 		private readonly fileWatcher: IFileWatcher,
-		private readonly parser?: { stop(): void },
+		private readonly parser?: { stop(): void; readonly stopped?: Promise<void>; logStopTimeout?(): void },
 		private readonly onFatal?: (error: ParserFatalError, message: string) => void,
 		private readonly onStopped?: () => void,
 		private readonly writeGate = new IndexWriteGate(),
+		private readonly generationAllocator = new GenerationAllocator(cacheManager),
+		private readonly isCurrentAttempt: () => boolean = () => true,
 	) {}
 
+	private isLive(signal: AbortSignal): boolean {
+		return !signal.aborted && this.isCurrentAttempt()
+	}
+
 	private failStop(error: ParserFatalError): void {
-		if (this.parserFailure || this._abortController?.signal.aborted) return
+		if (this.parserFailure || this._abortController?.signal.aborted || !this.isCurrentAttempt()) return
 		this.parserFailure = error
-		this._abortController?.abort()
-		this.stopWatcher()
 		const message = t("embeddings:orchestrator.parserFailed", {
 			filePath: error.filePath,
 			category: error.category,
 		})
 		this.stateManager.setSystemState("Error", message)
 		this.onFatal?.(error, message)
+		void this.stop(true)
 	}
 
-	/**
-	 * Starts the file watcher if not already running.
-	 */
-	private async _startWatcher(): Promise<void> {
-		if (!this.configManager.isFeatureConfigured) {
-			throw new Error("Cannot start watcher: Service not configured.")
-		}
+	private hasIncompleteFiles(): boolean {
+		return (
+			this.incompleteScan ||
+			this.incompleteBatch ||
+			this.watcherBatchPending ||
+			this.scanner.hasIncompleteFiles ||
+			Object.keys(this.cacheManager.getOpenFiles()).length > 0
+		)
+	}
 
-		this.stateManager.setSystemState("Indexing", "Initializing file watcher...")
-
-		try {
-			const signal = this._abortController!.signal
-			await this.fileWatcher.initialize(signal)
-			throwIfAborted(signal)
-
-			this._fileWatcherSubscriptions = [
-				this.fileWatcher.onDidStartBatchProcessing((filePaths: string[]) => {}),
-				this.fileWatcher.onBatchProgressUpdate(({ processedInBatch, totalInBatch, currentFile }) => {
-					if (signal.aborted) return
-					if (totalInBatch > 0 && this.stateManager.state !== "Indexing") {
-						this.stateManager.setSystemState("Indexing", "Processing file changes...")
-					}
-					this.stateManager.reportFileQueueProgress(
-						processedInBatch,
-						totalInBatch,
-						currentFile ? path.basename(currentFile) : undefined,
-					)
-					if (processedInBatch === totalInBatch) {
-						// Covers (N/N) and (0/0)
-						if (totalInBatch > 0) {
-							// Batch with items completed
-							this.stateManager.setSystemState("Indexed", "File changes processed. Index up-to-date.")
-						} else {
-							if (this.stateManager.state === "Indexing") {
-								// Only transition if it was "Indexing"
-								this.stateManager.setSystemState("Indexed", "Index up-to-date. File queue empty.")
-							}
-						}
-					}
-				}),
-				this.fileWatcher.onDidFinishBatchProcessing((summary: BatchProcessingSummary) => {
-					if (signal.aborted) return
-					if (summary.batchError) {
-						console.error(`[CodeIndexOrchestrator] Batch processing failed:`, summary.batchError)
-					} else {
-						const successCount = summary.processedFiles.filter(
-							(f: { status: string }) => f.status === "success",
-						).length
-						const errorCount = summary.processedFiles.filter(
-							(f: { status: string }) => f.status === "error" || f.status === "local_error",
-						).length
-					}
-				}),
-			]
-			if (this.fileWatcher.onParserFatal) {
-				this._fileWatcherSubscriptions.push(this.fileWatcher.onParserFatal((error) => this.failStop(error)))
-			}
-		} catch (error) {
-			console.error("[CodeIndexOrchestrator] Failed to start file watcher:", error)
-			throw error
+	private async startWatcher(signal: AbortSignal): Promise<void> {
+		await this.fileWatcher.initialize(signal)
+		throwIfAborted(signal)
+		if (!this.isCurrentAttempt()) return
+		this._fileWatcherSubscriptions = [
+			this.fileWatcher.onDidStartBatchProcessing(() => {
+				if (!this.isLive(signal)) return
+				this.watcherBatchPending = true
+				this.stateManager.setSystemState("Indexing", "Processing file changes...")
+			}),
+			this.fileWatcher.onBatchProgressUpdate(({ processedInBatch, totalInBatch, currentFile }) => {
+				if (!this.isLive(signal)) return
+				this.stateManager.reportFileQueueProgress(
+					processedInBatch,
+					totalInBatch,
+					currentFile ? path.basename(currentFile) : undefined,
+				)
+			}),
+			this.fileWatcher.onDidFinishBatchProcessing((summary: BatchProcessingSummary) => {
+				if (!this.isLive(signal)) return
+				this.watcherBatchPending = false
+				const incomplete =
+					!!summary.batchError ||
+					summary.processedFiles.some((file) => file.status !== "success" && file.status !== "skipped")
+				// A later unrelated batch cannot complete files left unfinished by an earlier batch.
+				this.incompleteBatch ||= incomplete
+				if (this.hasIncompleteFiles()) {
+					this.stateManager.setSystemState("Standby", t("embeddings:orchestrator.indexingStoppedPartial"))
+				} else {
+					this.stateManager.setSystemState("Indexed", t("embeddings:orchestrator.fileWatcherStarted"))
+				}
+			}),
+		]
+		if (this.fileWatcher.onParserFatal) {
+			this._fileWatcherSubscriptions.push(this.fileWatcher.onParserFatal((error) => this.failStop(error)))
 		}
 	}
 
-	/**
-	 * Updates the status of a file in the state manager.
-	 */
-
-	/**
-	 * Initiates the indexing process (initial scan and starts watcher).
-	 */
-	public async startIndexing(): Promise<void> {
-		if (this.stopped) return
-		// Check if workspace is available first
-		if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
+	public startIndexing(): Promise<void> {
+		if (this.stopped || !this.isCurrentAttempt()) return Promise.resolve()
+		if (!vscode.workspace.workspaceFolders?.length) {
 			this.stateManager.setSystemState("Error", t("embeddings:orchestrator.indexingRequiresWorkspace"))
-			console.warn("[CodeIndexOrchestrator] Start rejected: No workspace folder open.")
-			return
+			return Promise.resolve()
 		}
-
 		if (!this.configManager.isFeatureConfigured) {
 			this.stateManager.setSystemState("Standby", "Missing configuration. Save your settings to start indexing.")
-			console.warn("[CodeIndexOrchestrator] Start rejected: Missing configuration.")
-			return
+			return Promise.resolve()
 		}
-
-		if (
-			this._isProcessing ||
-			(this.stateManager.state !== "Standby" &&
-				this.stateManager.state !== "Error" &&
-				this.stateManager.state !== "Indexed")
-		) {
-			console.warn(
-				`[CodeIndexOrchestrator] Start rejected: Already processing or in state ${this.stateManager.state}.`,
-			)
-			return
-		}
-
+		if (this._isProcessing) return this.scanPromise ?? Promise.resolve()
+		if (this._abortController) return Promise.resolve()
 		this._isProcessing = true
 		this._abortController = new AbortController()
-		const signal = this._abortController.signal
 		this.stateManager.setSystemState("Indexing", "Initializing services...")
+		this.scanPromise = this.runScan(this._abortController.signal)
+		return this.scanPromise
+	}
 
-		// Track whether we successfully connected to Qdrant and started indexing
-		// This helps us decide whether to preserve cache on error
-		let indexingStarted = false
-
+	private async runScan(signal: AbortSignal): Promise<void> {
 		try {
 			const collectionCreated = await this.writeGate.run(signal, () => this.vectorStore.initialize())
 			throwIfAborted(signal)
-
-			// Successfully connected to Qdrant
-			indexingStarted = true
-
-			if (collectionCreated) {
-				await this.writeGate.run(signal, () => this.cacheManager.clearCacheFile())
-			}
-
-			// Check if the collection already has indexed data
-			// If it does, we can skip the full scan and just start the watcher
-			const hasExistingData = await this.vectorStore.hasIndexedData()
-
+			if (collectionCreated) await this.writeGate.run(signal, () => this.cacheManager.clearCacheFile())
+			await this.generationAllocator.initialize(this.vectorStore, signal, this.writeGate)
 			throwIfAborted(signal)
-
-			if (hasExistingData && !collectionCreated) {
-				// Collection exists with data - run incremental scan to catch any new/changed files
-				// This handles files added while workspace was closed or Qdrant was inactive
-				console.log(
-					"[CodeIndexOrchestrator] Collection already has indexed data. Running incremental scan for new/changed files...",
-				)
-				this.stateManager.setSystemState("Indexing", "Checking for new or modified files...")
-
-				// Mark as incomplete at the start of incremental scan
-				await this.writeGate.run(signal, () => this.vectorStore.markIndexingIncomplete())
-
-				let cumulativeBlocksIndexed = 0
-				let cumulativeBlocksFoundSoFar = 0
-				let batchErrors: Error[] = []
-
-				const handleFileParsed = (fileBlockCount: number) => {
-					if (signal.aborted) return
-					cumulativeBlocksFoundSoFar += fileBlockCount
-					this.stateManager.reportBlockIndexingProgress(cumulativeBlocksIndexed, cumulativeBlocksFoundSoFar)
-				}
-
-				const handleBlocksIndexed = (indexedCount: number) => {
-					if (signal.aborted) return
-					cumulativeBlocksIndexed += indexedCount
-					this.stateManager.reportBlockIndexingProgress(cumulativeBlocksIndexed, cumulativeBlocksFoundSoFar)
-				}
-
-				// Run incremental scan - scanner will skip unchanged files using cache
-				const result = await this.scanner.scanDirectory(
-					this.workspacePath,
-					(batchError: Error) => {
-						console.error(
-							`[CodeIndexOrchestrator] Error during incremental scan batch: ${batchError.message}`,
-							batchError,
-						)
-						batchErrors.push(batchError)
-					},
-					handleBlocksIndexed,
-					handleFileParsed,
-					signal,
-				)
-
-				if (signal.aborted) return
-
-				if (!result) {
-					throw new Error("Incremental scan failed, is scanner initialized?")
-				}
-
-				// If new files were found and indexed, log the results
-				if (cumulativeBlocksFoundSoFar > 0) {
-					console.log(
-						`[CodeIndexOrchestrator] Incremental scan completed: ${cumulativeBlocksIndexed} blocks indexed from new/changed files`,
-					)
-				} else {
-					console.log("[CodeIndexOrchestrator] No new or changed files found")
-				}
-
-				await this._startWatcher()
-
-				// Mark indexing as complete after successful incremental scan
-				await this.writeGate.run(signal, () => this.vectorStore.markIndexingComplete())
-				throwIfAborted(signal)
-
-				this.stateManager.setSystemState("Indexed", t("embeddings:orchestrator.fileWatcherStarted"))
-			} else {
-				// No existing data or collection was just created - do a full scan
-				this.stateManager.setSystemState("Indexing", "Services ready. Starting workspace scan...")
-
-				// Mark as incomplete at the start of full scan
-				await this.writeGate.run(signal, () => this.vectorStore.markIndexingIncomplete())
-
-				let cumulativeBlocksIndexed = 0
-				let cumulativeBlocksFoundSoFar = 0
-				let batchErrors: Error[] = []
-
-				const handleFileParsed = (fileBlockCount: number) => {
-					if (signal.aborted) return
-					cumulativeBlocksFoundSoFar += fileBlockCount
-					this.stateManager.reportBlockIndexingProgress(cumulativeBlocksIndexed, cumulativeBlocksFoundSoFar)
-				}
-
-				const handleBlocksIndexed = (indexedCount: number) => {
-					if (signal.aborted) return
-					cumulativeBlocksIndexed += indexedCount
-					this.stateManager.reportBlockIndexingProgress(cumulativeBlocksIndexed, cumulativeBlocksFoundSoFar)
-				}
-
-				const result = await this.scanner.scanDirectory(
-					this.workspacePath,
-					(batchError: Error) => {
-						console.error(
-							`[CodeIndexOrchestrator] Error during initial scan batch: ${batchError.message}`,
-							batchError,
-						)
-						batchErrors.push(batchError)
-					},
-					handleBlocksIndexed,
-					handleFileParsed,
-					signal,
-				)
-
-				if (signal.aborted) return
-
-				if (!result) {
-					throw new Error("Scan failed, is scanner initialized?")
-				}
-
-				const { stats } = result
-
-				// Check if any blocks were actually indexed successfully
-				// If no blocks were indexed but blocks were found, it means all batches failed
-				if (cumulativeBlocksIndexed === 0 && cumulativeBlocksFoundSoFar > 0) {
-					if (batchErrors.length > 0) {
-						// Use the first batch error as it's likely representative of the main issue
-						const firstError = batchErrors[0]
-						throw new Error(`Indexing failed: ${firstError.message}`)
-					} else {
-						throw new Error(t("embeddings:orchestrator.indexingFailedNoBlocks"))
-					}
-				}
-
-				// Check for partial failures - if a significant portion of blocks failed
-				const failureRate = (cumulativeBlocksFoundSoFar - cumulativeBlocksIndexed) / cumulativeBlocksFoundSoFar
-				if (batchErrors.length > 0 && failureRate > 0.1) {
-					// More than 10% of blocks failed to index
-					const firstError = batchErrors[0]
-					throw new Error(
-						`Indexing partially failed: Only ${cumulativeBlocksIndexed} of ${cumulativeBlocksFoundSoFar} blocks were indexed. ${firstError.message}`,
-					)
-				}
-
-				// CRITICAL: If there were ANY batch errors and NO blocks were successfully indexed,
-				// this is a complete failure regardless of the failure rate calculation
-				if (batchErrors.length > 0 && cumulativeBlocksIndexed === 0) {
-					const firstError = batchErrors[0]
-					throw new Error(`Indexing failed completely: ${firstError.message}`)
-				}
-
-				// Final sanity check: If we found blocks but indexed none and somehow no errors were reported,
-				// this is still a failure
-				if (cumulativeBlocksFoundSoFar > 0 && cumulativeBlocksIndexed === 0) {
-					throw new Error(t("embeddings:orchestrator.indexingFailedCritical"))
-				}
-
-				await this._startWatcher()
-
-				// Mark indexing as complete after successful full scan
-				await this.writeGate.run(signal, () => this.vectorStore.markIndexingComplete())
-				throwIfAborted(signal)
-
+			if (!this.isCurrentAttempt()) return
+			await this.writeGate.run(signal, () => this.vectorStore.markIndexingIncomplete())
+			let blocksIndexed = 0
+			let blocksFound = 0
+			const batchErrors: Error[] = []
+			const result = await this.scanner.scanDirectory(
+				this.workspacePath,
+				(error) => {
+					if (this.isLive(signal)) batchErrors.push(error)
+				},
+				(count) => {
+					if (!this.isLive(signal)) return
+					blocksIndexed += count
+					this.stateManager.reportBlockIndexingProgress(blocksIndexed, blocksFound)
+				},
+				(count) => {
+					if (!this.isLive(signal)) return
+					blocksFound += count
+					this.stateManager.reportBlockIndexingProgress(blocksIndexed, blocksFound)
+				},
+				signal,
+			)
+			throwIfAborted(signal)
+			if (!this.isCurrentAttempt()) return
+			if (!result) throw new Error("Scan failed, is scanner initialized?")
+			this.incompleteScan =
+				batchErrors.length > 0 || !!result.incompleteFiles?.length || blocksIndexed < blocksFound
+			await this.startWatcher(signal)
+			throwIfAborted(signal)
+			if (!this.isCurrentAttempt()) return
+			if (this.hasIncompleteFiles()) {
+				this.stateManager.setSystemState("Standby", t("embeddings:orchestrator.indexingStoppedPartial"))
+				return
+			}
+			await this.writeGate.run(signal, () => this.vectorStore.markIndexingComplete())
+			if (this.isLive(signal)) {
 				this.stateManager.setSystemState("Indexed", t("embeddings:orchestrator.fileWatcherStarted"))
 			}
-		} catch (error: any) {
+		} catch (error) {
+			if (!this.isLive(signal)) return
 			if (error instanceof ParserFatalError) {
 				this.failStop(error)
 				return
 			}
-			if (this.parserFailure) return
-			// Handle abort gracefully — not an error, just a user-initiated stop
-			if (error?.name === "AbortError" || signal.aborted) {
-				console.log("[CodeIndexOrchestrator] Indexing aborted by user.")
-				if (!this.stopped) this.stopIndexing()
+			if (error instanceof Error && error.name === "AbortError") {
+				void this.stop(true)
 				return
 			}
-
-			console.error("[CodeIndexOrchestrator] Error during indexing:", error)
-			if (indexingStarted) {
-				try {
-					await this.writeGate.run(signal, () => this.vectorStore.clearCollection())
-				} catch (cleanupError) {
-					console.error("[CodeIndexOrchestrator] Failed to clean up after error:", cleanupError)
-				}
-			}
-
-			// Only clear cache if indexing had started (Qdrant connection succeeded)
-			// If we never connected to Qdrant, preserve cache for incremental scan when it comes back
-			if (indexingStarted) {
-				// Indexing started but failed mid-way - clear cache to avoid cache-Qdrant mismatch
-				await this.writeGate.run(signal, () => this.cacheManager.clearCacheFile())
-				console.log(
-					"[CodeIndexOrchestrator] Indexing failed after starting. Clearing cache to avoid inconsistency.",
-				)
-			} else {
-				// Never connected to Qdrant - preserve cache for future incremental scan
-				console.log(
-					"[CodeIndexOrchestrator] Failed to connect to Qdrant. Preserving cache for future incremental scan.",
-				)
-			}
-
-			if (signal.aborted) return
 			this.stateManager.setSystemState(
 				"Error",
 				t("embeddings:orchestrator.failedDuringInitialScan", {
-					errorMessage: error.message || t("embeddings:orchestrator.unknownError"),
+					errorMessage: error instanceof Error ? error.message : t("embeddings:orchestrator.unknownError"),
 				}),
 			)
-			this.stopWatcher()
+			void this.stop(true)
 		} finally {
 			this._isProcessing = false
 		}
 	}
 
-	/**
-	 * Stops any in-progress indexing by aborting the scan and stopping the file watcher.
-	 */
-	public stopIndexing(): void {
-		this._abortController?.abort()
-		this.stopWatcher()
-		if (!this.parserFailure)
-			this.stateManager.setSystemState("Standby", t("embeddings:orchestrator.indexingStopped"))
+	public stopIndexing(): Promise<void> {
+		return this.stop(false)
 	}
 
-	/**
-	 * Stops the file watcher and cleans up resources.
-	 */
-	public stopWatcher(): void {
+	public stopWatcher(): Promise<void> {
+		return this.stop(true)
+	}
+
+	private stop(force: boolean): Promise<void> {
+		if (this.stopPromise) return this.stopPromise
+		const signal = this._abortController?.signal
+		const active =
+			this._isProcessing ||
+			!!this.parserFailure ||
+			this.fileWatcher.isProcessing ||
+			(!!signal && this.writeGate.hasPending(signal))
+		if (!active && !force) return this.idleStop
+		const preserveError = this.stateManager.state === "Error" || !!this.parserFailure
+		const expiresAt = Date.now() + INDEX_STOP_LIMIT_MS
+		if (signal) this.writeGate.stopAt(signal, expiresAt)
+		this.stopPromise = Promise.resolve().then(async () => {
+			let timer: ReturnType<typeof setTimeout> | undefined
+			let workerStopped = !this.parser?.stopped
+			const workerExit = this.parser?.stopped?.then(() => {
+				workerStopped = true
+			})
+			const settled = Promise.allSettled([
+				this.scanPromise,
+				signal ? this.writeGate.settled(signal) : undefined,
+				workerExit,
+			]).then(() => false)
+			const expired = await Promise.race([
+				settled,
+				new Promise<boolean>((resolve) => {
+					timer = setTimeout(() => resolve(true), Math.max(0, expiresAt - Date.now()))
+				}),
+			])
+			clearTimeout(timer)
+			if (expired && signal) this.writeGate.abandon(signal, expiresAt)
+			if (expired && !workerStopped) this.parser?.logStopTimeout?.()
+			if (!active || !this.isCurrentAttempt() || preserveError) return
+			this.stateManager.setSystemState(
+				"Standby",
+				t(
+					expired || this.hasIncompleteFiles()
+						? "embeddings:orchestrator.indexingStoppedPartial"
+						: "embeddings:orchestrator.indexingStopped",
+				),
+			)
+		})
+		this.stopped = true
 		this._abortController?.abort()
 		this.parser?.stop()
-		this.stopped = true
-		this.onStopped?.()
 		this.fileWatcher.dispose()
-		this._fileWatcherSubscriptions.forEach((sub) => sub.dispose())
+		this._fileWatcherSubscriptions.forEach((subscription) => subscription.dispose())
 		this._fileWatcherSubscriptions = []
-
-		if (this.stateManager.state !== "Error" && this.stateManager.state !== "Stopping") {
-			this.stateManager.setSystemState("Standby", t("embeddings:orchestrator.fileWatcherStopped"))
+		this.onStopped?.()
+		if (active && !preserveError && this.isCurrentAttempt()) {
+			this.stateManager.setSystemState("Stopping", t("embeddings:orchestrator.indexingStopping"))
 		}
-		this._isProcessing = false
+		return this.stopPromise
 	}
 
-	/**
-	 * Clears all index data by stopping the watcher, clearing the vector store,
-	 * and resetting the cache file.
-	 */
 	public async clearIndexData(): Promise<void> {
-		this._isProcessing = true
-
+		await this.stopWatcher()
+		const signal = new AbortController().signal
 		try {
-			this.stopIndexing()
-			const cleanupSignal = new AbortController().signal
-
-			try {
-				if (this.configManager.isFeatureConfigured) {
-					await this.writeGate.run(cleanupSignal, () => this.vectorStore.deleteCollection())
-				} else {
-					console.warn("[CodeIndexOrchestrator] Service not configured, skipping vector collection clear.")
-				}
-			} catch (error: any) {
-				console.error("[CodeIndexOrchestrator] Failed to clear vector collection:", error)
-				this.stateManager.setSystemState("Error", `Failed to clear vector collection: ${error.message}`)
+			if (this.configManager.isFeatureConfigured) {
+				await this.writeGate.run(signal, () => this.vectorStore.deleteCollection())
 			}
-
-			await this.writeGate.run(cleanupSignal, () => this.cacheManager.clearCacheFile())
-
-			if (this.stateManager.state !== "Error") {
-				this.stateManager.setSystemState("Standby", "Index data cleared successfully.")
+			await this.writeGate.run(signal, () => this.cacheManager.clearCacheFile())
+			if (this.isCurrentAttempt()) this.stateManager.setSystemState("Standby", "Index data cleared successfully.")
+		} catch (error) {
+			if (this.isCurrentAttempt()) {
+				this.stateManager.setSystemState("Error", `Failed to clear index data: ${String(error)}`)
 			}
-		} finally {
-			this._isProcessing = false
 		}
 	}
 
-	/**
-	 * Gets the current state of the indexing system.
-	 */
 	public get state(): IndexingState {
 		return this.stateManager.state
 	}

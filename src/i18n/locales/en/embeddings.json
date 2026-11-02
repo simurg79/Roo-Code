@@ -71,6 +71,7 @@
 		"failedDuringInitialScan": "Failed during initial scan: {{errorMessage}}",
 		"unknownError": "Unknown error",
 		"indexingRequiresWorkspace": "Indexing requires an open workspace folder",
+		"indexingStopping": "Stopping indexing...",
 		"indexingStopped": "Indexing stopped by user.",
 		"indexingStoppedPartial": "Indexing stopped. Partial index data preserved."
 	}

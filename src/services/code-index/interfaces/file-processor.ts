@@ -28,6 +28,7 @@ export interface ICodeParser {
  * Interface for directory scanner
  */
 export interface IDirectoryScanner {
+	readonly hasIncompleteFiles?: boolean
 	/**
 	 * Scans a directory for code blocks
 	 * @param directoryPath Path to the directory to scan
@@ -46,6 +47,7 @@ export interface IDirectoryScanner {
 			skipped: number
 		}
 		totalBlockCount: number
+		incompleteFiles?: string[]
 	}>
 }
 
@@ -58,6 +60,7 @@ export interface IFileWatcher extends vscode.Disposable {
 	 */
 	initialize(signal?: AbortSignal): Promise<void>
 	readonly onParserFatal?: vscode.Event<ParserFatalError>
+	readonly isProcessing?: boolean
 
 	/**
 	 * Event emitted when a batch of files begins processing.

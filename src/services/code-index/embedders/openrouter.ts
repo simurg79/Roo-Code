@@ -1,4 +1,5 @@
 import { OpenAI } from "openai"
+import { waitForRetry } from "./cancellation"
 import { IEmbedder, EmbeddingResponse, EmbedderInfo } from "../interfaces/embedder"
 import {
 	MAX_BATCH_TOKENS,
@@ -93,7 +94,8 @@ export class OpenRouterEmbedder implements IEmbedder {
 	 * @param model Optional model identifier
 	 * @returns Promise resolving to embedding response
 	 */
-	async createEmbeddings(texts: string[], model?: string): Promise<EmbeddingResponse> {
+	async createEmbeddings(texts: string[], model?: string, signal?: AbortSignal): Promise<EmbeddingResponse> {
+		signal?.throwIfAborted()
 		const modelToUse = model || this.defaultModelId
 
 		// Apply model-specific query prefix if required
@@ -126,6 +128,7 @@ export class OpenRouterEmbedder implements IEmbedder {
 		const remainingTexts = [...processedTexts]
 
 		while (remainingTexts.length > 0) {
+			signal?.throwIfAborted()
 			const currentBatch: string[] = []
 			let currentBatchTokens = 0
 			const processedIndices: number[] = []
@@ -161,7 +164,7 @@ export class OpenRouterEmbedder implements IEmbedder {
 			}
 
 			if (currentBatch.length > 0) {
-				const batchResult = await this._embedBatchWithRetries(currentBatch, modelToUse)
+				const batchResult = await this._embedBatchWithRetries(currentBatch, modelToUse, signal)
 				allEmbeddings.push(...batchResult.embeddings)
 				usage.promptTokens += batchResult.usage.promptTokens
 				usage.totalTokens += batchResult.usage.totalTokens
@@ -180,12 +183,15 @@ export class OpenRouterEmbedder implements IEmbedder {
 	private async _embedBatchWithRetries(
 		batchTexts: string[],
 		model: string,
+		signal?: AbortSignal,
 	): Promise<{ embeddings: number[][]; usage: { promptTokens: number; totalTokens: number } }> {
 		for (let attempts = 0; attempts < MAX_RETRIES; attempts++) {
 			// Check global rate limit before attempting request
-			await this.waitForGlobalRateLimit()
+			signal?.throwIfAborted()
+			await this.waitForGlobalRateLimit(signal)
 
 			try {
+				signal?.throwIfAborted()
 				// Build the request parameters
 				const requestParams: any = {
 					input: batchTexts,
@@ -207,8 +213,10 @@ export class OpenRouterEmbedder implements IEmbedder {
 
 				const response = (await this.embeddingsClient.embeddings.create(
 					requestParams,
+					...(signal ? [{ signal }] : []),
 				)) as OpenRouterEmbeddingResponse
 
+				signal?.throwIfAborted()
 				// Convert base64 embeddings to float32 arrays
 				const processedEmbeddings = response.data.map((item: EmbeddingItem) => {
 					if (typeof item.embedding === "string") {
@@ -238,6 +246,7 @@ export class OpenRouterEmbedder implements IEmbedder {
 					},
 				}
 			} catch (error) {
+				signal?.throwIfAborted()
 				const hasMoreAttempts = attempts < MAX_RETRIES - 1
 
 				// Check if it's a rate limit error
@@ -259,7 +268,7 @@ export class OpenRouterEmbedder implements IEmbedder {
 								maxRetries: MAX_RETRIES,
 							}),
 						)
-						await new Promise((resolve) => setTimeout(resolve, delayMs))
+						await waitForRetry(delayMs, signal)
 						continue
 					}
 				}
@@ -329,11 +338,13 @@ export class OpenRouterEmbedder implements IEmbedder {
 	/**
 	 * Waits if there's an active global rate limit
 	 */
-	private async waitForGlobalRateLimit(): Promise<void> {
+	private async waitForGlobalRateLimit(signal?: AbortSignal): Promise<void> {
+		signal?.throwIfAborted()
 		const release = await OpenRouterEmbedder.globalRateLimitState.mutex.acquire()
 		let mutexReleased = false
 
 		try {
+			signal?.throwIfAborted()
 			const state = OpenRouterEmbedder.globalRateLimitState
 
 			if (state.isRateLimited && state.rateLimitResetTime > Date.now()) {
@@ -341,7 +352,7 @@ export class OpenRouterEmbedder implements IEmbedder {
 				// Silent wait - no logging to prevent flooding
 				release()
 				mutexReleased = true
-				await new Promise((resolve) => setTimeout(resolve, waitTime))
+				await waitForRetry(waitTime, signal)
 				return
 			}
 

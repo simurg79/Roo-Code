@@ -41,7 +41,14 @@ export class ParseWorkerClient implements ICodeParser {
 	private active?: PendingParse
 	private timer?: NodeJS.Timeout
 	private nextId = 0
-	private stopped = false
+	private isStopped = false
+	private resolveStopped!: () => void
+	readonly stopped = new Promise<void>((resolve) => {
+		this.resolveStopped = resolve
+	})
+	private stopStartedAt?: number
+	private exitObserved = false
+	private stopTimeoutLogged = false
 	private readonly parser: CodeParser
 	private idleFailure?: Pick<ParserFatalError, "category" | "message">
 
@@ -70,7 +77,7 @@ export class ParseWorkerClient implements ICodeParser {
 			this.idleFailure = undefined
 			return new ParserFatalError(category, filePath, message)
 		}
-		if (this.stopped) return abortError()
+		if (this.isStopped) return abortError()
 		return undefined
 	}
 
@@ -104,13 +111,13 @@ export class ParseWorkerClient implements ICodeParser {
 	}
 
 	private dispatch(): void {
-		if (this.stopped || this.active || this.queue.length === 0) return
+		if (this.isStopped || this.active || this.queue.length === 0) return
 		this.active = this.queue.shift()!
 		try {
 			if (!this.worker) {
 				this.worker = this.workerFactory()
 				this.worker.on("message", (reply) => {
-					if (this.stopped || reply.id !== this.active?.request.id) return
+					if (this.isStopped || reply.id !== this.active?.request.id) return
 					if (reply.error?.fatal || (reply.error && isParserAbort(reply.error.message))) {
 						this.fail("parser-abort", reply.error?.message)
 						return
@@ -129,7 +136,13 @@ export class ParseWorkerClient implements ICodeParser {
 					this.dispatch()
 				})
 				this.worker.on("error", (error) => this.fail("parser-abort", error.message))
-				this.worker.on("exit", (code) => this.fail("parser-abort", `Parse worker exited (${code})`))
+				this.worker.on("exit", (code) => {
+					this.exitObserved = true
+					this.fail("parser-abort", `Parse worker exited (${code})`)
+					console.log(`parse worker exited after ${Math.round(performance.now() - this.stopStartedAt!)} ms`)
+					this.worker = undefined
+					this.resolveStopped()
+				})
 			}
 			this.timer = setTimeout(() => this.fail("parse-timeout"), this.timeoutMs)
 			this.worker.postMessage(this.active.request)
@@ -139,7 +152,7 @@ export class ParseWorkerClient implements ICodeParser {
 	}
 
 	private fail(category: ParserFatalError["category"], message?: string): void {
-		if (this.stopped) return
+		if (this.isStopped) return
 		const failed = this.active
 		this.active = undefined
 		if (failed) this.settle(failed, new ParserFatalError(category, failed.request.filePath, message))
@@ -148,15 +161,27 @@ export class ParseWorkerClient implements ICodeParser {
 	}
 
 	stop(): void {
-		if (this.stopped) return
-		this.stopped = true
+		if (this.isStopped) return
+		this.isStopped = true
+		this.stopStartedAt = performance.now()
 		clearTimeout(this.timer)
 		if (this.active) this.settle(this.active, abortError())
 		this.active = undefined
 		for (const pending of this.queue) this.settle(pending, abortError())
 		this.queue = []
-		void this.worker?.terminate().catch(() => undefined)
-		this.worker = undefined
+		if (!this.worker) {
+			this.exitObserved = true
+			this.resolveStopped()
+		} else if (!this.exitObserved) {
+			// Termination acknowledgement alone is not evidence of physical exit.
+			void this.worker.terminate().catch(() => undefined)
+		}
+	}
+
+	logStopTimeout(): void {
+		if (!this.isStopped || this.exitObserved || this.stopTimeoutLogged) return
+		this.stopTimeoutLogged = true
+		console.log("parse worker exit not observed within stop limit")
 	}
 
 	dispose(): void {

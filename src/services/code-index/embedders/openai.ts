@@ -1,4 +1,5 @@
 import { OpenAI } from "openai"
+import { waitForRetry } from "./cancellation"
 import { OpenAiNativeHandler } from "../../../api/providers/openai-native"
 import { ApiHandlerOptions } from "../../../shared/api"
 import { IEmbedder, EmbeddingResponse, EmbedderInfo } from "../interfaces"
@@ -79,6 +80,7 @@ export class OpenAiEmbedder extends OpenAiNativeHandler implements IEmbedder {
 		const remainingTexts = [...processedTexts]
 
 		while (remainingTexts.length > 0) {
+			signal?.throwIfAborted()
 			const currentBatch: string[] = []
 			let currentBatchTokens = 0
 			const processedIndices: number[] = []
@@ -146,6 +148,7 @@ export class OpenAiEmbedder extends OpenAiNativeHandler implements IEmbedder {
 					signal ? { signal } : undefined,
 				)
 
+				signal?.throwIfAborted()
 				return {
 					embeddings: response.data.map((item) => item.embedding),
 					usage: {
@@ -168,7 +171,7 @@ export class OpenAiEmbedder extends OpenAiNativeHandler implements IEmbedder {
 							maxRetries: MAX_RETRIES,
 						}),
 					)
-					await new Promise((resolve) => setTimeout(resolve, delayMs))
+					await waitForRetry(delayMs, signal)
 					continue
 				}
 

@@ -23,6 +23,7 @@ import { DirectoryScanner, FileWatcher } from "./processors"
 import { ParseWorkerClient } from "./parse-worker-client"
 import { IndexWriteGate } from "./index-write-gate"
 import { ICodeParser, IEmbedder, IFileWatcher, IVectorStore } from "./interfaces"
+import { GenerationAllocator } from "./generation-allocator"
 import { CodeIndexConfigManager } from "./config-manager"
 import { CacheManager } from "./cache-manager"
 import { BATCH_SEGMENT_THRESHOLD } from "./constants"
@@ -36,6 +37,7 @@ export class CodeIndexServiceFactory {
 		private readonly workspacePath: string,
 		private readonly cacheManager: CacheManager,
 		private readonly writeGate = new IndexWriteGate(),
+		private readonly generationAllocator = new GenerationAllocator(cacheManager),
 	) {}
 
 	/**
@@ -194,6 +196,7 @@ export class CodeIndexServiceFactory {
 			ignoreInstance,
 			batchSize,
 			this.writeGate,
+			this.generationAllocator,
 		)
 	}
 
@@ -230,6 +233,7 @@ export class CodeIndexServiceFactory {
 			batchSize,
 			parser,
 			this.writeGate,
+			this.generationAllocator,
 		)
 	}
 

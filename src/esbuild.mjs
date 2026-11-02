@@ -140,6 +140,19 @@ async function main() {
 			...buildOptions,
 			entryPoints: ["services/code-index/parse-worker.ts"],
 			outfile: "dist/parse-worker.js",
+			plugins: [
+				{
+					name: "copyParserFaultWasm",
+					setup(build) {
+						build.onEnd(async () => {
+							await fs.promises.copyFile(
+								path.join(srcDir, "services/code-index/fault-loop.wasm"),
+								path.join(distDir, "fault-loop.wasm"),
+							)
+						})
+					},
+				},
+			],
 		}),
 	])
 

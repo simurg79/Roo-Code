@@ -71,6 +71,7 @@
 		"failedDuringInitialScan": "Gagal selama pemindaian awal: {{errorMessage}}",
 		"unknownError": "Kesalahan tidak diketahui",
 		"indexingRequiresWorkspace": "Pengindeksan memerlukan folder workspace yang terbuka",
+		"indexingStopping": "Menghentikan pengindeksan...",
 		"indexingStopped": "Pengindeksan dihentikan oleh pengguna.",
 		"indexingStoppedPartial": "Pengindeksan dihentikan. Data indeks parsial dipertahankan."
 	}

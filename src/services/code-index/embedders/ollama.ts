@@ -33,7 +33,8 @@ export class CodeIndexOllamaEmbedder implements IEmbedder {
 	 * @param model - Optional model ID to override the default.
 	 * @returns A promise that resolves to an EmbeddingResponse containing the embeddings and usage data.
 	 */
-	async createEmbeddings(texts: string[], model?: string): Promise<EmbeddingResponse> {
+	async createEmbeddings(texts: string[], model?: string, signal?: AbortSignal): Promise<EmbeddingResponse> {
+		signal?.throwIfAborted()
 		const modelToUse = model || this.defaultModelId
 		const url = `${this.baseUrl}/api/embed` // Endpoint as specified
 
@@ -62,14 +63,11 @@ export class CodeIndexOllamaEmbedder implements IEmbedder {
 				})
 			: texts
 
+		const controller = new AbortController()
+		const timeoutId = setTimeout(() => controller.abort(), OLLAMA_EMBEDDING_TIMEOUT_MS)
+		const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
+
 		try {
-			// Note: Standard Ollama API uses 'prompt' for single text, not 'input' for array.
-			// Implementing based on user's specific request structure.
-
-			// Add timeout to prevent indefinite hanging
-			const controller = new AbortController()
-			const timeoutId = setTimeout(() => controller.abort(), OLLAMA_EMBEDDING_TIMEOUT_MS)
-
 			const response = await fetch(url, {
 				method: "POST",
 				headers: {
@@ -79,9 +77,9 @@ export class CodeIndexOllamaEmbedder implements IEmbedder {
 					model: modelToUse,
 					input: processedTexts, // Using 'input' as requested
 				}),
-				signal: controller.signal,
+				signal: requestSignal,
 			})
-			clearTimeout(timeoutId)
+			signal?.throwIfAborted()
 
 			if (!response.ok) {
 				let errorBody = t("embeddings:ollama.couldNotReadErrorBody")
@@ -100,6 +98,7 @@ export class CodeIndexOllamaEmbedder implements IEmbedder {
 			}
 
 			const data = await response.json()
+			signal?.throwIfAborted()
 
 			// Extract embeddings using 'embeddings' key as requested
 			const embeddings = data.embeddings
@@ -111,6 +110,7 @@ export class CodeIndexOllamaEmbedder implements IEmbedder {
 				embeddings: embeddings,
 			}
 		} catch (error: any) {
+			signal?.throwIfAborted()
 			// Log the original error for debugging purposes
 			console.error("Ollama embedding failed:", error)
 
@@ -125,6 +125,8 @@ export class CodeIndexOllamaEmbedder implements IEmbedder {
 
 			// Re-throw a more specific error for the caller
 			throw new Error(t("embeddings:ollama.embeddingFailed", { message: error.message }))
+		} finally {
+			clearTimeout(timeoutId)
 		}
 	}
 

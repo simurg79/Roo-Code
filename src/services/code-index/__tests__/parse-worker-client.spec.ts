@@ -1,5 +1,4 @@
 import { EventEmitter } from "node:events"
-import { Worker } from "node:worker_threads"
 import { ParseWorkerClient, type ParseRequest } from "../parse-worker-client"
 
 class MockWorker extends EventEmitter {
@@ -22,20 +21,59 @@ async function drain(): Promise<void> {
 describe("ParseWorkerClient", () => {
 	afterEach(() => vi.useRealTimers())
 
-	it("interrupts an actual busy worker while the main event loop keeps running", async () => {
-		const worker = new Worker(
-			"require('node:worker_threads').parentPort.on('message', () => { while (true) {} })",
-			{ eval: true },
-		)
-		const client = new ParseWorkerClient(() => worker, 200)
-		const exited = new Promise<void>((resolve) => worker.once("exit", () => resolve()))
-		const started = performance.now()
-		const pending = client.parseFile("busy.ts", options).catch((error) => error)
-		await new Promise((resolve) => setTimeout(resolve, 20))
-		expect(performance.now() - started).toBeLessThan(500)
-		expect(await pending).toMatchObject({ category: "parse-timeout" })
-		await exited
-		expect(performance.now() - started).toBeLessThan(2000)
+	it("settles stopped immediately when stopped before creating a worker", async () => {
+		const factory = vi.fn()
+		const client = new ParseWorkerClient(factory)
+		expect(client.stop()).toBeUndefined()
+		await client.stopped
+		expect(factory).not.toHaveBeenCalled()
+	})
+
+	it.each(["resolved", "rejected", "pending"])(
+		"waits for physical exit with a %s termination promise and logs the parent's timeout once",
+		async (termination) => {
+			vi.useFakeTimers()
+			const log = vi.spyOn(console, "log").mockImplementation(() => {})
+			try {
+				const worker = new MockWorker()
+				if (termination === "rejected") worker.terminate.mockRejectedValue(new Error("termination failed"))
+				if (termination === "pending") worker.terminate.mockReturnValue(new Promise(() => {}))
+				const client = new ParseWorkerClient(() => worker)
+				let exited = false
+				void client.stopped.then(() => {
+					exited = true
+				})
+				const pending = client.parseFile("active.ts", options).catch((error) => error)
+				await drain()
+				expect(client.stop()).toBeUndefined()
+				expect(await pending).toMatchObject({ name: "AbortError" })
+				await vi.advanceTimersByTimeAsync(2000)
+				expect(exited).toBe(false)
+				client.logStopTimeout()
+				client.logStopTimeout()
+				expect(log).toHaveBeenCalledExactlyOnceWith("parse worker exit not observed within stop limit")
+				worker.emit("exit", 1)
+				await client.stopped
+				expect(exited).toBe(true)
+				expect(log).toHaveBeenLastCalledWith(expect.stringMatching(/^parse worker exited after \d+ ms$/))
+				client.logStopTimeout()
+				expect(log).toHaveBeenCalledTimes(2)
+			} finally {
+				log.mockRestore()
+			}
+		},
+	)
+
+	it("observes an unexpected physical exit even when terminate never settles", async () => {
+		const worker = new MockWorker()
+		worker.terminate.mockReturnValue(new Promise(() => {}))
+		const client = new ParseWorkerClient(() => worker)
+		const pending = client.parseFile("active.ts", options).catch((error) => error)
+		await drain()
+		worker.emit("exit", 1)
+		expect(await pending).toMatchObject({ name: "ParserFatalError" })
+		await client.stopped
+		expect(worker.terminate).not.toHaveBeenCalled()
 	})
 
 	it("dispatches FIFO and starts each deadline at dispatch, not enqueue", async () => {
@@ -77,7 +115,7 @@ describe("ParseWorkerClient", () => {
 			expect(await queued).toMatchObject({ name: "AbortError" })
 			await expect(client.parseFile("later.md", options)).rejects.toMatchObject({ name: "AbortError" })
 			expect(worker.requests).toHaveLength(1)
-			expect(worker.terminate).toHaveBeenCalledTimes(1)
+			expect(worker.terminate).toHaveBeenCalledTimes(failure === "exit" ? 0 : 1)
 		},
 	)
 

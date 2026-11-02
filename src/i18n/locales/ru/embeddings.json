@@ -71,6 +71,7 @@
 		"failedDuringInitialScan": "Ошибка во время первоначального сканирования: {{errorMessage}}",
 		"unknownError": "Неизвестная ошибка",
 		"indexingRequiresWorkspace": "Для индексации требуется открытая папка рабочего пространства",
+		"indexingStopping": "Остановка индексации...",
 		"indexingStopped": "Индексация остановлена пользователем.",
 		"indexingStoppedPartial": "Индексация остановлена. Частичные данные индекса сохранены."
 	}

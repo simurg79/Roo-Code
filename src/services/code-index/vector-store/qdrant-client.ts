@@ -296,11 +296,24 @@ export class QdrantVectorStore implements IVectorStore {
 	 * Creates payload indexes for the collection, handling errors gracefully.
 	 */
 	private async _createPayloadIndexes(): Promise<void> {
+		// Completion verification depends on these indexes; initialization must fail if creation fails.
+		await this.client.createPayloadIndex(this.collectionName, {
+			field_name: "filePath",
+			field_schema: "keyword",
+			wait: true,
+		})
+		await this.client.createPayloadIndex(this.collectionName, {
+			field_name: "generation",
+			field_schema: "integer",
+			wait: true,
+		})
+
 		// Create index for the 'type' field to enable metadata filtering
 		try {
 			await this.client.createPayloadIndex(this.collectionName, {
 				field_name: "type",
 				field_schema: "keyword",
+				wait: true,
 			})
 		} catch (indexError: any) {
 			const errorMessage = (indexError?.message || "").toLowerCase()
@@ -318,6 +331,7 @@ export class QdrantVectorStore implements IVectorStore {
 				await this.client.createPayloadIndex(this.collectionName, {
 					field_name: `pathSegments.${i}`,
 					field_schema: "keyword",
+					wait: true,
 				})
 			} catch (indexError: any) {
 				const errorMessage = (indexError?.message || "").toLowerCase()
@@ -467,77 +481,50 @@ export class QdrantVectorStore implements IVectorStore {
 		}
 	}
 
-	/**
-	 * Deletes points by file path
-	 * @param filePath Path of the file to delete points for
-	 */
-	async deletePointsByFilePath(filePath: string): Promise<void> {
-		return this.deletePointsByMultipleFilePaths([filePath])
+	private relativeFilePath(filePath: string): string {
+		return path.normalize(path.isAbsolute(filePath) ? path.relative(this.workspacePath, filePath) : filePath)
 	}
 
-	async deletePointsByMultipleFilePaths(filePaths: string[]): Promise<void> {
-		if (filePaths.length === 0) {
-			return
+	async deletePointsByFilePath(filePath: string, beforeGeneration: number): Promise<void> {
+		return this.deletePointsByMultipleFilePaths([filePath], beforeGeneration)
+	}
+
+	async deletePointsByMultipleFilePaths(filePaths: string[], beforeGeneration: number): Promise<void> {
+		if (!Number.isSafeInteger(beforeGeneration) || beforeGeneration < 0) {
+			throw new Error("A non-negative safe integer generation cutoff is required")
 		}
+		if (filePaths.length === 0) return
 
-		try {
-			// First check if the collection exists
-			const collectionExists = await this.collectionExists()
-			if (!collectionExists) {
-				console.warn(
-					`[QdrantVectorStore] Skipping deletion - collection "${this.collectionName}" does not exist`,
-				)
-				return
-			}
+		await this.client.delete(this.collectionName, {
+			filter: {
+				must: [
+					{ key: "filePath", match: { any: filePaths.map((filePath) => this.relativeFilePath(filePath)) } },
+					{
+						should: [
+							{ key: "generation", range: { lt: beforeGeneration } },
+							{ is_empty: { key: "generation" } },
+						],
+					},
+				],
+			},
+			wait: true,
+		})
+	}
 
-			const workspaceRoot = this.workspacePath
-
-			// Build filters using pathSegments to match the indexed fields
-			const filters = filePaths.map((filePath) => {
-				// IMPORTANT: Use the relative path to match what's stored in upsertPoints
-				// upsertPoints stores the relative filePath, not the absolute path
-				const relativePath = path.isAbsolute(filePath) ? path.relative(workspaceRoot, filePath) : filePath
-
-				// Normalize the relative path
-				const normalizedRelativePath = path.normalize(relativePath)
-
-				// Split the path into segments like we do in upsertPoints
-				const segments = normalizedRelativePath.split(path.sep).filter(Boolean)
-
-				// Create a filter that matches all segments of the path
-				// This ensures we only delete points that match the exact file path
-				const mustConditions = segments.map((segment, index) => ({
-					key: `pathSegments.${index}`,
-					match: { value: segment },
-				}))
-
-				return { must: mustConditions }
-			})
-
-			// Use 'should' to match any of the file paths (OR condition)
-			const filter = filters.length === 1 ? filters[0] : { should: filters }
-
-			await this.client.delete(this.collectionName, {
-				filter,
-				wait: true,
-			})
-		} catch (error: any) {
-			// Extract more detailed error information
-			const errorMessage = error?.message || String(error)
-			const errorStatus = error?.status || error?.response?.status || error?.statusCode
-			const errorDetails = error?.response?.data || error?.data || ""
-
-			console.error(`[QdrantVectorStore] Failed to delete points by file paths:`, {
-				error: errorMessage,
-				status: errorStatus,
-				details: errorDetails,
-				collection: this.collectionName,
-				fileCount: filePaths.length,
-				// Include first few file paths for debugging (avoid logging too many)
-				samplePaths: filePaths.slice(0, 3),
-			})
-			throw error
-		}
+	async countPointsForFile(filePath: string, generation: number): Promise<{ current: number; other: number }> {
+		const fileCondition = { key: "filePath", match: { value: this.relativeFilePath(filePath) } }
+		const generationCondition = { key: "generation", match: { value: generation } }
+		const [current, other] = await Promise.all([
+			this.client.count(this.collectionName, {
+				filter: { must: [fileCondition, generationCondition] },
+				exact: true,
+			}),
+			this.client.count(this.collectionName, {
+				filter: { must: [fileCondition], must_not: [generationCondition] },
+				exact: true,
+			}),
+		])
+		return { current: current.count, other: other.count }
 	}
 
 	/**

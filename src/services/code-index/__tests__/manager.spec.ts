@@ -1,5 +1,7 @@
 import { CodeIndexManager } from "../manager"
 import { CodeIndexServiceFactory } from "../service-factory"
+import { CacheManager } from "../cache-manager"
+import { LATE_WRITE_GRACE_MS } from "../index-write-gate"
 import type { MockedClass } from "vitest"
 import * as path from "path"
 
@@ -96,6 +98,18 @@ vi.mock("../state-manager", () => ({
 	})),
 }))
 
+vi.mock("../generation-allocator", () => ({ GenerationAllocator: vi.fn() }))
+vi.mock("../orchestrator", () => ({
+	CodeIndexOrchestrator: vi.fn().mockImplementation((...dependencies: any[]) => ({
+		startIndexing: vi.fn().mockResolvedValue(undefined),
+		stopIndexing: vi.fn().mockResolvedValue(undefined),
+		stopWatcher: vi.fn().mockResolvedValue(undefined),
+		generationAllocator: dependencies[11],
+		isCurrentAttempt: dependencies[12],
+		onFatal: dependencies[8],
+		onStopped: dependencies[9],
+	})),
+}))
 vi.mock("../service-factory")
 const MockedCodeIndexServiceFactory = CodeIndexServiceFactory as MockedClass<typeof CodeIndexServiceFactory>
 
@@ -153,6 +167,38 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 		CodeIndexManager.disposeAll()
 	})
 
+	it.each(["initialize", "settings"])("T12 recovers grace from cache load time through %s", async (entry) => {
+		vi.useFakeTimers()
+		vi.setSystemTime(100_000)
+		const internal = manager as any
+		internal._configManager = {
+			loadConfiguration: vi.fn().mockResolvedValue({ requiresRestart: true }),
+			isFeatureEnabled: true,
+			isFeatureConfigured: true,
+		}
+		const initialize = vi.spyOn(CacheManager.prototype, "initialize").mockImplementation(async function (
+			this: CacheManager,
+		) {
+			this.loadedAt = Date.now()
+			vi.setSystemTime(105_000)
+		})
+		const openFiles = vi.spyOn(CacheManager.prototype, "getOpenFiles").mockReturnValue({ "open.ts": true })
+		const recreate = vi.spyOn(internal, "_recreateServices").mockImplementation(async () => {
+			internal._orchestrator = { startIndexing: vi.fn(), stopWatcher: vi.fn() }
+		})
+		try {
+			if (entry === "initialize") await manager.initialize({} as any)
+			else await manager.handleSettingsChange()
+			expect(internal.writeGate.graceDeadline("open.ts")).toBe(100_000 + LATE_WRITE_GRACE_MS)
+			expect(recreate).toHaveBeenCalledOnce()
+		} finally {
+			initialize.mockRestore()
+			openFiles.mockRestore()
+			recreate.mockRestore()
+			vi.useRealTimers()
+		}
+	})
+
 	describe("parser failure lifecycle", () => {
 		it("blocks automatic initialize and settings recreation while latched", async () => {
 			const internal = manager as any
@@ -178,7 +224,7 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 				internal._cacheManager = {}
 				internal._searchService = {}
 				internal._stateManager.getCurrentStatus.mockReturnValue({ systemStatus: "Standby" })
-				const old = { startIndexing: vi.fn(), stopIndexing: vi.fn() }
+				const old = { startIndexing: vi.fn(), stopIndexing: vi.fn(), stopWatcher: vi.fn(), stopped: true }
 				internal._orchestrator = old
 				if (reason === "fatal") {
 					internal.parserFailed = true
@@ -220,6 +266,74 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 			expect(replacement.stopIndexing).not.toHaveBeenCalled()
 			expect(replacement.startIndexing).toHaveBeenCalledOnce()
 			expect(internal._orchestrator).toBe(replacement)
+			internal._orchestrator = undefined
+		})
+		it.each(["Indexed", "Standby"])("recreates an idle %s service set for an explicit scan", async (state) => {
+			const internal = manager as any
+			internal._configManager = { isFeatureEnabled: true, isFeatureConfigured: true }
+			internal._cacheManager = {}
+			internal._searchService = {}
+			internal._orchestrator = { state, stopWatcher: vi.fn() }
+			const replacement = { startIndexing: vi.fn(), stopWatcher: vi.fn() }
+			vi.spyOn(internal, "_recreateServices").mockImplementation(async () => {
+				internal._orchestrator = replacement
+			})
+			await manager.startIndexing()
+			expect(replacement.startIndexing).toHaveBeenCalledOnce()
+			internal._orchestrator = undefined
+		})
+
+		it("idle cancel does not flag live services for automatic recreation", () => {
+			const internal = manager as any
+			internal._orchestrator = { stopped: false, stopIndexing: vi.fn(() => Promise.resolve()) }
+			manager.stopIndexing()
+			expect(internal.servicesStopped).toBe(false)
+			internal._orchestrator = undefined
+		})
+
+		it("returns the orchestrator's shared stop promise unchanged", () => {
+			const shared = Promise.resolve()
+			const internal = manager as any
+			internal._orchestrator = {
+				stopIndexing: vi.fn(() => shared),
+				stopWatcher: vi.fn(() => shared),
+				stopped: true,
+			}
+			expect(manager.stopIndexing()).toBe(shared)
+			expect(manager.stopIndexing()).toBe(shared)
+			expect(manager.stopWatcher()).toBe(shared)
+			internal._orchestrator = undefined
+		})
+
+		it("preserves the shared allocator across recreation and fences an old attempt's callbacks", async () => {
+			const internal = manager as any
+			internal._cacheManager = {}
+			internal._configManager = { isFeatureEnabled: true, isFeatureConfigured: true }
+			const watcher = { dispose: vi.fn(), initialize: vi.fn() }
+			MockedCodeIndexServiceFactory.mockImplementation(
+				() =>
+					({
+						createServices: vi.fn(() => ({
+							embedder: {},
+							vectorStore: {},
+							scanner: {},
+							fileWatcher: watcher,
+						})),
+						validateEmbedder: vi.fn().mockResolvedValue({ valid: true }),
+					}) as any,
+			)
+			await internal._recreateServices()
+			const old = internal._orchestrator
+			const allocator = internal.generationAllocator
+			await internal._recreateServices()
+			expect(internal.generationAllocator).toBe(allocator)
+			expect(internal._orchestrator.generationAllocator).toBe(allocator)
+			expect(MockedCodeIndexServiceFactory.mock.calls.at(-1)?.[4]).toBe(allocator)
+			expect(old.isCurrentAttempt()).toBe(false)
+			old.onFatal(new Error("old parser"), "old failure")
+			old.onStopped()
+			expect(internal.parserFailed).toBe(false)
+			expect(internal.servicesStopped).toBe(false)
 			internal._orchestrator = undefined
 		})
 	})
@@ -860,8 +974,8 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 
 			await manager.handleSettingsChange()
 
-			expect(mockOrchestrator.stopIndexing).toHaveBeenCalled()
-			expect(mockStateManager.setSystemState).toHaveBeenCalledWith("Standby", "Code indexing is disabled")
+			expect(mockOrchestrator.stopWatcher).toHaveBeenCalled()
+			expect(mockStateManager.setSystemState).not.toHaveBeenCalled()
 		})
 	})
 })

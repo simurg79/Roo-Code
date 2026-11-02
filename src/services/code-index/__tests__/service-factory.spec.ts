@@ -6,6 +6,13 @@ import { OpenAICompatibleEmbedder } from "../embedders/openai-compatible"
 import { GeminiEmbedder } from "../embedders/gemini"
 import { QdrantVectorStore } from "../vector-store/qdrant-client"
 
+import { DirectoryScanner, FileWatcher } from "../processors"
+import { IndexWriteGate } from "../index-write-gate"
+import { GenerationAllocator } from "../generation-allocator"
+
+vitest.mock("../generation-allocator", () => ({ GenerationAllocator: vitest.fn() }))
+vitest.mock("../processors")
+
 // Mock the embedders and vector store
 vitest.mock("../embedders/openai")
 vitest.mock("../embedders/ollama")
@@ -45,6 +52,20 @@ describe("CodeIndexServiceFactory", () => {
 		mockCacheManager = {}
 
 		factory = new CodeIndexServiceFactory(mockConfigManager, "/test/workspace", mockCacheManager)
+	})
+
+	it("injects the same manager-owned allocator and gate into scanner and watcher", () => {
+		const gate = new IndexWriteGate()
+		const allocator = new GenerationAllocator(mockCacheManager)
+		factory = new CodeIndexServiceFactory(mockConfigManager, "/test/workspace", mockCacheManager, gate, allocator)
+		const parser = {} as any
+		const embedder = {} as any
+		const store = {} as any
+		const ignoreInstance = {} as any
+		factory.createDirectoryScanner(embedder, store, parser, ignoreInstance)
+		factory.createFileWatcher({} as any, embedder, store, mockCacheManager, ignoreInstance, undefined, parser)
+		expect(vitest.mocked(DirectoryScanner).mock.calls[0].slice(-2)).toEqual([gate, allocator])
+		expect(vitest.mocked(FileWatcher).mock.calls[0].slice(-2)).toEqual([gate, allocator])
 	})
 
 	describe("createEmbedder", () => {
