@@ -4,106 +4,131 @@ import { ICacheManager } from "./interfaces/cache"
 import debounce from "lodash.debounce"
 import { safeWriteJson } from "../../utils/safeWriteJson"
 
-/**
- * Manages the cache for code indexing
- */
 export class CacheManager implements ICacheManager {
-	private cachePath: vscode.Uri
+	private readonly cachePath: vscode.Uri
 	private fileHashes: Record<string, string> = {}
-	private _debouncedSaveCache: () => void
+	private openFiles: Record<string, true> = {}
+	private watermark?: number
+	private saveTail: Promise<void> = Promise.resolve()
+	private readonly debouncedSave
+	public loadSucceeded = false
+	public loadedAt = 0
 
-	/**
-	 * Creates a new cache manager
-	 * @param context VS Code extension context
-	 * @param workspacePath Path to the workspace
-	 */
-	constructor(
-		private context: vscode.ExtensionContext,
-		private workspacePath: string,
-	) {
+	constructor(context: vscode.ExtensionContext, workspacePath: string) {
 		this.cachePath = vscode.Uri.joinPath(
 			context.globalStorageUri,
 			`roo-index-cache-${createHash("sha256").update(workspacePath).digest("hex")}.json`,
 		)
-		this._debouncedSaveCache = debounce(async () => {
-			await this._performSave()
+		this.debouncedSave = debounce(() => {
+			void this.saveNow().catch((error) => console.error("Failed to save cache:", error))
 		}, 1500)
 	}
 
-	/**
-	 * Initializes the cache manager by loading the cache file
-	 */
 	async initialize(): Promise<void> {
+		this.fileHashes = {}
+		this.openFiles = {}
+		this.watermark = undefined
+		this.loadSucceeded = false
 		try {
-			const cacheData = await vscode.workspace.fs.readFile(this.cachePath)
-			this.fileHashes = JSON.parse(cacheData.toString())
-		} catch (error) {
+			const buffer = await vscode.workspace.fs.readFile(this.cachePath)
+			const data = JSON.parse(buffer.toString())
+			if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Invalid indexing cache")
+			if (data.version === 2) {
+				if (!data.fileHashes || !data.openFiles) throw new Error("Invalid indexing cache records")
+				for (const [filePath, hash] of Object.entries(data.fileHashes)) {
+					if (typeof hash !== "string") throw new Error("Invalid indexing hash")
+					this.fileHashes[filePath] = hash
+				}
+				for (const [filePath, open] of Object.entries(data.openFiles)) {
+					if (open !== true) throw new Error("Invalid open-file record")
+					this.openFiles[filePath] = true
+					delete this.fileHashes[filePath]
+				}
+				if (Number.isSafeInteger(data.generationWatermark) && data.generationWatermark >= 0) {
+					this.watermark = data.generationWatermark
+				}
+			} else {
+				for (const [filePath, hash] of Object.entries(data)) {
+					if (typeof hash !== "string") throw new Error("Invalid legacy indexing cache")
+					this.fileHashes[filePath] = hash
+				}
+			}
+			this.loadSucceeded = true
+		} catch {
 			this.fileHashes = {}
+			this.openFiles = {}
+			this.watermark = undefined
 		}
+		this.loadedAt = Date.now()
 	}
 
-	/**
-	 * Saves the cache to disk
-	 */
-	private async _performSave(): Promise<void> {
-		try {
-			await safeWriteJson(this.cachePath.fsPath, this.fileHashes)
-		} catch (error) {
-			console.error("Failed to save cache:", error)
-		}
+	get generationWatermark(): number | undefined {
+		return this.watermark
 	}
 
-	/**
-	 * Clears the cache file by writing an empty object to it
-	 */
+	async reserveGenerations(watermark: number): Promise<void> {
+		this.watermark = watermark
+		await this.saveNow()
+	}
+
+	async saveNow(): Promise<void> {
+		this.debouncedSave.cancel?.()
+		const data = {
+			version: 2,
+			fileHashes: { ...this.fileHashes },
+			openFiles: { ...this.openFiles },
+			generationWatermark: this.watermark,
+		}
+		// Serialize snapshots: an older debounce must never overwrite a durable invalidation.
+		const pending = this.saveTail.catch(() => {}).then(() => safeWriteJson(this.cachePath.fsPath, data))
+		this.saveTail = pending
+		await pending
+	}
+
 	async clearCacheFile(): Promise<void> {
-		try {
-			await safeWriteJson(this.cachePath.fsPath, {})
-			this.fileHashes = {}
-		} catch (error) {
-			console.error("Failed to clear cache file:", error, this.cachePath)
-		}
+		this.fileHashes = {}
+		this.openFiles = {}
+		await this.saveNow()
 	}
 
-	/**
-	 * Gets the hash for a file path
-	 * @param filePath Path to the file
-	 * @returns The hash for the file or undefined if not found
-	 */
+	async invalidateFile(filePath: string): Promise<void> {
+		delete this.fileHashes[filePath]
+		this.openFiles[filePath] = true
+		await this.saveNow()
+	}
+
+	completeFile(filePath: string, hash: string): void {
+		this.fileHashes[filePath] = hash
+		delete this.openFiles[filePath]
+		this.debouncedSave()
+	}
+
+	completeRemoval(filePath: string): void {
+		delete this.fileHashes[filePath]
+		delete this.openFiles[filePath]
+		this.debouncedSave()
+	}
+
+	getOpenFiles(): Record<string, true> {
+		return { ...this.openFiles }
+	}
+
+	getTrackedPaths(): string[] {
+		return [...new Set([...Object.keys(this.fileHashes), ...Object.keys(this.openFiles)])]
+	}
+
+	isTracked(filePath: string): boolean {
+		return Object.hasOwn(this.fileHashes, filePath) || Object.hasOwn(this.openFiles, filePath)
+	}
+
 	getHash(filePath: string): string | undefined {
 		return this.fileHashes[filePath]
 	}
 
-	/**
-	 * Updates the hash for a file path
-	 * @param filePath Path to the file
-	 * @param hash New hash value
-	 */
-	updateHash(filePath: string, hash: string): void {
-		this.fileHashes[filePath] = hash
-		this._debouncedSaveCache()
-	}
-
-	/**
-	 * Deletes the hash for a file path
-	 * @param filePath Path to the file
-	 */
-	deleteHash(filePath: string): void {
-		delete this.fileHashes[filePath]
-		this._debouncedSaveCache()
-	}
-
-	/**
-	 * Flushes any pending debounced cache writes to disk immediately.
-	 */
 	async flush(): Promise<void> {
-		await this._performSave()
+		await this.saveNow()
 	}
 
-	/**
-	 * Gets a copy of all file hashes
-	 * @returns A copy of the file hashes record
-	 */
 	getAllHashes(): Record<string, string> {
 		return { ...this.fileHashes }
 	}

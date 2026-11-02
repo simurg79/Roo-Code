@@ -133,18 +133,36 @@ async function main() {
 		outdir: "dist/workers",
 	}
 
-	const [extensionCtx, workerCtx] = await Promise.all([
+	const [extensionCtx, workerCtx, parserCtx] = await Promise.all([
 		esbuild.context(extensionConfig),
 		esbuild.context(workerConfig),
+		esbuild.context({
+			...buildOptions,
+			entryPoints: ["services/code-index/parse-worker.ts"],
+			outfile: "dist/parse-worker.js",
+			plugins: [
+				{
+					name: "copyParserFaultWasm",
+					setup(build) {
+						build.onEnd(async () => {
+							await fs.promises.copyFile(
+								path.join(srcDir, "services/code-index/fault-loop.wasm"),
+								path.join(distDir, "fault-loop.wasm"),
+							)
+						})
+					},
+				},
+			],
+		}),
 	])
 
 	if (watch) {
-		await Promise.all([extensionCtx.watch(), workerCtx.watch()])
+		await Promise.all([extensionCtx.watch(), workerCtx.watch(), parserCtx.watch()])
 		copyLocales(srcDir, distDir)
 		setupLocaleWatcher(srcDir, distDir)
 	} else {
-		await Promise.all([extensionCtx.rebuild(), workerCtx.rebuild()])
-		await Promise.all([extensionCtx.dispose(), workerCtx.dispose()])
+		await Promise.all([extensionCtx.rebuild(), workerCtx.rebuild(), parserCtx.rebuild()])
+		await Promise.all([extensionCtx.dispose(), workerCtx.dispose(), parserCtx.dispose()])
 	}
 }
 

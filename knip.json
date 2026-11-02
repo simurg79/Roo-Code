@@ -12,7 +12,11 @@
 	],
 	"workspaces": {
 		"src": {
-			"entry": ["extension.ts"],
+			"entry": [
+				"extension.ts",
+				"services/code-index/parse-worker.ts",
+				"services/code-index/vector-store/vitest.integration.config.ts"
+			],
 			"project": ["**/*.ts"]
 		},
 		"webview-ui": {

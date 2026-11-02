@@ -75,12 +75,20 @@ Sources:
 - https://github.com/tree-sitter/tree-sitter/blob/master/lib/binding_web/README.md
 - https://github.com/tree-sitter/tree-sitter/blob/master/lib/binding_web/test/query-test.js
 */
-export async function loadRequiredLanguageParsers(filesToParse: string[], sourceDirectory?: string) {
+export async function loadRequiredLanguageParsers(
+	filesToParse: string[],
+	sourceDirectory?: string,
+	runtimeDirectory?: string,
+) {
 	const { Parser, Query } = require("web-tree-sitter")
 
 	if (!isParserInitialized) {
 		try {
-			await Parser.init()
+			await Parser.init(
+				runtimeDirectory
+					? { locateFile: (filename: string) => path.join(runtimeDirectory, filename) }
+					: undefined,
+			)
 			isParserInitialized = true
 		} catch (error) {
 			console.error(`Error initializing parser: ${error instanceof Error ? error.message : error}`)

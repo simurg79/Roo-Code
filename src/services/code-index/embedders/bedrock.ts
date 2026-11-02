@@ -1,5 +1,6 @@
 import { BedrockRuntimeClient, InvokeModelCommand, InvokeModelCommandInput } from "@aws-sdk/client-bedrock-runtime"
 import { fromIni, fromNodeProviderChain } from "@aws-sdk/credential-providers"
+import { waitForRetry } from "./cancellation"
 import { IEmbedder, EmbeddingResponse, EmbedderInfo } from "../interfaces"
 import {
 	MAX_BATCH_TOKENS,
@@ -53,7 +54,8 @@ export class BedrockEmbedder implements IEmbedder {
 	 * @param model Optional model identifier
 	 * @returns Promise resolving to embedding response
 	 */
-	async createEmbeddings(texts: string[], model?: string): Promise<EmbeddingResponse> {
+	async createEmbeddings(texts: string[], model?: string, signal?: AbortSignal): Promise<EmbeddingResponse> {
+		signal?.throwIfAborted()
 		const modelToUse = model || this.defaultModelId
 
 		const allEmbeddings: number[][] = []
@@ -61,6 +63,7 @@ export class BedrockEmbedder implements IEmbedder {
 		const remainingTexts = [...texts]
 
 		while (remainingTexts.length > 0) {
+			signal?.throwIfAborted()
 			const currentBatch: string[] = []
 			let currentBatchTokens = 0
 			const processedIndices: number[] = []
@@ -96,7 +99,7 @@ export class BedrockEmbedder implements IEmbedder {
 			}
 
 			if (currentBatch.length > 0) {
-				const batchResult = await this._embedBatchWithRetries(currentBatch, modelToUse)
+				const batchResult = await this._embedBatchWithRetries(currentBatch, modelToUse, signal)
 				allEmbeddings.push(...batchResult.embeddings)
 				usage.promptTokens += batchResult.usage.promptTokens
 				usage.totalTokens += batchResult.usage.totalTokens
@@ -115,9 +118,11 @@ export class BedrockEmbedder implements IEmbedder {
 	private async _embedBatchWithRetries(
 		batchTexts: string[],
 		model: string,
+		signal?: AbortSignal,
 	): Promise<{ embeddings: number[][]; usage: { promptTokens: number; totalTokens: number } }> {
 		for (let attempts = 0; attempts < MAX_RETRIES; attempts++) {
 			try {
+				signal?.throwIfAborted()
 				const embeddings: number[][] = []
 				let totalPromptTokens = 0
 				let totalTokens = 0
@@ -126,7 +131,8 @@ export class BedrockEmbedder implements IEmbedder {
 				// Note: Amazon Titan models typically don't support batch embedding in a single request
 				// So we process them individually
 				for (const text of batchTexts) {
-					const embedding = await this._invokeEmbeddingModel(text, model)
+					signal?.throwIfAborted()
+					const embedding = await this._invokeEmbeddingModel(text, model, signal)
 					embeddings.push(embedding.embedding)
 					totalPromptTokens += embedding.inputTextTokenCount || 0
 					totalTokens += embedding.inputTextTokenCount || 0
@@ -140,6 +146,7 @@ export class BedrockEmbedder implements IEmbedder {
 					},
 				}
 			} catch (error: any) {
+				signal?.throwIfAborted()
 				const hasMoreAttempts = attempts < MAX_RETRIES - 1
 
 				// Check if it's a rate limit error
@@ -152,7 +159,7 @@ export class BedrockEmbedder implements IEmbedder {
 							maxRetries: MAX_RETRIES,
 						}),
 					)
-					await new Promise((resolve) => setTimeout(resolve, delayMs))
+					await waitForRetry(delayMs, signal)
 					continue
 				}
 
@@ -176,6 +183,7 @@ export class BedrockEmbedder implements IEmbedder {
 	private async _invokeEmbeddingModel(
 		text: string,
 		model: string,
+		signal?: AbortSignal,
 	): Promise<{ embedding: number[]; inputTextTokenCount?: number }> {
 		let requestBody: any
 		let modelId = model
@@ -228,7 +236,9 @@ export class BedrockEmbedder implements IEmbedder {
 
 		const command = new InvokeModelCommand(params)
 
-		const response = await this.bedrockClient.send(command)
+		signal?.throwIfAborted()
+		const response = await this.bedrockClient.send(command, ...(signal ? [{ abortSignal: signal }] : []))
+		signal?.throwIfAborted()
 
 		// Parse the response
 		const responseBody = JSON.parse(new TextDecoder().decode(response.body))

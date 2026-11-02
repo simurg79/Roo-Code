@@ -2,6 +2,8 @@
 
 import { DirectoryScanner } from "../scanner"
 import { stat } from "fs/promises"
+import { ParserFatalError } from "../../parser-errors"
+import { IndexWriteGate } from "../../index-write-gate"
 
 vi.mock("fs/promises", () => ({
 	default: {
@@ -66,10 +68,14 @@ describe("DirectoryScanner", () => {
 	let mockStats: any
 
 	beforeEach(async () => {
+		vi.useFakeTimers()
 		mockEmbedder = {
-			createEmbeddings: vi.fn().mockResolvedValue({ embeddings: [[0.1, 0.2, 0.3]] }),
+			createEmbeddings: vi.fn().mockImplementation(async (texts: string[]) => ({
+				embeddings: texts.map(() => [0.1, 0.2, 0.3]),
+			})),
 			embedderInfo: { name: "mock-embedder", dimensions: 384 },
 		}
+		const storedPoints = new Map<string, any>()
 		mockVectorStore = {
 			upsertPoints: vi.fn().mockResolvedValue(undefined),
 			deletePointsByFilePath: vi.fn().mockResolvedValue(undefined),
@@ -79,17 +85,28 @@ describe("DirectoryScanner", () => {
 			clearCollection: vi.fn().mockResolvedValue(undefined),
 			deleteCollection: vi.fn().mockResolvedValue(undefined),
 			collectionExists: vi.fn().mockResolvedValue(true),
+			countPointsForFile: vi.fn().mockImplementation(async (_filePath: string, generation: number) => ({
+				current: [...storedPoints.values()].filter((point) => point.payload.generation === generation).length,
+				other: 0,
+			})),
 		}
+		mockVectorStore.upsertPoints.mockImplementation(async (points: any[]) => {
+			for (const point of points) storedPoints.set(point.id, point)
+		})
 		mockCodeParser = {
 			parseFile: vi.fn().mockResolvedValue([]),
 		}
 		mockCacheManager = {
 			getHash: vi.fn().mockReturnValue(undefined),
 			getAllHashes: vi.fn().mockReturnValue({}),
-			updateHash: vi.fn().mockResolvedValue(undefined),
-			deleteHash: vi.fn().mockResolvedValue(undefined),
 			initialize: vi.fn().mockResolvedValue(undefined),
 			clearCacheFile: vi.fn().mockResolvedValue(undefined),
+			generationWatermark: 1024,
+			reserveGenerations: vi.fn().mockResolvedValue(undefined),
+			getTrackedPaths: vi.fn().mockImplementation(() => Object.keys(mockCacheManager.getAllHashes())),
+			invalidateFile: vi.fn().mockResolvedValue(undefined),
+			completeFile: vi.fn(),
+			completeRemoval: vi.fn(),
 		}
 		mockIgnoreInstance = {
 			ignores: vi.fn().mockReturnValue(false),
@@ -140,6 +157,10 @@ describe("DirectoryScanner", () => {
 		// Get and mock the listFiles function
 		const { listFiles } = await import("../../../glob/list-files")
 		vi.mocked(listFiles).mockResolvedValue([["test/file1.js", "test/file2.js"], false])
+	})
+
+	afterEach(() => {
+		vi.useRealTimers()
 	})
 
 	describe("scanDirectory", () => {
@@ -213,8 +234,9 @@ describe("DirectoryScanner", () => {
 			;(mockCacheManager.getAllHashes as any).mockReturnValue({ "old/file.js": "old-hash" })
 
 			await scanner.scanDirectory("/test")
-			expect(mockVectorStore.deletePointsByFilePath).toHaveBeenCalledWith("old/file.js")
-			expect(mockCacheManager.deleteHash).toHaveBeenCalledWith("old/file.js")
+			expect(mockVectorStore.deletePointsByFilePath).toHaveBeenCalledWith("old/file.js", expect.any(Number))
+			expect(mockCacheManager.invalidateFile).toHaveBeenCalledWith("old/file.js")
+			expect(mockCacheManager.completeRemoval).toHaveBeenCalledWith("old/file.js")
 		})
 
 		it("should filter out files in hidden directories", async () => {
@@ -386,6 +408,138 @@ describe("DirectoryScanner", () => {
 			expect(points[2].payload.segmentHash).toBe("unique-segment-hash-3")
 		})
 
+		it.each(["success", "abort", "failure"])(
+			"keeps a multi-batch file incomplete until every batch succeeds: %s",
+			async (outcome) => {
+				const { listFiles } = await import("../../../glob/list-files")
+				vi.mocked(listFiles).mockResolvedValue([["test/file.js"], false])
+				const blocks = Array.from({ length: 3 }, (_, blockNumber) => ({
+					file_path: "test/file.js",
+					content: `function block${blockNumber}() { return 1 }`,
+					start_line: blockNumber + 1,
+					end_line: blockNumber + 1,
+					identifier: null,
+					type: "function",
+					fileHash: "hash",
+					segmentHash: `segment-${blockNumber}`,
+				}))
+				mockCodeParser.parseFile.mockResolvedValue(blocks)
+				let release!: () => void
+				const held = new Promise<void>((resolve) => {
+					release = resolve
+				})
+				mockVectorStore.upsertPoints.mockImplementation(async (points: any[]) => {
+					if (points[0].payload.segmentHash === "segment-0") {
+						await held
+						if (outcome === "failure") throw new Error("store failure")
+					}
+				})
+				const controller = new AbortController()
+				const scanner = new DirectoryScanner(
+					mockEmbedder,
+					mockVectorStore,
+					mockCodeParser,
+					mockCacheManager,
+					mockIgnoreInstance,
+					1,
+				)
+				const pending = scanner
+					.scanDirectory("/test", vi.fn(), undefined, undefined, controller.signal)
+					.catch((error) => error)
+				await vi.advanceTimersByTimeAsync(0)
+				expect(mockVectorStore.upsertPoints).toHaveBeenCalledOnce()
+				expect(mockCacheManager.completeFile).not.toHaveBeenCalled()
+				expect(mockVectorStore.deletePointsByFilePath).not.toHaveBeenCalled()
+				expect(mockCacheManager.invalidateFile.mock.invocationCallOrder[0]).toBeLessThan(
+					mockVectorStore.upsertPoints.mock.invocationCallOrder[0],
+				)
+				mockVectorStore.countPointsForFile.mockResolvedValue({ current: 3, other: 0 })
+				if (outcome === "abort") controller.abort()
+				release()
+				await pending
+				if (outcome === "success") expect(mockCacheManager.completeFile).toHaveBeenCalledOnce()
+				else expect(mockCacheManager.completeFile).not.toHaveBeenCalled()
+			},
+		)
+
+		it("discards embedding results released after abort without issuing an upsert or hash", async () => {
+			const { listFiles } = await import("../../../glob/list-files")
+			vi.mocked(listFiles).mockResolvedValue([["test/file.js"], false])
+			mockCodeParser.parseFile.mockResolvedValue([
+				{
+					file_path: "test/file.js",
+					content: "function test() { return 1 }",
+					start_line: 1,
+					end_line: 1,
+					identifier: null,
+					type: "function",
+					fileHash: "hash",
+					segmentHash: "segment",
+				},
+			])
+			let release!: (value: any) => void
+			mockEmbedder.createEmbeddings.mockImplementation(
+				() =>
+					new Promise((resolve) => {
+						release = resolve
+					}),
+			)
+			const controller = new AbortController()
+			const pending = scanner
+				.scanDirectory("/test", undefined, undefined, undefined, controller.signal)
+				.catch((error) => error)
+			await vi.advanceTimersByTimeAsync(0)
+			expect(mockEmbedder.createEmbeddings).toHaveBeenCalledOnce()
+			controller.abort()
+			release({ embeddings: [[1, 2, 3]] })
+			await pending
+			expect(mockVectorStore.upsertPoints).not.toHaveBeenCalled()
+			expect(mockCacheManager.completeFile).not.toHaveBeenCalled()
+		})
+
+		it("reconciles an uncertain unchanged file before replacement upserts", async () => {
+			const { listFiles } = await import("../../../glob/list-files")
+			vi.mocked(listFiles).mockResolvedValue([["test/file.js"], false])
+			const gate = new IndexWriteGate()
+			await gate
+				.run(new AbortController().signal, () => Promise.reject(new Error("timeout")), ["test/file.js"])
+				.catch(() => undefined)
+			const { createHash } = await import("crypto")
+			mockCacheManager.getHash.mockReturnValue(createHash("sha256").update("test content").digest("hex"))
+			const scanner = new DirectoryScanner(
+				mockEmbedder,
+				mockVectorStore,
+				mockCodeParser,
+				mockCacheManager,
+				mockIgnoreInstance,
+				1,
+				gate,
+			)
+			vi.useFakeTimers()
+			try {
+				const pending = scanner.scanDirectory("/test")
+				await vi.advanceTimersByTimeAsync(30_000)
+				await pending
+				expect(mockCodeParser.parseFile).toHaveBeenCalledOnce()
+				expect(mockVectorStore.deletePointsByFilePath).toHaveBeenCalledWith("test/file.js", expect.any(Number))
+				expect(mockCacheManager.invalidateFile).toHaveBeenCalledWith("test/file.js")
+				expect(gate.needsReconciliation("test/file.js")).toBe(false)
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
+		it("propagates fatal parser errors without treating them as per-file errors", async () => {
+			const { listFiles } = await import("../../../glob/list-files")
+			vi.mocked(listFiles).mockResolvedValue([["test/file.js"], false])
+			const fatal = new ParserFatalError("parser-abort", "test/file.js")
+			mockCodeParser.parseFile.mockRejectedValue(fatal)
+			const onError = vi.fn()
+			await expect(scanner.scanDirectory("/test", onError)).rejects.toBe(fatal)
+			expect(onError).not.toHaveBeenCalled()
+			expect(mockCacheManager.completeFile).not.toHaveBeenCalled()
+		})
+
 		it("should stop processing files when signal is aborted", async () => {
 			const { listFiles } = await import("../../../glob/list-files")
 			vi.mocked(listFiles).mockResolvedValue([["test/file1.js", "test/file2.js", "test/file3.js"], false])
@@ -394,11 +548,10 @@ describe("DirectoryScanner", () => {
 			const controller = new AbortController()
 			controller.abort()
 
-			const result = await scanner.scanDirectory("/test", undefined, undefined, undefined, controller.signal)
-
-			// No files should have been processed since signal was already aborted
+			await expect(
+				scanner.scanDirectory("/test", undefined, undefined, undefined, controller.signal),
+			).rejects.toMatchObject({ name: "AbortError" })
 			expect(mockCodeParser.parseFile).not.toHaveBeenCalled()
-			expect(result.stats.processed).toBe(0)
 		})
 
 		it("should stop processing batches when signal is aborted mid-scan", async () => {
@@ -443,7 +596,9 @@ describe("DirectoryScanner", () => {
 			const controller = new AbortController()
 			controller.abort()
 
-			await scanner.scanDirectory("/test", undefined, undefined, undefined, controller.signal)
+			await expect(
+				scanner.scanDirectory("/test", undefined, undefined, undefined, controller.signal),
+			).rejects.toMatchObject({ name: "AbortError" })
 
 			// Deleted file cleanup should not have run
 			expect(mockVectorStore.deletePointsByFilePath).not.toHaveBeenCalled()

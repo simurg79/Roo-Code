@@ -44,10 +44,11 @@ export class MistralEmbedder implements IEmbedder {
 	 * @param model Optional model identifier (uses constructor model if not provided)
 	 * @returns Promise resolving to embedding response
 	 */
-	async createEmbeddings(texts: string[], model?: string): Promise<EmbeddingResponse> {
+	async createEmbeddings(texts: string[], model?: string, signal?: AbortSignal): Promise<EmbeddingResponse> {
+		signal?.throwIfAborted()
 		// Use the provided model or fall back to the instance's model
 		const modelToUse = model || this.modelId
-		return this.openAICompatibleEmbedder.createEmbeddings(texts, modelToUse)
+		return this.openAICompatibleEmbedder.createEmbeddings(texts, modelToUse, ...(signal ? [signal] : []))
 	}
 
 	/**

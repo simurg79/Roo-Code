@@ -38,6 +38,7 @@ const mockQdrantClientInstance = {
 	upsert: vitest.fn(),
 	query: vitest.fn(),
 	delete: vitest.fn(),
+	count: vitest.fn(),
 }
 
 const mockCreateHashInstance = {
@@ -69,6 +70,100 @@ describe("QdrantVectorStore", () => {
 		;(getWorkspacePath as any).mockReturnValue(mockWorkspacePath)
 
 		vectorStore = new QdrantVectorStore(mockWorkspacePath, mockQdrantUrl, mockVectorSize, mockApiKey)
+	})
+
+	it("propagates rejected deletions so the write gate can reconcile their uncertain outcome", async () => {
+		vi.spyOn(vectorStore, "collectionExists").mockResolvedValue(true)
+		const failure = new Error("delete request timed out")
+		mockQdrantClientInstance.delete.mockRejectedValueOnce(failure)
+		await expect(vectorStore.deletePointsByFilePath("/test/workspace/file.ts", 17)).rejects.toBe(failure)
+	})
+
+	describe("generation fencing and exact counts", () => {
+		it("matches exact relative paths and only lower or legacy generations", async () => {
+			mockQdrantClientInstance.delete.mockResolvedValue({})
+			await vectorStore.deletePointsByMultipleFilePaths(["/test/workspace/file.ts", "other.ts"], 17)
+			expect(mockQdrantClientInstance.delete).toHaveBeenCalledWith(expectedCollectionName, {
+				filter: {
+					must: [
+						{ key: "filePath", match: { any: ["file.ts", "other.ts"] } },
+						{ should: [{ key: "generation", range: { lt: 17 } }, { is_empty: { key: "generation" } }] },
+					],
+				},
+				wait: true,
+			})
+			expect(mockQdrantClientInstance.getCollection).not.toHaveBeenCalled()
+		})
+
+		it.each([undefined, NaN, Infinity, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+			"refuses an unsafe or missing cutoff %s before issuing a delete",
+			async (cutoff) => {
+				await expect(vectorStore.deletePointsByFilePath("file.ts", cutoff as number)).rejects.toThrow("cutoff")
+				expect(mockQdrantClientInstance.delete).not.toHaveBeenCalled()
+			},
+		)
+
+		it("does not issue an empty multi-file deletion", async () => {
+			await vectorStore.deletePointsByMultipleFilePaths([], 17)
+			expect(mockQdrantClientInstance.delete).not.toHaveBeenCalled()
+		})
+
+		it("awaits remote deletion completion", async () => {
+			let finishDelete!: () => void
+			mockQdrantClientInstance.delete.mockReturnValueOnce(
+				new Promise<void>((resolve) => {
+					finishDelete = resolve
+				}),
+			)
+			let finished = false
+			const pending = vectorStore.deletePointsByFilePath("file.ts", 17).then(() => {
+				finished = true
+			})
+			await Promise.resolve()
+			expect(finished).toBe(false)
+			finishDelete()
+			await pending
+			expect(finished).toBe(true)
+		})
+
+		it("counts the current generation separately from all others, including legacy", async () => {
+			mockQdrantClientInstance.count.mockResolvedValueOnce({ count: 2 }).mockResolvedValueOnce({ count: 3 })
+			await expect(vectorStore.countPointsForFile("/test/workspace/file.ts", 17)).resolves.toEqual({
+				current: 2,
+				other: 3,
+			})
+			const fileCondition = { key: "filePath", match: { value: "file.ts" } }
+			const generationCondition = { key: "generation", match: { value: 17 } }
+			expect(mockQdrantClientInstance.count.mock.calls).toEqual([
+				[expectedCollectionName, { filter: { must: [fileCondition, generationCondition] }, exact: true }],
+				[
+					expectedCollectionName,
+					{ filter: { must: [fileCondition], must_not: [generationCondition] }, exact: true },
+				],
+			])
+		})
+
+		it.each([0, 1])("propagates failure of count query %s instead of reporting completion", async (failedQuery) => {
+			const failure = new Error("count unavailable")
+			mockQdrantClientInstance.count.mockReset().mockResolvedValue({ count: 0 })
+			if (failedQuery === 1) mockQdrantClientInstance.count.mockResolvedValueOnce({ count: 2 })
+			mockQdrantClientInstance.count.mockRejectedValueOnce(failure)
+			await expect(vectorStore.countPointsForFile("file.ts", 17)).rejects.toBe(failure)
+		})
+
+		it("preserves caller-provided generation-scoped IDs and payloads", async () => {
+			mockQdrantClientInstance.upsert.mockResolvedValue({})
+			const point = {
+				id: "generation-scoped-id",
+				vector: [1, 0],
+				payload: { filePath: "file.ts", generation: 17 },
+			}
+			await vectorStore.upsertPoints([point])
+			expect(mockQdrantClientInstance.upsert).toHaveBeenCalledWith(expectedCollectionName, {
+				points: [{ ...point, payload: { ...point.payload, pathSegments: { "0": "file.ts" } } }],
+				wait: true,
+			})
+		})
 	})
 
 	it("should correctly initialize QdrantClient and collectionName in constructor", () => {
@@ -546,14 +641,16 @@ describe("QdrantVectorStore", () => {
 			expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledWith(expectedCollectionName, {
 				field_name: "type",
 				field_schema: "keyword",
+				wait: true,
 			})
 			for (let i = 0; i <= 4; i++) {
 				expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledWith(expectedCollectionName, {
 					field_name: `pathSegments.${i}`,
 					field_schema: "keyword",
+					wait: true,
 				})
 			}
-			expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledTimes(6)
+			expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledTimes(8)
 		})
 		it("should not create a new collection if one exists with matching vectorSize and return false", async () => {
 			// Mock getCollection to return existing collection info with matching vector size
@@ -580,14 +677,16 @@ describe("QdrantVectorStore", () => {
 			expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledWith(expectedCollectionName, {
 				field_name: "type",
 				field_schema: "keyword",
+				wait: true,
 			})
 			for (let i = 0; i <= 4; i++) {
 				expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledWith(expectedCollectionName, {
 					field_name: `pathSegments.${i}`,
 					field_schema: "keyword",
+					wait: true,
 				})
 			}
-			expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledTimes(6)
+			expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledTimes(8)
 		})
 		it("should recreate collection if it exists but vectorSize mismatches and return true", async () => {
 			const differentVectorSize = 768
@@ -637,14 +736,16 @@ describe("QdrantVectorStore", () => {
 			expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledWith(expectedCollectionName, {
 				field_name: "type",
 				field_schema: "keyword",
+				wait: true,
 			})
 			for (let i = 0; i <= 4; i++) {
 				expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledWith(expectedCollectionName, {
 					field_name: `pathSegments.${i}`,
 					field_schema: "keyword",
+					wait: true,
 				})
 			}
-			expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledTimes(6)
+			expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledTimes(8)
 			;(console.warn as any).mockRestore() // Restore console.warn
 		})
 		it("should log warning for non-404 errors but still create collection", async () => {
@@ -658,7 +759,7 @@ describe("QdrantVectorStore", () => {
 			expect(mockQdrantClientInstance.getCollection).toHaveBeenCalledTimes(1)
 			expect(mockQdrantClientInstance.createCollection).toHaveBeenCalledTimes(1)
 			expect(mockQdrantClientInstance.deleteCollection).not.toHaveBeenCalled()
-			expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledTimes(6)
+			expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledTimes(8)
 			expect(console.warn).toHaveBeenCalledWith(
 				expect.stringContaining(`Warning during getCollectionInfo for "${expectedCollectionName}"`),
 				genericError.message,
@@ -686,43 +787,34 @@ describe("QdrantVectorStore", () => {
 			expect(console.error).toHaveBeenCalledTimes(1) // Only the outer try/catch
 			;(console.error as any).mockRestore()
 		})
-		it("should log but not fail if payload index creation errors occur", async () => {
-			// Mock successful collection creation
-			mockQdrantClientInstance.getCollection.mockRejectedValue({
-				response: { status: 404 },
-				message: "Not found",
+		it.each(["filePath", "generation"])("fails initialization when the %s index fails", async (fieldName) => {
+			mockQdrantClientInstance.getCollection.mockResolvedValue({
+				config: { params: { vectors: { size: mockVectorSize } } },
 			})
-			mockQdrantClientInstance.createCollection.mockResolvedValue(true as any)
+			mockQdrantClientInstance.createPayloadIndex.mockImplementation(async (_collection, request) => {
+				if (request.field_name === fieldName) throw new Error(`${fieldName} index failed`)
+				return {}
+			})
 
-			// Mock payload index creation to fail
-			const indexError = new Error("Index creation failed")
-			mockQdrantClientInstance.createPayloadIndex.mockRejectedValue(indexError)
-			vitest.spyOn(console, "warn").mockImplementation(() => {}) // Suppress console.warn
+			await expect(vectorStore.initialize()).rejects.toThrow(`${fieldName} index failed`)
+		})
 
-			const result = await vectorStore.initialize()
-
-			// Should still return true since main collection setup succeeded
-			expect(result).toBe(true)
-			expect(mockQdrantClientInstance.createCollection).toHaveBeenCalledTimes(1)
-
-			// Verify all payload index creations were attempted (6: type + 5 pathSegments)
-			expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledTimes(6)
-
-			// Verify warnings were logged for each failed index (now 6)
-			expect(console.warn).toHaveBeenCalledTimes(6)
-			// Verify warning for 'type' index
-			expect(console.warn).toHaveBeenCalledWith(
-				expect.stringContaining(`Could not create payload index for type`),
-				indexError.message,
-			)
-			for (let i = 0; i <= 4; i++) {
-				expect(console.warn).toHaveBeenCalledWith(
-					expect.stringContaining(`Could not create payload index for pathSegments.${i}`),
-					indexError.message,
-				)
-			}
-
-			;(console.warn as any).mockRestore()
+		it("creates awaited filePath and generation indexes on an existing collection", async () => {
+			mockQdrantClientInstance.getCollection.mockResolvedValue({
+				config: { params: { vectors: { size: mockVectorSize } } },
+			})
+			mockQdrantClientInstance.createPayloadIndex.mockResolvedValue({})
+			await vectorStore.initialize()
+			expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledWith(expectedCollectionName, {
+				field_name: "filePath",
+				field_schema: "keyword",
+				wait: true,
+			})
+			expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledWith(expectedCollectionName, {
+				field_name: "generation",
+				field_schema: "integer",
+				wait: true,
+			})
 		})
 
 		it("should throw vectorDimensionMismatch error when deleteCollection fails during recreation", async () => {
@@ -843,7 +935,7 @@ describe("QdrantVectorStore", () => {
 			expect(mockQdrantClientInstance.getCollection).toHaveBeenCalledTimes(2)
 			expect(mockQdrantClientInstance.deleteCollection).toHaveBeenCalledTimes(1)
 			expect(mockQdrantClientInstance.createCollection).toHaveBeenCalledTimes(1)
-			expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledTimes(6)
+			expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledTimes(8)
 			;(console.warn as any).mockRestore()
 		})
 
@@ -940,7 +1032,7 @@ describe("QdrantVectorStore", () => {
 					on_disk: true,
 				},
 			})
-			expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledTimes(6)
+			expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledTimes(8)
 			;(console.warn as any).mockRestore()
 		})
 

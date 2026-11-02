@@ -19,8 +19,11 @@ import { VercelAiGatewayEmbedder } from "./embedders/vercel-ai-gateway"
 import { BedrockEmbedder } from "./embedders/bedrock"
 import { OpenRouterEmbedder } from "./embedders/openrouter"
 import { QdrantVectorStore } from "./vector-store/qdrant-client"
-import { codeParser, DirectoryScanner, FileWatcher } from "./processors"
+import { DirectoryScanner, FileWatcher } from "./processors"
+import { ParseWorkerClient } from "./parse-worker-client"
+import { IndexWriteGate } from "./index-write-gate"
 import { ICodeParser, IEmbedder, IFileWatcher, IVectorStore } from "./interfaces"
+import { GenerationAllocator } from "./generation-allocator"
 import { CodeIndexConfigManager } from "./config-manager"
 import { CacheManager } from "./cache-manager"
 import { BATCH_SEGMENT_THRESHOLD } from "./constants"
@@ -33,6 +36,8 @@ export class CodeIndexServiceFactory {
 		private readonly configManager: CodeIndexConfigManager,
 		private readonly workspacePath: string,
 		private readonly cacheManager: CacheManager,
+		private readonly writeGate = new IndexWriteGate(),
+		private readonly generationAllocator = new GenerationAllocator(cacheManager),
 	) {}
 
 	/**
@@ -183,7 +188,16 @@ export class CodeIndexServiceFactory {
 			// In test environment, vscode.workspace might not be available
 			batchSize = BATCH_SEGMENT_THRESHOLD
 		}
-		return new DirectoryScanner(embedder, vectorStore, parser, this.cacheManager, ignoreInstance, batchSize)
+		return new DirectoryScanner(
+			embedder,
+			vectorStore,
+			parser,
+			this.cacheManager,
+			ignoreInstance,
+			batchSize,
+			this.writeGate,
+			this.generationAllocator,
+		)
 	}
 
 	/**
@@ -196,6 +210,7 @@ export class CodeIndexServiceFactory {
 		cacheManager: CacheManager,
 		ignoreInstance: Ignore,
 		rooIgnoreController?: RooIgnoreController,
+		parser: ICodeParser = new ParseWorkerClient(),
 	): IFileWatcher {
 		// Get the configurable batch size from VSCode settings
 		let batchSize: number
@@ -216,6 +231,9 @@ export class CodeIndexServiceFactory {
 			ignoreInstance,
 			rooIgnoreController,
 			batchSize,
+			parser,
+			this.writeGate,
+			this.generationAllocator,
 		)
 	}
 
@@ -231,7 +249,7 @@ export class CodeIndexServiceFactory {
 	): {
 		embedder: IEmbedder
 		vectorStore: IVectorStore
-		parser: ICodeParser
+		parser: ParseWorkerClient
 		scanner: DirectoryScanner
 		fileWatcher: IFileWatcher
 	} {
@@ -241,7 +259,7 @@ export class CodeIndexServiceFactory {
 
 		const embedder = this.createEmbedder()
 		const vectorStore = this.createVectorStore()
-		const parser = codeParser
+		const parser = new ParseWorkerClient()
 		const scanner = this.createDirectoryScanner(embedder, vectorStore, parser, ignoreInstance)
 		const fileWatcher = this.createFileWatcher(
 			context,
@@ -250,6 +268,7 @@ export class CodeIndexServiceFactory {
 			cacheManager,
 			ignoreInstance,
 			rooIgnoreController,
+			parser,
 		)
 
 		return {

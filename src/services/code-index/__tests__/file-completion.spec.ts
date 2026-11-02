@@ -1,0 +1,317 @@
+import { v5 as uuidv5 } from "uuid"
+import { FileCompletion, FileIndexWriter } from "../file-completion"
+import { IndexWriteGate, LATE_WRITE_GRACE_MS } from "../index-write-gate"
+import { QDRANT_CODE_BLOCK_NAMESPACE } from "../constants"
+import type { CodeBlock } from "../interfaces"
+
+function deferred<Value = void>() {
+	let resolve!: (value: Value) => void
+	let reject!: (error: Error) => void
+	const promise = new Promise<Value>((complete, fail) => {
+		resolve = complete
+		reject = fail
+	})
+	return { promise, resolve, reject }
+}
+
+describe("FileCompletion", () => {
+	it("does not finish when an early batch settles before the final batch is registered", async () => {
+		const finish = vi.fn().mockResolvedValue(undefined)
+		const completion = new FileCompletion(finish)
+		completion.register()
+		await completion.settled(true)
+		expect(completion.outstanding).toBe(0)
+		expect(finish).not.toHaveBeenCalled()
+		completion.register()
+		await completion.registered()
+		expect(finish).not.toHaveBeenCalled()
+		await completion.settled(true)
+		expect(finish).toHaveBeenCalledOnce()
+	})
+
+	it("finishes an empty file once and rejects registration after the file is closed", async () => {
+		const finish = vi.fn().mockResolvedValue(undefined)
+		const completion = new FileCompletion(finish)
+		await completion.registered()
+		await completion.registered()
+		expect(finish).toHaveBeenCalledOnce()
+		expect(() => completion.register()).toThrow("registration already complete")
+	})
+
+	it.each(["before registration", "after registration"])("keeps a failed file incomplete %s", async (timing) => {
+		const finish = vi.fn()
+		const completion = new FileCompletion(finish)
+		completion.register()
+		completion.register()
+		if (timing === "after registration") await completion.registered()
+		await completion.settled(false)
+		if (timing === "before registration") await completion.registered()
+		await completion.settled(true)
+		expect(completion.failed).toBe(true)
+		expect(completion.outstanding).toBe(0)
+		expect(finish).not.toHaveBeenCalled()
+	})
+
+	it("shares a pending finish and never retries a failed finish", async () => {
+		const held = deferred()
+		const finish = vi.fn(() => held.promise)
+		const completion = new FileCompletion(finish)
+		const first = completion.registered()
+		const second = completion.registered()
+		const firstRejected = expect(first).rejects.toThrow("Verification failed")
+		const secondRejected = expect(second).rejects.toThrow("Verification failed")
+		expect(finish).toHaveBeenCalledOnce()
+		held.reject(new Error("Verification failed"))
+		await Promise.all([firstRejected, secondRejected])
+		expect(completion.failed).toBe(true)
+		await completion.registered()
+		expect(finish).toHaveBeenCalledOnce()
+	})
+})
+
+describe("FileIndexWriter", () => {
+	const filePath = "/workspace/file.ts"
+	let cache: any
+	let store: any
+	let generations: any
+	let embedder: any
+	let gate: IndexWriteGate
+	let attempt: AbortController
+	let writer: FileIndexWriter
+
+	function blocks(count: number): CodeBlock[] {
+		return Array.from({ length: count }, (_, offset) => ({
+			file_path: filePath,
+			identifier: null,
+			type: "function",
+			start_line: 1,
+			end_line: 1,
+			content: ` block ${offset} `,
+			fileHash: "hash",
+			segmentHash: `segment-${offset}`,
+		}))
+	}
+
+	beforeEach(() => {
+		vi.useFakeTimers()
+		vi.setSystemTime(100_000)
+		cache = {
+			invalidateFile: vi.fn().mockResolvedValue(undefined),
+			completeFile: vi.fn(),
+			completeRemoval: vi.fn(),
+		}
+		store = {
+			upsertPoints: vi.fn().mockResolvedValue(undefined),
+			deletePointsByFilePath: vi.fn().mockResolvedValue(undefined),
+			countPointsForFile: vi.fn().mockResolvedValue({ current: 2, other: 0 }),
+		}
+		generations = { allocate: vi.fn().mockResolvedValue(17) }
+		embedder = {
+			createEmbeddings: vi.fn(async (texts: string[]) => ({ embeddings: texts.map(() => [0.1, 0.2]) })),
+		}
+		gate = new IndexWriteGate()
+		attempt = new AbortController()
+		writer = new FileIndexWriter(cache, store, gate, generations, "/workspace")
+	})
+
+	afterEach(() => {
+		vi.clearAllTimers()
+		vi.useRealTimers()
+	})
+
+	it("awaits durable invalidation before any embedding or vector mutation", async () => {
+		const held = deferred()
+		cache.invalidateFile.mockReturnValue(held.promise)
+		const pending = writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal)
+		await vi.advanceTimersByTimeAsync(0)
+		expect(cache.invalidateFile).toHaveBeenCalledWith(filePath)
+		expect(embedder.createEmbeddings).not.toHaveBeenCalled()
+		expect(store.upsertPoints).not.toHaveBeenCalled()
+		expect(store.deletePointsByFilePath).not.toHaveBeenCalled()
+		held.resolve()
+		await pending
+		expect(cache.completeFile).toHaveBeenCalledWith(filePath, "hash")
+	})
+
+	it.each(["replace", "remove"] as const)(
+		"issues no vector mutation when %s invalidation fails",
+		async (operation) => {
+			cache.invalidateFile.mockRejectedValue(new Error("Disk full"))
+			const pending =
+				operation === "replace"
+					? writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal)
+					: writer.remove(filePath, attempt.signal)
+			await expect(pending).rejects.toThrow("Disk full")
+			expect(store.upsertPoints).not.toHaveBeenCalled()
+			expect(store.deletePointsByFilePath).not.toHaveBeenCalled()
+			expect(cache.completeFile).not.toHaveBeenCalled()
+			expect(cache.completeRemoval).not.toHaveBeenCalled()
+			expect(gate.needsReconciliation(filePath)).toBe(false)
+		},
+	)
+
+	it("upserts every registered batch before fenced cleanup, verification, hash and progress", async () => {
+		const finalBatch = deferred()
+		store.upsertPoints.mockResolvedValueOnce(undefined).mockReturnValueOnce(finalBatch.promise)
+		const onComplete = vi.fn()
+		const pending = writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal, 1, onComplete)
+		await vi.advanceTimersByTimeAsync(0)
+		expect(store.upsertPoints).toHaveBeenCalledTimes(2)
+		expect(store.deletePointsByFilePath).not.toHaveBeenCalled()
+		expect(cache.completeFile).not.toHaveBeenCalled()
+		finalBatch.resolve()
+		await pending
+		expect(store.deletePointsByFilePath).toHaveBeenCalledWith(filePath, 17)
+		expect(store.countPointsForFile).toHaveBeenCalledWith(filePath, 17)
+		expect(cache.completeFile).toHaveBeenCalledWith(filePath, "hash")
+		expect(onComplete).toHaveBeenCalledWith(2)
+		expect(store.upsertPoints.mock.invocationCallOrder[1]).toBeLessThan(
+			store.deletePointsByFilePath.mock.invocationCallOrder[0],
+		)
+		expect(store.countPointsForFile.mock.invocationCallOrder[0]).toBeLessThan(
+			cache.completeFile.mock.invocationCallOrder[0],
+		)
+		expect(embedder.createEmbeddings).toHaveBeenNthCalledWith(1, ["block 0"], undefined, attempt.signal)
+		const points = store.upsertPoints.mock.calls.flatMap(([batch]: any[]) => batch)
+		expect(points.map((point: any) => point.id)).toEqual([
+			uuidv5("segment-0:17", QDRANT_CODE_BLOCK_NAMESPACE),
+			uuidv5("segment-1:17", QDRANT_CODE_BLOCK_NAMESPACE),
+		])
+		expect(points[0].payload).toMatchObject({ filePath: "file.ts", generation: 17, segmentHash: "segment-0" })
+		expect(new Set(points.map((point: any) => point.id)).size).toBe(2)
+	})
+
+	it.each([
+		{ current: 1, other: 0 },
+		{ current: 2, other: 1 },
+	])("does not complete a file with missing or stale points (%j)", async (counts) => {
+		store.countPointsForFile.mockResolvedValue(counts)
+		await expect(writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal)).rejects.toThrow(
+			"verification failed",
+		)
+		expect(cache.completeFile).not.toHaveBeenCalled()
+	})
+
+	it("cleans and verifies a zero-content file without embedding", async () => {
+		store.countPointsForFile.mockResolvedValue({ current: 0, other: 0 })
+		const whitespace = blocks(1)
+		whitespace[0].content = " \n\t"
+		await writer.replace(filePath, "hash", whitespace, embedder, attempt.signal)
+		expect(embedder.createEmbeddings).not.toHaveBeenCalled()
+		expect(store.upsertPoints).not.toHaveBeenCalled()
+		expect(store.deletePointsByFilePath).toHaveBeenCalledWith(filePath, 17)
+		expect(cache.completeFile).toHaveBeenCalledWith(filePath, "hash")
+	})
+
+	it("does not issue cleanup or completion after a failed batch", async () => {
+		store.upsertPoints.mockRejectedValueOnce(new Error("Upsert failed"))
+		await expect(writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal, 1)).rejects.toThrow(
+			"Upsert failed",
+		)
+		expect(embedder.createEmbeddings).toHaveBeenCalledTimes(1)
+		expect(store.deletePointsByFilePath).not.toHaveBeenCalled()
+		expect(cache.completeFile).not.toHaveBeenCalled()
+		expect(gate.needsReconciliation(filePath)).toBe(true)
+	})
+
+	it("rejects incomplete embeddings without issuing an upsert", async () => {
+		embedder.createEmbeddings.mockResolvedValue({ embeddings: [[0.1]] })
+		await expect(writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal)).rejects.toThrow(
+			"Incomplete embeddings",
+		)
+		expect(store.upsertPoints).not.toHaveBeenCalled()
+		expect(cache.completeFile).not.toHaveBeenCalled()
+	})
+
+	it("discards late embedding results after cancellation without issuing subsequent batches", async () => {
+		const held = deferred<{ embeddings: number[][] }>()
+		embedder.createEmbeddings.mockReturnValueOnce(held.promise)
+		const pending = writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal, 1)
+		const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" })
+		await vi.advanceTimersByTimeAsync(0)
+		attempt.abort()
+		held.resolve({ embeddings: [[0.1]] })
+		await rejected
+		expect(embedder.createEmbeddings).toHaveBeenCalledOnce()
+		expect(store.upsertPoints).not.toHaveBeenCalled()
+		expect(store.deletePointsByFilePath).not.toHaveBeenCalled()
+		expect(cache.completeFile).not.toHaveBeenCalled()
+	})
+
+	it.each(["complete", "stale", "cancel"])(
+		"keeps an uncertain file incomplete through grace (%s)",
+		async (outcome) => {
+			gate.recover([filePath])
+			const onComplete = vi.fn()
+			const pending = writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal, 1, onComplete)
+			const observed = pending.catch((error) => error)
+			await vi.advanceTimersByTimeAsync(LATE_WRITE_GRACE_MS - 1)
+			expect(store.countPointsForFile).toHaveBeenCalledTimes(1)
+			expect(cache.completeFile).not.toHaveBeenCalled()
+			expect(cache.completeRemoval).not.toHaveBeenCalled()
+			expect(onComplete).not.toHaveBeenCalled()
+			if (outcome === "cancel") attempt.abort()
+			if (outcome === "stale") store.countPointsForFile.mockResolvedValue({ current: 2, other: 1 })
+			await vi.advanceTimersByTimeAsync(1)
+			const result = await observed
+			if (outcome === "complete") {
+				expect(result).toBeUndefined()
+				expect(store.countPointsForFile).toHaveBeenCalledTimes(2)
+				expect(cache.completeFile).toHaveBeenCalledWith(filePath, "hash")
+				expect(onComplete).toHaveBeenCalledOnce()
+				expect(gate.needsReconciliation(filePath)).toBe(false)
+			} else {
+				expect(result).toMatchObject(
+					outcome === "cancel"
+						? { name: "AbortError" }
+						: { message: expect.stringContaining("verification failed") },
+				)
+				expect(cache.completeFile).not.toHaveBeenCalled()
+				expect(onComplete).not.toHaveBeenCalled()
+				expect(gate.needsReconciliation(filePath)).toBe(true)
+			}
+		},
+	)
+
+	it("extends grace when another uncertainty arrives during final verification", async () => {
+		gate.recover([filePath])
+		const heldCounts = deferred<{ current: number; other: number }>()
+		store.countPointsForFile.mockResolvedValueOnce({ current: 2, other: 0 }).mockReturnValueOnce(heldCounts.promise)
+		const pending = writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal)
+		await vi.advanceTimersByTimeAsync(LATE_WRITE_GRACE_MS)
+		expect(store.countPointsForFile).toHaveBeenCalledTimes(2)
+		gate.recover([filePath])
+		heldCounts.resolve({ current: 2, other: 0 })
+		await vi.advanceTimersByTimeAsync(LATE_WRITE_GRACE_MS - 1)
+		expect(cache.completeFile).not.toHaveBeenCalled()
+		await vi.advanceTimersByTimeAsync(1)
+		await pending
+		expect(store.countPointsForFile).toHaveBeenCalledTimes(3)
+		expect(cache.completeFile).toHaveBeenCalledWith(filePath, "hash")
+	})
+
+	it("invalidates a completed file before removal and drops its open record only after success", async () => {
+		const invalidation = deferred()
+		const deletion = deferred()
+		cache.invalidateFile.mockReturnValue(invalidation.promise)
+		store.deletePointsByFilePath.mockReturnValue(deletion.promise)
+		const pending = writer.remove(filePath, attempt.signal)
+		await vi.advanceTimersByTimeAsync(0)
+		expect(store.deletePointsByFilePath).not.toHaveBeenCalled()
+		invalidation.resolve()
+		await vi.advanceTimersByTimeAsync(0)
+		expect(store.deletePointsByFilePath).toHaveBeenCalledWith(filePath, 17)
+		expect(cache.completeRemoval).not.toHaveBeenCalled()
+		deletion.resolve()
+		await pending
+		expect(cache.completeRemoval).toHaveBeenCalledWith(filePath)
+	})
+
+	it("retains the open record after an uncertain removal failure", async () => {
+		store.deletePointsByFilePath.mockRejectedValue(new DOMException("Lost result", "AbortError"))
+		await expect(writer.remove(filePath, attempt.signal)).rejects.toMatchObject({ name: "AbortError" })
+		expect(cache.invalidateFile).toHaveBeenCalledWith(filePath)
+		expect(cache.completeRemoval).not.toHaveBeenCalled()
+		expect(gate.needsReconciliation(filePath)).toBe(true)
+	})
+})
