@@ -326,9 +326,22 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 				() => ({ createServices, validateEmbedder: vi.fn().mockResolvedValue({ valid: true }) }) as any,
 			)
 			const clear = manager.clearIndexData().catch(() => {})
+			// Signal when the retry actually awaits the clear, instead of guessing with a sleep.
+			const realClearing = internal.clearing
+			let signalAwaiting!: () => void
+			const retryAwaitingClear = new Promise<void>((resolve) => (signalAwaiting = resolve))
+			internal.clearing = {
+				then: (onFulfilled: any, onRejected: any) => {
+					signalAwaiting()
+					return realClearing.then(onFulfilled, onRejected)
+				},
+			}
 			internal.servicesStopped = true
 			const retry = manager.startIndexing()
-			await new Promise((resolve) => setTimeout(resolve, 20))
+			let retryFinished = false
+			await Promise.race([retryAwaitingClear, retry.then(() => (retryFinished = true))])
+			expect(retryFinished).toBe(false)
+			for (let tick = 0; tick < 10; tick++) await Promise.resolve()
 			expect(createServices).not.toHaveBeenCalled()
 			expect(internal._orchestrator).toBeUndefined()
 			settle()
