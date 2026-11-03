@@ -10,6 +10,7 @@ import { normalizeToolSchema } from "../../utils/json-schema"
 
 import { ApiStream, ApiStreamChunk } from "../transform/stream"
 import {
+	canCreateImageParts,
 	convertToVsCodeLmMessages,
 	extractTextCountFromMessage,
 	sanitizeSurrogates,
@@ -20,6 +21,7 @@ import {
 import { CONTEXT_WINDOW_EXCEEDED_STATUS } from "../../core/context/context-management/context-error-handling"
 
 import { QuotingScanState } from "./vscode-lm-quoting"
+import { reportedImageSupport } from "./vscode-lm-capabilities"
 
 import { BaseProvider } from "./base-provider"
 import type { SingleCompletionHandler, ApiHandlerCreateMessageMetadata } from "../index"
@@ -500,7 +502,7 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 					}
 				}
 			})
-			this.initializeClient()
+			void this.resolveModelCapabilities()
 		} catch (error) {
 			// Ensure cleanup if constructor fails
 			this.dispose()
@@ -619,14 +621,25 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 	 * @returns A promise resolving to the token count
 	 */
 	override async countTokens(content: Array<Anthropic.Messages.ContentBlockParam>): Promise<number> {
-		// Convert Anthropic content blocks to a string for VSCode LM token counting
+		const containsImages = content.some(
+			(block) =>
+				block.type === "image" ||
+				(block.type === "tool_result" &&
+					Array.isArray(block.content) &&
+					block.content.some((part) => part.type === "image")),
+		)
+		if (this.getModel().info.supportsImages === true && containsImages) {
+			return this.calculateTotalInputTokens(
+				convertToVsCodeLmMessages([{ role: "user", content }], { supportsImages: true }),
+			)
+		}
+		// Preserve text-only counting when native images cannot be sent.
 		let textContent = ""
 
 		for (const block of content) {
 			if (block.type === "text") {
 				textContent += block.text || ""
 			} else if (block.type === "image") {
-				// VSCode LM doesn't support images directly, so we'll just use a placeholder
 				textContent += "[IMAGE]"
 			}
 		}
@@ -666,6 +679,8 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 			let tokenCount: number
 
 			if (typeof text === "string") {
+				tokenCount = await this.client.countTokens(text, cancellationToken)
+			} else if (this.getModel().info.supportsImages === true) {
 				tokenCount = await this.client.countTokens(text, cancellationToken)
 			} else if (text instanceof vscode.LanguageModelChatMessage) {
 				// For chat messages, ensure we have content
@@ -716,8 +731,38 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 		}
 	}
 
-	private async calculateTotalInputTokens(vsCodeLmMessages: vscode.LanguageModelChatMessage[]): Promise<number> {
-		const messageTokens: number[] = await Promise.all(vsCodeLmMessages.map((msg) => this.internalCountTokens(msg)))
+	private async countTokensStrict(message: vscode.LanguageModelChatMessage): Promise<number> {
+		const temporaryCancellation = this.currentRequestCancellation ? null : new vscode.CancellationTokenSource()
+		const cancellationToken = (this.currentRequestCancellation ?? temporaryCancellation!).token
+		try {
+			if (!this.client || cancellationToken.isCancellationRequested) throw new Error("Measurement unavailable")
+			const tokenCount = await this.client.countTokens(message, cancellationToken)
+			if (
+				cancellationToken.isCancellationRequested ||
+				typeof tokenCount !== "number" ||
+				!Number.isFinite(tokenCount) ||
+				tokenCount < 0
+			) {
+				throw new Error("Invalid measurement")
+			}
+			return tokenCount
+		} catch (error) {
+			console.warn("Roo Code <Language Model API>: Request size measurement failed:", error)
+			throw new Error("Roo Code <Language Model API>: Could not measure request size. The request was not sent.")
+		} finally {
+			temporaryCancellation?.dispose()
+		}
+	}
+
+	private async calculateTotalInputTokens(
+		vsCodeLmMessages: vscode.LanguageModelChatMessage[],
+		strict = false,
+	): Promise<number> {
+		const messageTokens: number[] = await Promise.all(
+			vsCodeLmMessages.map((message) =>
+				strict ? this.countTokensStrict(message) : this.internalCountTokens(message),
+			),
+		)
 
 		return messageTokens.reduce((sum: number, tokens: number): number => sum + tokens, 0)
 	}
@@ -727,6 +772,15 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 			this.currentRequestCancellation.cancel()
 			this.currentRequestCancellation.dispose()
 			this.currentRequestCancellation = null
+		}
+	}
+
+	async resolveModelCapabilities(): Promise<void> {
+		try {
+			await this.getClient()
+		} catch {
+			// The send path reports acquisition errors; pre-filter discovery must not reject text requests.
+			this.client = null
 		}
 	}
 
@@ -819,14 +873,36 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 		// Convert Anthropic messages to VS Code LM messages
 		const vsCodeLmMessages: vscode.LanguageModelChatMessage[] = [
 			vscode.LanguageModelChatMessage.Assistant(sanitizeSurrogates(systemPrompt)),
-			...convertToVsCodeLmMessages(cleanedMessages, { supportsImages: this.getModel().info.supportsImages }),
+			...convertToVsCodeLmMessages(cleanedMessages, {
+				supportsImages: this.getModel().info.supportsImages === true,
+			}),
 		]
 
 		// Initialize cancellation token for the request
 		this.currentRequestCancellation = new vscode.CancellationTokenSource()
 
 		// Calculate input tokens before starting the stream
-		const totalInputTokens: number = await this.calculateTotalInputTokens(vsCodeLmMessages)
+		const modelInfo = this.getModel().info
+		let totalInputTokens: number
+		try {
+			totalInputTokens = await this.calculateTotalInputTokens(vsCodeLmMessages, modelInfo.supportsImages === true)
+			if (
+				modelInfo.supportsImages === true &&
+				totalInputTokens >
+					Math.min(modelInfo.contextWindow, metadata?.condenseAllowance ?? modelInfo.contextWindow)
+			) {
+				throw Object.assign(
+					new Error(
+						"Roo Code <Language Model API>: The request exceeds the selected model's input context window. " +
+							"Condense the conversation or start a new task.",
+					),
+					{ status: CONTEXT_WINDOW_EXCEEDED_STATUS },
+				)
+			}
+		} catch (error) {
+			this.ensureCleanState()
+			throw error
+		}
 
 		// Accumulate the text and count at the end of the stream to reduce token counting overhead.
 		let accumulatedText: string = ""
@@ -1093,8 +1169,7 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 					typeof this.client.maxInputTokens === "number"
 						? Math.max(0, this.client.maxInputTokens)
 						: openAiModelInfoSaneDefaults.contextWindow,
-				supportsImages:
-					vscodeLlmModels[this.client.family as keyof typeof vscodeLlmModels]?.supportsImages ?? false,
+				supportsImages: canCreateImageParts() ? reportedImageSupport(this.client) : false,
 				supportsPromptCache: true,
 				inputPrice: 0,
 				outputPrice: 0,
@@ -1115,6 +1190,7 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 			id: fallbackId,
 			info: {
 				...openAiModelInfoSaneDefaults,
+				supportsImages: undefined,
 				description: `VSCode Language Model (Fallback): ${fallbackId}`,
 			},
 		}
@@ -1176,7 +1252,17 @@ const VSCODE_LM_STATIC_BLACKLIST: string[] = ["claude-3.7-sonnet", "claude-3.7-s
 export async function getVsCodeLmModels() {
 	try {
 		const models = (await vscode.lm.selectChatModels({})) || []
-		return models.filter((model) => !VSCODE_LM_STATIC_BLACKLIST.includes(model.id))
+		return models
+			.filter((model) => !VSCODE_LM_STATIC_BLACKLIST.includes(model.id))
+			.map((model) => ({
+				id: model.id,
+				vendor: model.vendor,
+				family: model.family,
+				version: model.version,
+				name: model.name,
+				maxInputTokens: model.maxInputTokens,
+				supportsImages: canCreateImageParts() ? reportedImageSupport(model) : false,
+			}))
 	} catch (error) {
 		console.error(
 			`Error fetching VS Code LM models: ${JSON.stringify(error, Object.getOwnPropertyNames(error), 2)}`,

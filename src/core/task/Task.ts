@@ -100,7 +100,7 @@ import { RooIgnoreController } from "../ignore/RooIgnoreController"
 import { RooProtectedController } from "../protect/RooProtectedController"
 import { type AssistantMessageContent, presentAssistantMessage } from "../assistant-message"
 import { NativeToolCallParser } from "../assistant-message/NativeToolCallParser"
-import { manageContext, willManageContext } from "../context-management"
+import { getCondenseAllowance, manageContext, willManageContext } from "../context-management"
 import { ClineProvider } from "../webview/ClineProvider"
 import { MultiSearchReplaceDiffStrategy } from "../diff/strategies/multi-search-replace"
 import {
@@ -382,6 +382,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	didToolFailInCurrentTurn = false
 	didCompleteReadingStream = false
 	private _started = false
+	private readonly constructedFromHistory: boolean
 	// No streaming parser is required.
 	assistantMessageParser?: undefined
 	private providerProfileChangeListener?: (config: { name: string; provider?: string }) => void
@@ -451,6 +452,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			)
 		}
 
+		this.constructedFromHistory = !!historyItem
 		this.taskId = historyItem ? historyItem.id : (taskId ?? uuidv7())
 		this.rootTaskId = historyItem ? historyItem.rootTaskId : rootTask?.taskId
 		this.parentTaskId = historyItem ? historyItem.parentTaskId : parentTask?.taskId
@@ -1149,6 +1151,16 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		await provider?.postStateToWebviewWithoutTaskHistory()
 		this.emit(RooCodeEventName.Message, { action: "created", message })
 		await this.saveClineMessages()
+	}
+
+	public async recordCheckpointDeletedUsage(usage: ClineApiReqInfo): Promise<void> {
+		// Restore bookkeeping must persist on stopped tasks without reviving interactive output.
+		await this.addToClineMessages({
+			ts: Date.now(),
+			type: "say",
+			say: "api_req_deleted",
+			text: JSON.stringify(usage),
+		})
 	}
 
 	public async overwriteClineMessages(newMessages: ClineMessage[]) {
@@ -1887,6 +1899,18 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		if (task || images) {
 			this.startTask(task ?? undefined, images ?? undefined)
 		}
+	}
+
+	public resumeFromHistory(): void {
+		if (this._started) return
+		if (!this.constructedFromHistory) {
+			throw new Error("Task was not constructed from history")
+		}
+		this._started = true
+		void this.resumeTaskFromHistory().catch((error: unknown) => {
+			if (this.abandoned || this.abort) return
+			this.providerRef.deref()?.log(`Failed to resume task ${this.taskId}: ${String(error)}`)
+		})
 	}
 
 	private async startTask(task?: string, images?: string[]): Promise<void> {
@@ -3942,7 +3966,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			const maxTokens = getModelMaxOutputTokens({
 				modelId: this.api.getModel().id,
 				model: modelInfo,
-				settings: this.apiConfiguration,
+				settings: apiConfiguration ?? this.apiConfiguration,
 			})
 
 			// VS Code LM (Copilot) measures usage against its static-table maxInputTokens, not the
@@ -4121,6 +4145,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// For API only: merge consecutive user messages (excludes summary messages per
 		// mergeConsecutiveApiMessages implementation) without mutating stored history.
 		const mergedForApi = mergeConsecutiveApiMessages(messagesSinceLastSummary, { roles: ["user"] })
+		await this.api.resolveModelCapabilities?.()
 		const messagesWithoutImages = maybeRemoveImageBlocks(mergedForApi, this.api)
 		const cleanConversationHistory = this.buildCleanConversationHistory(messagesWithoutImages as ApiMessage[])
 
@@ -4180,6 +4205,19 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			mode: mode,
 			taskId: this.taskId,
 			suppressPreviousResponseId: this.skipPrevResponseIdOnce,
+			condenseAllowance: getCondenseAllowance({
+				contextWindow: this.api.getCondenseContextWindow?.() ?? modelInfo.contextWindow,
+				maxTokens: getModelMaxOutputTokens({
+					modelId: this.api.getModel().id,
+					model: modelInfo,
+					settings: apiConfiguration ?? this.apiConfiguration,
+				}),
+				autoCondenseContext,
+				autoCondenseContextPercent,
+				profileThresholds,
+				currentProfileId: this.getCurrentProfileId(state),
+				useAvailableInputForContextPercent: typeof this.api.getCondenseContextWindow === "function",
+			}),
 			// Include tools whenever they are present.
 			...(shouldIncludeTools
 				? {

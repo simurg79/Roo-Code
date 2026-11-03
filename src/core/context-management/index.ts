@@ -179,6 +179,49 @@ export type WillManageContextOptions = {
 	useAvailableInputForContextPercent?: boolean
 }
 
+function resolveCondenseThreshold({
+	autoCondenseContextPercent,
+	profileThresholds,
+	currentProfileId,
+}: Pick<WillManageContextOptions, "autoCondenseContextPercent" | "profileThresholds" | "currentProfileId">): number {
+	const profileThreshold = profileThresholds[currentProfileId]
+	return profileThreshold !== undefined &&
+		profileThreshold !== -1 &&
+		profileThreshold >= MIN_CONDENSE_THRESHOLD &&
+		profileThreshold <= MAX_CONDENSE_THRESHOLD
+		? profileThreshold
+		: autoCondenseContextPercent
+}
+
+export function getCondenseAllowance(
+	options: Omit<WillManageContextOptions, "totalTokens" | "lastMessageTokens">,
+): number {
+	const { contextWindow, maxTokens, autoCondenseContext, useAvailableInputForContextPercent } = options
+	const effectiveThreshold = resolveCondenseThreshold(options)
+	const denominator =
+		contextWindow - (useAvailableInputForContextPercent && maxTokens && maxTokens > 0 ? maxTokens : 0)
+
+	// A constant 100% predicate has no non-triggering boundary to correct.
+	if (autoCondenseContext && denominator <= 0 && effectiveThreshold <= 100) {
+		return -1
+	}
+
+	const reservedTokens = maxTokens && maxTokens > 0 ? maxTokens : ANTHROPIC_DEFAULT_MAX_TOKENS
+	const allowedTokens = contextWindow * (1 - TOKEN_BUFFER_PERCENTAGE) - reservedTokens
+	let tokenAllowance = Math.floor(allowedTokens)
+	while (tokenAllowance > allowedTokens) tokenAllowance--
+	while (tokenAllowance + 1 <= allowedTokens) tokenAllowance++
+	if (!autoCondenseContext) return tokenAllowance
+
+	const percentTriggers = (prevContextTokens: number) =>
+		computeContextPercent({ ...options, prevContextTokens }) >= effectiveThreshold
+	let percentAllowance = Math.ceil((effectiveThreshold * denominator) / 100) - 1
+	// Correct floating-point candidates with the manager's predicates, not an epsilon.
+	while (percentTriggers(percentAllowance)) percentAllowance--
+	while (!percentTriggers(percentAllowance + 1)) percentAllowance++
+	return Math.min(tokenAllowance, percentAllowance)
+}
+
 /**
  * Checks whether context management (condensation or truncation) will likely run based on current token usage.
  *
@@ -213,17 +256,11 @@ export function willManageContext({
 	const prevContextTokens = totalTokens + lastMessageTokens
 	const allowedTokens = contextWindow * (1 - TOKEN_BUFFER_PERCENTAGE) - reservedTokens
 
-	// Determine the effective threshold to use
-	let effectiveThreshold = autoCondenseContextPercent
-	const profileThreshold = profileThresholds[currentProfileId]
-	if (profileThreshold !== undefined) {
-		if (profileThreshold === -1) {
-			effectiveThreshold = autoCondenseContextPercent
-		} else if (profileThreshold >= MIN_CONDENSE_THRESHOLD && profileThreshold <= MAX_CONDENSE_THRESHOLD) {
-			effectiveThreshold = profileThreshold
-		}
-		// Invalid values fall back to global setting (effectiveThreshold already set)
-	}
+	const effectiveThreshold = resolveCondenseThreshold({
+		autoCondenseContextPercent,
+		profileThresholds,
+		currentProfileId,
+	})
 
 	const contextPercent = computeContextPercent({
 		prevContextTokens,

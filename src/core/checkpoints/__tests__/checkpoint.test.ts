@@ -74,7 +74,7 @@ describe("Checkpoint functionality", () => {
 			log: vi.fn(),
 			postMessageToWebview: vi.fn(),
 			postStateToWebview: vi.fn(),
-			cancelTask: vi.fn(),
+			cancelTask: vi.fn().mockResolvedValue(undefined),
 		}
 
 		// Create mock task
@@ -90,6 +90,7 @@ describe("Checkpoint functionality", () => {
 			apiConversationHistory: [],
 			pendingUserMessageCheckpoint: undefined,
 			say: vi.fn().mockResolvedValue(undefined),
+			recordCheckpointDeletedUsage: vi.fn().mockResolvedValue(undefined),
 			overwriteClineMessages: vi.fn(),
 			overwriteApiConversationHistory: vi.fn(),
 			combineMessages: vi.fn().mockReturnValue([]),
@@ -106,6 +107,24 @@ describe("Checkpoint functionality", () => {
 	})
 
 	describe("checkpointSave", () => {
+		it("records the checkpoint event hash in checkpoint_saved text", async () => {
+			mockTask.checkpointService = undefined
+			await getCheckpointService(mockTask)
+			const checkpointListener = mockCheckpointService.on.mock.calls.find(
+				([event]: [string]) => event === "checkpoint",
+			)[1]
+			const commitHash = "d".repeat(40)
+			checkpointListener({ fromHash: "c".repeat(40), toHash: commitHash, suppressMessage: false })
+			expect(mockTask.say).toHaveBeenCalledWith(
+				"checkpoint_saved",
+				commitHash,
+				undefined,
+				undefined,
+				{ from: "c".repeat(40), to: commitHash, suppressMessage: false },
+				undefined,
+				{ isNonInteractive: true },
+			)
+		})
 		it("should wait for checkpoint service initialization before saving", async () => {
 			// Set up task with uninitialized service
 			mockCheckpointService.isInitialized = false
@@ -206,6 +225,7 @@ describe("Checkpoint functionality", () => {
 				{ ts: 1, say: "user", text: "Message 1" },
 				{ ts: 2, say: "assistant", text: "Message 2" },
 				{ ts: 3, say: "user", text: "Message 3" },
+				{ ts: 4, say: "checkpoint_saved", text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
 			]
 			mockTask.apiConversationHistory = [
 				{ ts: 1, role: "user", content: [{ type: "text", text: "Message 1" }] },
@@ -217,12 +237,14 @@ describe("Checkpoint functionality", () => {
 		it("should restore checkpoint for delete operation", async () => {
 			await checkpointRestore(mockTask, {
 				ts: 2,
-				commitHash: "abc123",
+				commitHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				mode: "restore",
 				operation: "delete",
 			})
 
-			expect(mockCheckpointService.restoreCheckpoint).toHaveBeenCalledWith("abc123")
+			expect(mockCheckpointService.restoreCheckpoint).toHaveBeenCalledWith(
+				"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			)
 			expect(mockTask.overwriteApiConversationHistory).toHaveBeenCalledWith([
 				{ ts: 1, role: "user", content: [{ type: "text", text: "Message 1" }] },
 			])
@@ -233,12 +255,14 @@ describe("Checkpoint functionality", () => {
 		it("should restore checkpoint for edit operation", async () => {
 			await checkpointRestore(mockTask, {
 				ts: 2,
-				commitHash: "abc123",
+				commitHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				mode: "restore",
 				operation: "edit",
 			})
 
-			expect(mockCheckpointService.restoreCheckpoint).toHaveBeenCalledWith("abc123")
+			expect(mockCheckpointService.restoreCheckpoint).toHaveBeenCalledWith(
+				"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			)
 			expect(mockTask.overwriteApiConversationHistory).toHaveBeenCalledWith([
 				{ ts: 1, role: "user", content: [{ type: "text", text: "Message 1" }] },
 			])
@@ -253,37 +277,113 @@ describe("Checkpoint functionality", () => {
 		it("should handle preview mode without modifying messages", async () => {
 			await checkpointRestore(mockTask, {
 				ts: 2,
-				commitHash: "abc123",
+				commitHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				mode: "preview",
 			})
 
-			expect(mockCheckpointService.restoreCheckpoint).toHaveBeenCalledWith("abc123")
+			expect(mockCheckpointService.restoreCheckpoint).toHaveBeenCalledWith(
+				"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			)
 			expect(mockTask.overwriteApiConversationHistory).not.toHaveBeenCalled()
 			expect(mockTask.overwriteClineMessages).not.toHaveBeenCalled()
 			expect(mockProvider.cancelTask).toHaveBeenCalled()
 		})
 
-		it("should handle missing message gracefully", async () => {
-			await checkpointRestore(mockTask, {
-				ts: 999, // Non-existent timestamp
-				commitHash: "abc123",
-				mode: "restore",
-			})
+		it.each(["missing service", "missing timestamp"])("reports no restore with %s", async (scenario) => {
+			if (scenario === "missing service") {
+				mockTask.enableCheckpoints = false
+				mockTask.checkpointService = undefined
+			}
+			await expect(
+				checkpointRestore(mockTask, {
+					ts: scenario === "missing timestamp" ? 999 : 2,
+					commitHash: "a".repeat(40),
+					mode: "restore",
+				}),
+			).resolves.toBe(false)
 
 			expect(mockCheckpointService.restoreCheckpoint).not.toHaveBeenCalled()
+			expect(mockTask.overwriteClineMessages).not.toHaveBeenCalled()
+			expect(mockTask.overwriteApiConversationHistory).not.toHaveBeenCalled()
+			expect(mockTask.recordCheckpointDeletedUsage).not.toHaveBeenCalled()
+			expect(mockProvider.postMessageToWebview).not.toHaveBeenCalled()
+			expect(mockProvider.cancelTask).not.toHaveBeenCalled()
 		})
 
-		it("should disable checkpoints on error", async () => {
-			mockCheckpointService.restoreCheckpoint.mockRejectedValue(new Error("Restore failed"))
+		it.each([true, false])("reports successful restore with rehydrate %s", async (rehydrate) => {
+			await expect(
+				checkpointRestore(mockTask, { ts: 2, commitHash: "a".repeat(40), mode: "preview", rehydrate }),
+			).resolves.toBe(true)
+			expect(mockCheckpointService.restoreCheckpoint).toHaveBeenCalledOnce()
+			expect(mockProvider.cancelTask).toHaveBeenCalledTimes(rehydrate ? 1 : 0)
+		})
 
+		it.each(["delete", "edit"] as const)(
+			"preserves history, usage, and checkpoint state on failed %s",
+			async (operation) => {
+				const failure = new Error("Restore failed")
+				mockCheckpointService.restoreCheckpoint.mockRejectedValueOnce(failure)
+				const messages = structuredClone(mockTask.clineMessages)
+				const history = structuredClone(mockTask.apiConversationHistory)
+				await expect(
+					checkpointRestore(mockTask, {
+						ts: 2,
+						commitHash: "a".repeat(40),
+						mode: "restore",
+						operation,
+					}),
+				).rejects.toBe(failure)
+				expect(mockTask.enableCheckpoints).toBe(true)
+				expect(mockTask.clineMessages).toEqual(messages)
+				expect(mockTask.apiConversationHistory).toEqual(history)
+				expect(mockTask.overwriteClineMessages).not.toHaveBeenCalled()
+				expect(mockTask.overwriteApiConversationHistory).not.toHaveBeenCalled()
+				expect(mockTask.say).not.toHaveBeenCalled()
+				expect(mockTask.recordCheckpointDeletedUsage).not.toHaveBeenCalled()
+				expect(mockProvider.postMessageToWebview).not.toHaveBeenCalled()
+				expect(mockProvider.cancelTask).not.toHaveBeenCalled()
+				expect(mockProvider.log).toHaveBeenCalledWith("[checkpointRestore] failed to restore checkpoint")
+			},
+		)
+
+		it.each(["HEAD", "HEAD~1", "a".repeat(7), "a".repeat(41), "A".repeat(40), "b".repeat(40), 42, null])(
+			"rejects invalid or foreign checkpoint %s before storage access",
+			async (commitHash) => {
+				mockTask.checkpointService = undefined
+				await expect(
+					checkpointRestore(mockTask, { ts: 2, commitHash: commitHash as string, mode: "restore" }),
+				).rejects.toThrow("common:errors.checkpoint_invalid")
+				const { RepoPerTaskCheckpointService } = await import("../../../services/checkpoints")
+				expect(RepoPerTaskCheckpointService.create).not.toHaveBeenCalled()
+				expect(mockCheckpointService.restoreCheckpoint).not.toHaveBeenCalled()
+				expect(mockProvider.cancelTask).not.toHaveBeenCalled()
+			},
+		)
+
+		it("accepts recorded SHA-256 hashes", async () => {
+			const commitHash = "c".repeat(64)
+			mockTask.clineMessages.push({ ts: 5, say: "checkpoint_saved", text: commitHash })
+			await checkpointRestore(mockTask, { ts: 2, commitHash, mode: "preview" })
+			expect(mockCheckpointService.restoreCheckpoint).toHaveBeenCalledWith(commitHash)
+		})
+
+		it.each([true, false])("passes the owned resume only when the owner remains stored: %s", async (ready) => {
+			const owner = { ready: false }
+			mockProvider.markPendingEditReady = vi.fn().mockReturnValue(ready)
+			mockProvider.beginOwnedResume = vi.fn()
 			await checkpointRestore(mockTask, {
 				ts: 2,
-				commitHash: "abc123",
+				commitHash: "a".repeat(40),
 				mode: "restore",
+				operation: "edit",
+				pendingEditOwner: owner as never,
 			})
-
-			expect(mockTask.enableCheckpoints).toBe(false)
-			expect(mockProvider.log).toHaveBeenCalledWith("[checkpointRestore] disabling checkpoints for this task")
+			expect(mockProvider.markPendingEditReady).toHaveBeenCalledWith("task-test-task-id", owner)
+			expect(mockProvider.beginOwnedResume).toHaveBeenCalledTimes(ready ? 1 : 0)
+			expect(mockProvider.cancelTask).toHaveBeenCalledWith({
+				expectedSession: mockTask,
+				...(ready ? { pendingEditOwner: owner } : {}),
+			})
 		})
 	})
 
@@ -291,9 +391,9 @@ describe("Checkpoint functionality", () => {
 		beforeEach(() => {
 			mockTask.clineMessages = [
 				{ ts: 1, say: "user", text: "Message 1" },
-				{ ts: 2, say: "checkpoint_saved", text: "commit1" },
+				{ ts: 2, say: "checkpoint_saved", text: "1111111111111111111111111111111111111111" },
 				{ ts: 3, say: "user", text: "Message 2" },
-				{ ts: 4, say: "checkpoint_saved", text: "commit2" },
+				{ ts: 4, say: "checkpoint_saved", text: "2222222222222222222222222222222222222222" },
 			]
 		})
 
@@ -308,12 +408,12 @@ describe("Checkpoint functionality", () => {
 
 			await checkpointDiff(mockTask, {
 				ts: 4,
-				commitHash: "commit2",
+				commitHash: "2222222222222222222222222222222222222222",
 				mode: "to-current",
 			})
 
 			expect(mockCheckpointService.getDiff).toHaveBeenCalledWith({
-				from: "commit2",
+				from: "2222222222222222222222222222222222222222",
 				to: undefined,
 			})
 			expect(vscode.commands.executeCommand).toHaveBeenCalledWith(
@@ -333,13 +433,13 @@ describe("Checkpoint functionality", () => {
 			mockCheckpointService.getDiff.mockResolvedValue(mockChanges)
 			await checkpointDiff(mockTask, {
 				ts: 4,
-				commitHash: "commit1",
+				commitHash: "1111111111111111111111111111111111111111",
 				mode: "checkpoint",
 			})
 
 			expect(mockCheckpointService.getDiff).toHaveBeenCalledWith({
-				from: "commit1",
-				to: "commit2",
+				from: "1111111111111111111111111111111111111111",
+				to: "2222222222222222222222222222222222222222",
 			})
 			expect(vscode.commands.executeCommand).toHaveBeenCalledWith(
 				"vscode.changes",
@@ -359,13 +459,13 @@ describe("Checkpoint functionality", () => {
 
 			await checkpointDiff(mockTask, {
 				ts: 4,
-				commitHash: "commit1",
+				commitHash: "1111111111111111111111111111111111111111",
 				mode: "checkpoint",
 			})
 
 			expect(mockCheckpointService.getDiff).toHaveBeenCalledWith({
-				from: "commit1", // Should find the next checkpoint
-				to: "commit2",
+				from: "1111111111111111111111111111111111111111",
+				to: "2222222222222222222222222222222222222222",
 			})
 		})
 
@@ -374,7 +474,7 @@ describe("Checkpoint functionality", () => {
 
 			await checkpointDiff(mockTask, {
 				ts: 4,
-				commitHash: "commit2",
+				commitHash: "2222222222222222222222222222222222222222",
 				mode: "to-current",
 			})
 
@@ -382,12 +482,35 @@ describe("Checkpoint functionality", () => {
 			expect(vscode.commands.executeCommand).not.toHaveBeenCalled()
 		})
 
+		it("compares a recorded SHA-256 checkpoint", async () => {
+			const commitHash = "d".repeat(64)
+			mockTask.clineMessages.push({ ts: 5, say: "checkpoint_saved", text: commitHash })
+			mockCheckpointService.getDiff.mockResolvedValue([
+				{ paths: { absolute: "/test/file", relative: "file" }, content: { before: "before", after: "after" } },
+			])
+			await checkpointDiff(mockTask, { commitHash, mode: "to-current" })
+			expect(mockCheckpointService.getDiff).toHaveBeenCalledWith({ from: commitHash, to: undefined })
+			expect(vscode.commands.executeCommand).toHaveBeenCalled()
+		})
+
+		it.each(["HEAD", "a".repeat(7), "A".repeat(40), "b".repeat(40), 42])(
+			"rejects invalid diff reference %s",
+			async (commitHash) => {
+				mockTask.checkpointService = undefined
+				await checkpointDiff(mockTask, { commitHash: commitHash as string, mode: "to-current" })
+				expect(vscode.window.showErrorMessage).toHaveBeenCalledWith("common:errors.checkpoint_invalid")
+				expect(mockCheckpointService.getDiff).not.toHaveBeenCalled()
+				expect(vscode.commands.executeCommand).not.toHaveBeenCalled()
+				expect(mockTask.enableCheckpoints).toBe(true)
+			},
+		)
+
 		it("should disable checkpoints on error", async () => {
 			mockCheckpointService.getDiff.mockRejectedValue(new Error("Diff failed"))
 
 			await checkpointDiff(mockTask, {
 				ts: 4,
-				commitHash: "commit2",
+				commitHash: "2222222222222222222222222222222222222222",
 				mode: "to-current",
 			})
 

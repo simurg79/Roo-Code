@@ -14,6 +14,8 @@ import { getApiMetrics } from "../../shared/getApiMetrics"
 import { DIFF_VIEW_URI_SCHEME } from "../../integrations/editor/DiffViewProvider"
 
 import { CheckpointServiceOptions, RepoPerTaskCheckpointService } from "../../services/checkpoints"
+import type { PendingEditOperation } from "../webview/ClineProvider"
+import { assertRecordedCheckpoint } from "./recordedCheckpoint"
 
 const WARNING_THRESHOLD_MS = 5000
 
@@ -229,22 +231,25 @@ export type CheckpointRestoreOptions = {
 	commitHash: string
 	mode: "preview" | "restore"
 	operation?: "delete" | "edit" // Optional to maintain backward compatibility
+	pendingEditOwner?: PendingEditOperation
+	rehydrate?: boolean
 }
 
 export async function checkpointRestore(
 	task: Task,
-	{ ts, commitHash, mode, operation = "delete" }: CheckpointRestoreOptions,
-) {
+	{ ts, commitHash, mode, operation = "delete", pendingEditOwner, rehydrate = true }: CheckpointRestoreOptions,
+): Promise<boolean> {
+	assertRecordedCheckpoint(task, commitHash)
 	const service = await getCheckpointService(task)
 
 	if (!service) {
-		return
+		return false
 	}
 
 	const index = task.clineMessages.findIndex((m) => m.ts === ts)
 
 	if (index === -1) {
-		return
+		return false
 	}
 
 	const provider = task.providerRef.deref()
@@ -267,33 +272,34 @@ export async function checkpointRestore(
 				includeTargetMessage: operation === "edit",
 			})
 
-			// Report the deleted API request metrics
-			await task.say(
-				"api_req_deleted",
-				JSON.stringify({
-					tokensIn: totalTokensIn,
-					tokensOut: totalTokensOut,
-					cacheWrites: totalCacheWrites,
-					cacheReads: totalCacheReads,
-					cost: totalCost,
-				} satisfies ClineApiReqInfo),
-			)
+			await task.recordCheckpointDeletedUsage({
+				tokensIn: totalTokensIn,
+				tokensOut: totalTokensOut,
+				cacheWrites: totalCacheWrites,
+				cacheReads: totalCacheReads,
+				cost: totalCost,
+			} satisfies ClineApiReqInfo)
 		}
 
-		// The task is already cancelled by the provider beforehand, but we
-		// need to re-init to get the updated messages.
-		//
-		// This was taken from Cline's implementation of the checkpoints
-		// feature. The task instance will hang if we don't cancel twice,
-		// so this is currently necessary, but it seems like a complicated
-		// and hacky solution to a problem that I don't fully understand.
-		// I'd like to revisit this in the future and try to improve the
-		// task flow and the communication between the webview and the
-		// `Task` instance.
-		provider?.cancelTask()
-	} catch (err) {
-		provider?.log("[checkpointRestore] disabling checkpoints for this task")
-		task.enableCheckpoints = false
+		if (!rehydrate) return true
+
+		const ownerReady = pendingEditOwner && provider?.markPendingEditReady(`task-${task.taskId}`, pendingEditOwner)
+		if (ownerReady) {
+			provider?.beginOwnedResume(task, pendingEditOwner)
+		}
+		// Rehydrate the rewound messages without cancelling a newer task session.
+		void provider
+			?.cancelTask({
+				expectedSession: task,
+				...(ownerReady ? { pendingEditOwner } : {}),
+			})
+			.catch((error: unknown) => {
+				provider.log(`[checkpointRestore] failed to resume task ${task.taskId}: ${String(error)}`)
+			})
+		return true
+	} catch (error) {
+		provider?.log("[checkpointRestore] failed to restore checkpoint")
+		throw error
 	}
 }
 
@@ -311,6 +317,12 @@ export type CheckpointDiffOptions = {
 }
 
 export async function checkpointDiff(task: Task, { ts, previousCommitHash, commitHash, mode }: CheckpointDiffOptions) {
+	try {
+		assertRecordedCheckpoint(task, commitHash)
+	} catch (error) {
+		void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error))
+		return
+	}
 	const service = await getCheckpointService(task)
 
 	if (!service) {

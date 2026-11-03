@@ -304,6 +304,7 @@ export async function summarizeConversation(options: SummarizeConversationOption
 	// This is necessary because some providers (like Bedrock via LiteLLM) require the `tools` parameter
 	// when tool blocks are present. By converting them to text, we can send the conversation for
 	// summarization without needing to pass the tools parameter.
+	await apiHandler.resolveModelCapabilities?.()
 	const messagesWithTextToolBlocks = transformMessagesForCondensing(
 		maybeRemoveImageBlocks([...messagesWithToolResults, finalRequestMessage], apiHandler),
 	)

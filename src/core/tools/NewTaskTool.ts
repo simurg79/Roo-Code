@@ -5,6 +5,7 @@ import { TodoItem } from "@roo-code/types"
 import { Task } from "../task/Task"
 import { getModeBySlug } from "../../shared/modes"
 import { formatResponse } from "../prompts/responses"
+import { delegationText } from "../../shared/delegationText"
 import { t } from "../../i18n"
 import { parseMarkdownChecklist } from "./UpdateTodoListTool"
 import { Package } from "../../shared/package"
@@ -84,9 +85,7 @@ export class NewTaskTool extends BaseTool<"new_task"> {
 
 			task.consecutiveMistakeCount = 0
 
-			// Un-escape one level of backslashes before '@' for hierarchical subtasks
-			// Un-escape one level: \\@ -> \@ (removes one backslash for hierarchical subtasks)
-			const unescapedMessage = message.replace(/\\\\@/g, "\\@")
+			const unescapedMessage = delegationText(message)
 
 			// Verify the mode exists
 			const targetMode = getModeBySlug(mode, state?.customModes)

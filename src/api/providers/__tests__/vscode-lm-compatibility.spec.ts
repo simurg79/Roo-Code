@@ -8,6 +8,15 @@ vi.mock("vscode", () => {
 	class LanguageModelTextPart {
 		constructor(public value: string) {}
 	}
+	class LanguageModelDataPart {
+		constructor(
+			public data: Uint8Array,
+			public mimeType: string,
+		) {}
+		static image(data: Uint8Array, mimeType: string) {
+			return new LanguageModelDataPart(data, mimeType)
+		}
+	}
 	class LanguageModelToolCallPart {
 		constructor(
 			public callId: string,
@@ -32,6 +41,7 @@ vi.mock("vscode", () => {
 	}
 	return {
 		LanguageModelTextPart,
+		LanguageModelDataPart,
 		LanguageModelToolCallPart,
 		LanguageModelToolResultPart,
 		LanguageModelChatMessage,
@@ -75,6 +85,23 @@ describe("compatibility acceptance and executable performance evidence", () => {
 		vi.spyOn(console, "debug").mockImplementation(() => {})
 	})
 	afterEach(() => vi.restoreAllMocks())
+
+	it("logs the original strict token measurement error before replacing it", async () => {
+		const handler = new VsCodeLmHandler({})
+		const failure = new Error("Token service unavailable")
+		handler["client"] = { countTokens: vi.fn().mockRejectedValue(failure) } as unknown as vscode.LanguageModelChat
+		try {
+			await expect(handler["countTokensStrict"](vscode.LanguageModelChatMessage.User("prompt"))).rejects.toThrow(
+				"Roo Code <Language Model API>: Could not measure request size. The request was not sent.",
+			)
+			expect(console.warn).toHaveBeenCalledExactlyOnceWith(
+				"Roo Code <Language Model API>: Request size measurement failed:",
+				failure,
+			)
+		} finally {
+			handler.dispose()
+		}
+	})
 
 	it("pins the corpus verified against the approved one-shot reference", () => {
 		const recovered = new Map<number, { values: string[]; leftover: string }>([

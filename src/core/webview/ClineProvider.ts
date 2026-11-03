@@ -28,6 +28,7 @@ import {
 	type ExtensionMessage,
 	type ExtensionState,
 	RooCodeEventName,
+	PROVIDER_SETTINGS_KEYS,
 	requestyDefaultModelId,
 	openRouterDefaultModelId,
 	DEFAULT_WRITE_DELAY_MS,
@@ -41,6 +42,7 @@ import { aggregateTaskCostsRecursive, type AggregatedCosts } from "./aggregateTa
 
 import { Package } from "../../shared/package"
 import { findLast } from "../../shared/array"
+import { delegationText } from "../../shared/delegationText"
 import { supportPrompt } from "../../shared/support-prompt"
 import { GlobalFileNames } from "../../shared/globalFileNames"
 import { Mode, defaultModeSlug, getModeBySlug } from "../../shared/modes"
@@ -49,6 +51,7 @@ import { formatLanguage } from "../../shared/language"
 import { WebviewMessage } from "../../shared/WebviewMessage"
 import { EMBEDDING_MODEL_PROFILES } from "../../shared/embeddingModels"
 import { ProfileValidator } from "../../shared/ProfileValidator"
+import { checkExistKey } from "../../shared/checkExistApiConfig"
 
 import { Terminal } from "../../integrations/terminal/Terminal"
 import { downloadTask, getTaskFileName } from "../../integrations/misc/export-markdown"
@@ -80,6 +83,7 @@ import { ContextProxy } from "../config/ContextProxy"
 import { ProviderSettingsManager } from "../config/ProviderSettingsManager"
 import { CustomModesManager } from "../config/CustomModesManager"
 import { Task } from "../task/Task"
+import { parseImportFile, importCustomModes, applyImportedProfiles, type ImportResult } from "../config/importExport"
 
 import { webviewMessageHandler } from "./webviewMessageHandler"
 import type { ClineMessage, TodoItem } from "@roo-code/types"
@@ -99,7 +103,8 @@ export type ClineProviderEvents = {
 	clineCreated: [cline: Task]
 }
 
-interface PendingEditOperation {
+export interface PendingEditOperation {
+	ready: boolean
 	messageTs: number
 	editedContent: string
 	images?: string[]
@@ -137,6 +142,9 @@ export class ClineProvider
 	public readonly taskHistoryStore: TaskHistoryStore
 	private taskHistoryStoreInitialized = false
 	private pendingOperations: Map<string, PendingEditOperation> = new Map()
+	private ownedResume?: { session: Task; attempt: PendingEditOperation }
+	private profileCommitChain: Promise<void> = Promise.resolve()
+	private profileSelectionEpoch = 0
 	private static readonly PENDING_OPERATION_TIMEOUT_MS = 30000 // 30 seconds
 
 	/**
@@ -210,19 +218,15 @@ export class ClineProvider
 					// Only rehydrate on genuine streaming failures.
 					// User-initiated cancels are handled by cancelTask().
 					if (instance.abortReason === "streaming_failed") {
-						// Defensive safeguard: if another path already replaced this instance, skip
-						const current = this.getCurrentTask()
-						if (current && current.instanceId !== instance.instanceId) {
-							this.log(
-								`[onTaskAborted] Skipping rehydrate: current instance ${current.instanceId} != aborted ${instance.instanceId}`,
-							)
-							return
-						}
-
+						if (this.ownedResume?.session === instance || this.getCurrentTask() !== instance) return
 						const { historyItem } = await this.getTaskWithId(instance.taskId)
 						const rootTask = instance.rootTask
 						const parentTask = instance.parentTask
-						await this.createTaskWithHistoryItem({ ...historyItem, rootTask, parentTask })
+						if (this.ownedResume?.session === instance || this.getCurrentTask() !== instance) return
+						await this.createTaskWithHistoryItem(
+							{ ...historyItem, rootTask, parentTask },
+							{ expectedSession: instance },
+						)
 					}
 				} catch (error) {
 					this.log(
@@ -464,24 +468,35 @@ export class ClineProvider
 			messageIndex: number
 			apiConversationHistoryIndex: number
 		},
-	): void {
-		// Clear any existing operation with the same ID
-		this.clearPendingEditOperation(operationId)
-
-		// Create timeout for automatic cleanup
-		const timeoutId = setTimeout(() => {
-			this.clearPendingEditOperation(operationId)
-			this.log(`[setPendingEditOperation] Automatically cleared stale pending operation: ${operationId}`)
-		}, ClineProvider.PENDING_OPERATION_TIMEOUT_MS)
-
-		// Store the operation
-		this.pendingOperations.set(operationId, {
+	): PendingEditOperation {
+		const previous = this.pendingOperations.get(operationId)
+		if (previous) this.clearPendingEditOperation(operationId, previous)
+		const owner: PendingEditOperation = {
 			...editData,
-			timeoutId,
+			ready: false,
 			createdAt: Date.now(),
-		})
+			timeoutId: setTimeout(() => {
+				this.clearPendingEditOperation(operationId, owner)
+			}, ClineProvider.PENDING_OPERATION_TIMEOUT_MS),
+		}
+		this.pendingOperations.set(operationId, owner)
+		return owner
+	}
 
-		this.log(`[setPendingEditOperation] Set pending operation: ${operationId}`)
+	public markPendingEditReady(operationId: string, owner: PendingEditOperation): boolean {
+		if (this.pendingOperations.get(operationId) !== owner) return false
+		owner.ready = true
+		return true
+	}
+
+	public beginOwnedResume(session: Task, owner: PendingEditOperation): void {
+		if (this.pendingOperations.get(`task-${session.taskId}`) === owner && owner.ready) {
+			this.ownedResume = { session, attempt: owner }
+		}
+	}
+
+	private releaseOwnedResume(owner: PendingEditOperation): void {
+		if (this.ownedResume?.attempt === owner) this.ownedResume = undefined
 	}
 
 	/**
@@ -494,9 +509,10 @@ export class ClineProvider
 	/**
 	 * Clears a specific pending edit operation
 	 */
-	private clearPendingEditOperation(operationId: string): boolean {
+	public clearPendingEditOperation(operationId: string, owner: PendingEditOperation): boolean {
 		const operation = this.pendingOperations.get(operationId)
-		if (operation) {
+		if (operation && operation === owner) {
+			this.releaseOwnedResume(owner)
 			clearTimeout(operation.timeoutId)
 			this.pendingOperations.delete(operationId)
 			this.log(`[clearPendingEditOperation] Cleared pending operation: ${operationId}`)
@@ -510,6 +526,7 @@ export class ClineProvider
 	 */
 	private clearAllPendingEditOperations(): void {
 		for (const [operationId, operation] of this.pendingOperations) {
+			this.releaseOwnedResume(operation)
 			clearTimeout(operation.timeoutId)
 		}
 		this.pendingOperations.clear()
@@ -813,10 +830,139 @@ export class ClineProvider
 		}
 	}
 
+	public async restartTaskIfCurrent(session: Task): Promise<boolean> {
+		if (this.getCurrentTask() !== session) return false
+		const { historyItem } = await this.getTaskWithId(session.taskId)
+		if (this.getCurrentTask() !== session) return false
+		return !!(await this.createTaskWithHistoryItem(historyItem, { expectedSession: session }))
+	}
+
+	private async createGuardedHistoryTask(
+		historyItem: HistoryItem & { rootTask?: Task; parentTask?: Task },
+		expectedSession: Task,
+		pendingEditOwner?: PendingEditOperation,
+	): Promise<Task | undefined> {
+		const isCurrent = () =>
+			this.getCurrentTask() === expectedSession &&
+			(!pendingEditOwner || this.pendingOperations.get(`task-${expectedSession.taskId}`) === pendingEditOwner) &&
+			(pendingEditOwner || this.ownedResume?.session !== expectedSession)
+		if (!isCurrent()) return undefined
+		const epochAtPrepare = this.profileSelectionEpoch
+		const preparedHistory = { ...historyItem }
+		let preparedProfile: (ProviderSettings & { name: string; id?: string }) | undefined
+		if (preparedHistory.mode) {
+			const customModes = await this.customModesManager.getCustomModes()
+			if (!isCurrent()) return undefined
+			if (!getModeBySlug(preparedHistory.mode, customModes)) preparedHistory.mode = defaultModeSlug
+		}
+		if (process.env.ROO_CLI_RUNTIME !== "1") {
+			try {
+				let profileName = preparedHistory.apiConfigName
+				if (
+					!profileName &&
+					preparedHistory.mode &&
+					!this.context.workspaceState.get("lockApiConfigAcrossModes", false)
+				) {
+					const savedConfigId = await this.providerSettingsManager.getModeConfigId(preparedHistory.mode)
+					if (!isCurrent()) return undefined
+					if (savedConfigId) {
+						const profiles = await this.providerSettingsManager.listConfig()
+						if (!isCurrent()) return undefined
+						profileName = profiles.find(({ id }) => id === savedConfigId)?.name
+					}
+				}
+				if (profileName) {
+					const profile = await this.providerSettingsManager.getProfile({ name: profileName })
+					if (!isCurrent()) return undefined
+					if (profile.apiProvider) preparedProfile = { ...profile, name: profileName }
+				}
+			} catch (error) {
+				if (!isCurrent()) return undefined
+				this.log(`Failed to prepare history profile: ${String(error)}`)
+			}
+		}
+		const state = await this.getState()
+		if (!isCurrent()) return undefined
+		const apiConfiguration = preparedProfile ?? state.apiConfiguration
+		const task = new Task({
+			provider: this,
+			apiConfiguration,
+			enableCheckpoints: state.enableCheckpoints,
+			checkpointTimeout: state.checkpointTimeout,
+			consecutiveMistakeLimit: apiConfiguration.consecutiveMistakeLimit,
+			historyItem: preparedHistory,
+			experiments: state.experiments,
+			rootTask: preparedHistory.rootTask,
+			parentTask: preparedHistory.parentTask,
+			taskNumber: preparedHistory.number,
+			workspacePath: preparedHistory.workspace,
+			initialStatus: preparedHistory.status,
+			startTask: false,
+		})
+		try {
+			await expectedSession.abortTask(true)
+		} catch (error) {
+			this.log(`Failed to abort history session: ${String(error)}`)
+		}
+		if (!isCurrent()) {
+			task.dispose()
+			return undefined
+		}
+		if (this.profileSelectionEpoch !== epochAtPrepare) {
+			task.updateApiConfiguration(this.contextProxy.getProviderSettings())
+			task.setTaskApiConfigName(this.contextProxy.getValue("currentApiConfigName"))
+		}
+		// Installation and start must share one synchronous identity boundary.
+		this.clineStack[this.clineStack.length - 1] = task
+		task.resumeFromHistory()
+		const cleanupFunctions = this.taskEventListeners.get(expectedSession)
+		cleanupFunctions?.forEach((cleanup) => cleanup())
+		this.taskEventListeners.delete(expectedSession)
+		this.taskCreationCallback(task)
+		task.emit(RooCodeEventName.TaskFocused)
+		const operationId = `task-${task.taskId}`
+		if (pendingEditOwner?.ready && this.getPendingEditOperation(operationId) === pendingEditOwner) {
+			this.clearPendingEditOperation(operationId, pendingEditOwner)
+			await pWaitFor(() => task.isInitialized || this.getCurrentTask() !== task, { timeout: 3000 })
+			if (this.getCurrentTask() !== task) return task
+			await task.handleWebviewAskResponse(
+				"messageResponse",
+				pendingEditOwner.editedContent,
+				pendingEditOwner.images,
+			)
+		}
+		await this.runProfileUnit(async () => {
+			if (this.profileSelectionEpoch !== epochAtPrepare || this.getCurrentTask() !== task) return
+			if (preparedHistory.mode) await this.contextProxy.setValue("mode", preparedHistory.mode)
+			if (this.getCurrentTask() !== task) return
+			if (preparedProfile) {
+				await this.activateProviderProfileInner(
+					{ name: preparedProfile.name },
+					{ persistModeConfig: false, persistTaskHistory: false, task },
+				)
+			}
+		}, false)
+		if (this.getCurrentTask() !== task) return task
+		await this.performPreparationTasks(task)
+		if (this.getCurrentTask() === task) await this.postStateToWebview()
+		return task
+	}
+
 	public async createTaskWithHistoryItem(
 		historyItem: HistoryItem & { rootTask?: Task; parentTask?: Task },
-		options?: { startTask?: boolean },
+		options?: { startTask?: boolean; expectedSession?: Task; pendingEditOwner?: PendingEditOperation },
 	) {
+		if (options?.expectedSession) {
+			try {
+				return await this.createGuardedHistoryTask(
+					historyItem,
+					options.expectedSession,
+					options.pendingEditOwner,
+				)
+			} finally {
+				if (options.pendingEditOwner) this.releaseOwnedResume(options.pendingEditOwner)
+			}
+		}
 		const isCliRuntime = process.env.ROO_CLI_RUNTIME === "1"
 		// CLI injects runtime provider settings from command flags/env at startup.
 		// Restoring provider profiles from task history can overwrite those
@@ -985,49 +1131,6 @@ export class ClineProvider
 			this.log(
 				`[createTaskWithHistoryItem] ${task.parentTask ? "child" : "parent"} task ${task.taskId}.${task.instanceId} instantiated`,
 			)
-		}
-
-		// Check if there's a pending edit after checkpoint restoration
-		const operationId = `task-${task.taskId}`
-		const pendingEdit = this.getPendingEditOperation(operationId)
-		if (pendingEdit) {
-			this.clearPendingEditOperation(operationId) // Clear the pending edit
-
-			this.log(`[createTaskWithHistoryItem] Processing pending edit after checkpoint restoration`)
-
-			// Process the pending edit after a short delay to ensure the task is fully initialized
-			setTimeout(async () => {
-				try {
-					// Find the message index in the restored state
-					const { messageIndex, apiConversationHistoryIndex } = (() => {
-						const messageIndex = task.clineMessages.findIndex((msg) => msg.ts === pendingEdit.messageTs)
-						const apiConversationHistoryIndex = task.apiConversationHistory.findIndex(
-							(msg) => msg.ts === pendingEdit.messageTs,
-						)
-						return { messageIndex, apiConversationHistoryIndex }
-					})()
-
-					if (messageIndex !== -1) {
-						// Remove the target message and all subsequent messages
-						await task.overwriteClineMessages(task.clineMessages.slice(0, messageIndex))
-
-						if (apiConversationHistoryIndex !== -1) {
-							await task.overwriteApiConversationHistory(
-								task.apiConversationHistory.slice(0, apiConversationHistoryIndex),
-							)
-						}
-
-						// Process the edited message
-						await task.handleWebviewAskResponse(
-							"messageResponse",
-							pendingEdit.editedContent,
-							pendingEdit.images,
-						)
-					}
-				} catch (error) {
-					this.log(`[createTaskWithHistoryItem] Error processing pending edit: ${error}`)
-				}
-			}, 100) // Small delay to ensure task is fully ready
 		}
 
 		return task
@@ -1318,7 +1421,7 @@ export class ClineProvider
 				const config = listApiConfig.find((c) => c.name === currentApiConfigNameAfter)
 
 				if (config?.id) {
-					await this.providerSettingsManager.setModeConfig(newMode, config.id)
+					await this.runProfileUnit(() => this.providerSettingsManager.setModeConfig(newMode, config.id!))
 				}
 			}
 		}
@@ -1339,9 +1442,9 @@ export class ClineProvider
 	 */
 	private updateTaskApiHandlerIfNeeded(
 		providerSettings: ProviderSettings,
-		options: { forceRebuild?: boolean } = {},
+		options: { forceRebuild?: boolean; task?: Task } = {},
 	): void {
-		const task = this.getCurrentTask()
+		const task = options.task ?? this.getCurrentTask()
 		if (!task) return
 
 		const { forceRebuild = false } = options
@@ -1384,43 +1487,29 @@ export class ClineProvider
 		activate: boolean = true,
 	): Promise<string | undefined> {
 		try {
-			// TODO: Do we need to be calling `activateProfile`? It's not
-			// clear to me what the source of truth should be; in some cases
-			// we rely on the `ContextProxy`'s data store and in other cases
-			// we rely on the `ProviderSettingsManager`'s data store. It might
-			// be simpler to unify these two.
-			const id = await this.providerSettingsManager.saveConfig(name, providerSettings)
+			const id = await this.runProfileUnit(async () => {
+				const id = await this.providerSettingsManager.saveConfig(name, providerSettings)
 
-			if (activate) {
-				const { mode } = await this.getState()
+				if (activate) {
+					const { mode } = await this.getState()
 
-				// These promises do the following:
-				// 1. Adds or updates the list of provider profiles.
-				// 2. Sets the current provider profile.
-				// 3. Sets the current mode's provider profile.
-				// 4. Copies the provider settings to the context.
-				//
-				// Note: 1, 2, and 4 can be done in one `ContextProxy` call:
-				// this.contextProxy.setValues({ ...providerSettings, listApiConfigMeta: ..., currentApiConfigName: ... })
-				// We should probably switch to that and verify that it works.
-				// I left the original implementation in just to be safe.
-				await Promise.all([
-					this.updateGlobalState("listApiConfigMeta", await this.providerSettingsManager.listConfig()),
-					this.updateGlobalState("currentApiConfigName", name),
-					this.providerSettingsManager.setModeConfig(mode, id),
-					this.contextProxy.setProviderSettings(providerSettings),
-				])
+					await Promise.all([
+						this.updateGlobalState("listApiConfigMeta", await this.providerSettingsManager.listConfig()),
+						this.updateGlobalState("currentApiConfigName", name),
+						this.providerSettingsManager.setModeConfig(mode, id),
+						this.contextProxy.setProviderSettings(providerSettings),
+					])
 
-				// Change the provider for the current task.
-				// TODO: We should rename `buildApiHandler` for clarity (e.g. `getProviderClient`).
-				this.updateTaskApiHandlerIfNeeded(providerSettings, { forceRebuild: true })
+					// TODO: Rename `buildApiHandler` for clarity (e.g. `getProviderClient`).
+					this.updateTaskApiHandlerIfNeeded(providerSettings, { forceRebuild: true })
 
-				// Keep the current task's sticky provider profile in sync with the newly-activated profile.
-				await this.persistStickyProviderProfileToCurrentTask(name)
-			} else {
-				await this.updateGlobalState("listApiConfigMeta", await this.providerSettingsManager.listConfig())
-			}
+					await this.persistStickyProviderProfileToCurrentTask(name)
+				} else {
+					await this.updateGlobalState("listApiConfigMeta", await this.providerSettingsManager.listConfig())
+				}
 
+				return id
+			})
 			await this.postStateToWebview()
 			return id
 		} catch (error) {
@@ -1434,23 +1523,27 @@ export class ClineProvider
 	}
 
 	async deleteProviderProfile(profileToDelete: ProviderSettingsEntry) {
-		const globalSettings = this.contextProxy.getValues()
-		let profileToActivate: string | undefined = globalSettings.currentApiConfigName
+		await this.runProfileUnit(async () => {
+			const globalSettings = this.contextProxy.getValues()
+			let profileToActivate: string | undefined = globalSettings.currentApiConfigName
 
-		if (profileToDelete.name === profileToActivate) {
-			profileToActivate = this.getProviderProfileEntries().find(({ name }) => name !== profileToDelete.name)?.name
-		}
+			if (profileToDelete.name === profileToActivate) {
+				profileToActivate = this.getProviderProfileEntries().find(
+					({ name }) => name !== profileToDelete.name,
+				)?.name
+			}
 
-		if (!profileToActivate) {
-			throw new Error("You cannot delete the last profile")
-		}
+			if (!profileToActivate) {
+				throw new Error("You cannot delete the last profile")
+			}
 
-		const entries = this.getProviderProfileEntries().filter(({ name }) => name !== profileToDelete.name)
+			const entries = this.getProviderProfileEntries().filter(({ name }) => name !== profileToDelete.name)
 
-		await this.contextProxy.setValues({
-			...globalSettings,
-			currentApiConfigName: profileToActivate,
-			listApiConfigMeta: entries,
+			await this.contextProxy.setValues({
+				...globalSettings,
+				currentApiConfigName: profileToActivate,
+				listApiConfigMeta: entries,
+			})
 		})
 
 		await this.postStateToWebview()
@@ -1470,7 +1563,7 @@ export class ClineProvider
 			const taskHistoryItem = this.getTaskHistoryItem(task.taskId)
 
 			if (taskHistoryItem) {
-				await this.updateTaskHistory({ ...taskHistoryItem, apiConfigName })
+				await this.updateTaskHistory({ ...taskHistoryItem, apiConfigName }, { broadcast: false })
 			}
 		} catch (error) {
 			// If persistence fails, log the error but don't fail the profile switch.
@@ -1485,6 +1578,20 @@ export class ClineProvider
 	async activateProviderProfile(
 		args: { name: string } | { id: string },
 		options?: { persistModeConfig?: boolean; persistTaskHistory?: boolean },
+	) {
+		const result = await this.runProfileUnit(() => this.activateProviderProfileInner(args, options))
+		await this.postStateToWebview()
+		if (result.providerSettings.apiProvider) {
+			this.emit(RooCodeEventName.ProviderProfileChanged, {
+				name: result.name,
+				provider: result.providerSettings.apiProvider,
+			})
+		}
+	}
+
+	private async activateProviderProfileInner(
+		args: { name: string } | { id: string },
+		options?: { persistModeConfig?: boolean; persistTaskHistory?: boolean; task?: Task },
 	) {
 		const { name, id, ...providerSettings } = await this.providerSettingsManager.activateProfile(args)
 
@@ -1504,8 +1611,9 @@ export class ClineProvider
 			await this.providerSettingsManager.setModeConfig(mode, id)
 		}
 
-		// Change the provider for the current task.
-		this.updateTaskApiHandlerIfNeeded(providerSettings, { forceRebuild: true })
+		if (options?.task && this.getCurrentTask() !== options.task) return { name, providerSettings }
+		this.updateTaskApiHandlerIfNeeded(providerSettings, { forceRebuild: true, task: options?.task })
+		if (options?.task) options.task.setTaskApiConfigName(name)
 
 		// Update the current task's sticky provider profile, unless this activation is
 		// being used purely as a non-persisting restoration (e.g., reopening a task from history).
@@ -1513,10 +1621,37 @@ export class ClineProvider
 			await this.persistStickyProviderProfileToCurrentTask(name)
 		}
 
-		await this.postStateToWebview()
+		return { name, providerSettings }
+	}
 
-		if (providerSettings.apiProvider) {
-			this.emit(RooCodeEventName.ProviderProfileChanged, { name, provider: providerSettings.apiProvider })
+	public async synchronizeProviderProfiles(): Promise<void> {
+		const activated = await this.runProfileUnit(async () => {
+			const profiles = await this.providerSettingsManager.listConfig()
+			if (!profiles) return undefined
+			if (profiles.length === 1 && !checkExistKey(profiles[0])) {
+				const { apiConfiguration } = await this.getState()
+				if (checkExistKey(apiConfiguration)) {
+					await this.providerSettingsManager.saveConfig(profiles[0].name ?? "default", apiConfiguration)
+					profiles[0].apiProvider = apiConfiguration.apiProvider
+				}
+			}
+			let name = this.contextProxy.getValue("currentApiConfigName")
+			let activated
+			if (name && !(await this.providerSettingsManager.hasConfig(name)) && profiles.length > 0) {
+				name = profiles[0].name
+				activated = await this.activateProviderProfileInner({ name })
+			}
+			await this.contextProxy.setValue("currentApiConfigName", name)
+			await this.contextProxy.setValue("listApiConfigMeta", profiles)
+			return activated
+		})
+		await this.postStateToWebview()
+		await this.postMessageToWebview({ type: "listApiConfig", listApiConfig: this.getProviderProfileEntries() })
+		if (activated?.providerSettings.apiProvider) {
+			this.emit(RooCodeEventName.ProviderProfileChanged, {
+				name: activated.name,
+				provider: activated.providerSettings.apiProvider,
+			})
 		}
 	}
 
@@ -2321,8 +2456,38 @@ export class ClineProvider
 		return this.contextProxy.getValues()
 	}
 
+	public runProfileUnit<Result>(mutation: () => Promise<Result>, advanceEpoch = true): Promise<Result> {
+		if (advanceEpoch) this.profileSelectionEpoch = (this.profileSelectionEpoch ?? 0) + 1
+		const result = (this.profileCommitChain ?? Promise.resolve()).then(mutation)
+		this.profileCommitChain = result.then(
+			() => undefined,
+			() => undefined,
+		)
+		return result
+	}
+
 	public async setValues(values: RooCodeSettings) {
-		await this.contextProxy.setValues(values)
+		if (
+			Object.keys(values).some(
+				(key) =>
+					key === "currentApiConfigName" || PROVIDER_SETTINGS_KEYS.includes(key as keyof ProviderSettings),
+			)
+		) {
+			await this.runProfileUnit(() => this.contextProxy.setValues(values))
+		} else {
+			await this.contextProxy.setValues(values)
+		}
+	}
+
+	public async importSettingsFromPathAsUnit(filePath: string): Promise<ImportResult> {
+		const parsed = await parseImportFile(filePath)
+		if (!parsed.success) return parsed
+		try {
+			await importCustomModes(parsed.globalSettings.customModes, this.customModesManager)
+			return await this.runProfileUnit(() => applyImportedProfiles(parsed, this))
+		} catch (error) {
+			return { success: false, error: error instanceof Error ? error.message : "Unknown error" }
+		}
 	}
 
 	// dev
@@ -2338,8 +2503,10 @@ export class ClineProvider
 			return
 		}
 
-		await this.contextProxy.resetAllState()
-		await this.providerSettingsManager.resetAllConfigs()
+		await this.runProfileUnit(async () => {
+			await this.contextProxy.resetAllState()
+			await this.providerSettingsManager.resetAllConfigs()
+		})
 		await this.customModesManager.resetCustomModes()
 		await this.removeClineFromStack()
 		await this.postStateToWebview()
@@ -2501,7 +2668,21 @@ export class ClineProvider
 		configuration: RooCodeSettings = {},
 	): Promise<Task> {
 		if (configuration) {
-			await this.setValues(configuration)
+			if (configuration.currentApiConfigName) {
+				const activated = await this.runProfileUnit(async () => {
+					await this.contextProxy.setValues(configuration)
+					return this.activateProviderProfileInner({ name: configuration.currentApiConfigName! })
+				})
+				await this.postStateToWebview()
+				if (activated.providerSettings.apiProvider) {
+					this.emit(RooCodeEventName.ProviderProfileChanged, {
+						name: activated.name,
+						provider: activated.providerSettings.apiProvider,
+					})
+				}
+			} else {
+				await this.setValues(configuration)
+			}
 
 			if (configuration.allowedCommands) {
 				await vscode.workspace
@@ -2523,10 +2704,6 @@ export class ClineProvider
 						configuration.commandExecutionTimeout,
 						vscode.ConfigurationTarget.Global,
 					)
-			}
-
-			if (configuration.currentApiConfigName) {
-				await this.setProviderProfile(configuration.currentApiConfigName)
 			}
 
 			// Register custom modes so the CustomModesManager knows about them.
@@ -2586,10 +2763,26 @@ export class ClineProvider
 		return task
 	}
 
-	public async cancelTask(): Promise<void> {
+	public async cancelTask(options?: {
+		pendingEditOwner?: PendingEditOperation
+		expectedSession?: Task
+		rehydrate?: boolean
+	}): Promise<void> {
+		try {
+			await this.cancelTaskInner(options)
+		} finally {
+			if (options?.pendingEditOwner) this.releaseOwnedResume(options.pendingEditOwner)
+		}
+	}
+
+	private async cancelTaskInner(options?: {
+		pendingEditOwner?: PendingEditOperation
+		expectedSession?: Task
+		rehydrate?: boolean
+	}): Promise<void> {
 		const task = this.getCurrentTask()
 
-		if (!task) {
+		if (!task || (options?.expectedSession && task !== options.expectedSession)) {
 			return
 		}
 
@@ -2609,6 +2802,8 @@ export class ClineProvider
 				throw error
 			}
 		}
+
+		if (options?.expectedSession && this.getCurrentTask() !== options.expectedSession) return
 
 		// Preserve parent and root task information for history item.
 		const rootTask = task.rootTask
@@ -2666,12 +2861,12 @@ export class ClineProvider
 			}
 		}
 
-		if (!historyItem) {
+		if (!historyItem || options?.rehydrate === false) {
 			return
 		}
 
 		// Clears task again, so we need to abortTask manually above.
-		await this.createTaskWithHistoryItem({ ...historyItem, rootTask, parentTask })
+		await this.createTaskWithHistoryItem({ ...historyItem, rootTask, parentTask }, options)
 	}
 
 	// Clear the current task without treating it as a subtask.
@@ -2844,10 +3039,11 @@ export class ClineProvider
 		// whenever a delegation is rejected, aborted, or re-issued.
 		try {
 			const delegationStoragePath = this.contextProxy.globalStorageUri.fsPath
-			const parentMessages = await readTaskMessages({
+			const savedParentMessages = await readTaskMessages({
 				taskId: parentTaskId,
 				globalStoragePath: delegationStoragePath,
 			})
+			const parentMessages = savedParentMessages.length ? savedParentMessages : (parent.clineMessages ?? [])
 
 			if (Array.isArray(parentMessages)) {
 				for (let messageIndex = parentMessages.length - 1; messageIndex >= 0; messageIndex--) {
@@ -2857,7 +3053,7 @@ export class ClineProvider
 						continue
 					}
 
-					let parsedTool: { tool?: string } | undefined
+					let parsedTool: { tool?: unknown; content?: unknown } | null | undefined
 					try {
 						parsedTool = candidate.text ? JSON.parse(candidate.text) : undefined
 					} catch {
@@ -2868,10 +3064,13 @@ export class ClineProvider
 						continue
 					}
 
-					// Stop at the newest `newTask` row: it is the one being delegated now. Walking
-					// further back would stamp an earlier delegation with this child's id.
-					if (!candidate.childTaskId) {
+					// Never stamp an older request when the newest delegation does not match.
+					const matchesDelegation =
+						typeof parsedTool.content === "string" && delegationText(parsedTool.content) === message
+					if (matchesDelegation && candidate.childTaskId === undefined) {
 						candidate.childTaskId = child.taskId
+						const inMemoryMessage = parent.clineMessages?.find((row) => row.ts === candidate.ts)
+						if (inMemoryMessage) inMemoryMessage.childTaskId = child.taskId
 						await saveTaskMessages({
 							messages: parentMessages,
 							taskId: parentTaskId,
@@ -2971,7 +3170,17 @@ export class ClineProvider
 			ts,
 			childTaskId,
 		}
-		parentClineMessages.push(subtaskUiMessage)
+		const lastParentClineMessage = parentClineMessages.at(-1)
+		if (
+			lastParentClineMessage?.type === "say" &&
+			lastParentClineMessage.say === "subtask_result" &&
+			lastParentClineMessage.text === completionResultSummary &&
+			(lastParentClineMessage.childTaskId === undefined || lastParentClineMessage.childTaskId === childTaskId)
+		) {
+			lastParentClineMessage.childTaskId = childTaskId
+		} else {
+			parentClineMessages.push(subtaskUiMessage)
+		}
 		await saveTaskMessages({ messages: parentClineMessages, taskId: parentTaskId, globalStoragePath })
 
 		// Find the tool_use_id from the last assistant message's new_task tool_use

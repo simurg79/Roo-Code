@@ -345,10 +345,13 @@ export abstract class ShadowCheckpointService extends EventEmitter {
 	// user files, so a missing commit discovered later would mean unrecoverable data loss.
 	private async commitExists(commitHash: string): Promise<boolean> {
 		try {
-			await this.git!.raw(["cat-file", "-e", `${commitHash}^{commit}`])
-			return true
-		} catch {
-			return false
+			return (await this.git!.raw(["cat-file", "-t", commitHash])).trim() === "commit"
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error)
+			if (/could not get object info|Not a valid object name/i.test(message)) {
+				return false
+			}
+			throw error
 		}
 	}
 
@@ -361,9 +364,7 @@ export abstract class ShadowCheckpointService extends EventEmitter {
 			}
 
 			if (!(await this.commitExists(commitHash))) {
-				throw new Error(
-					`Cannot restore checkpoint ${commitHash}: this checkpoint no longer exists in the checkpoint repository. No files were changed.`,
-				)
+				throw new Error(t("common:errors.checkpoint_missing", { commitHash }))
 			}
 
 			const start = Date.now()
@@ -383,7 +384,9 @@ export abstract class ShadowCheckpointService extends EventEmitter {
 		} catch (e) {
 			const error = e instanceof Error ? e : new Error(String(e))
 			this.log(`[${this.constructor.name}#restoreCheckpoint] failed to restore checkpoint: ${error.message}`)
-			this.emit("error", { type: "error", error })
+			if (this.listenerCount("error") > 0) {
+				this.emit("error", { type: "error", error })
+			}
 			throw error
 		}
 	}

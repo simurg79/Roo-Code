@@ -6,6 +6,16 @@ vi.mock("vscode", () => {
 		constructor(public value: string) {}
 	}
 
+	class MockLanguageModelDataPart {
+		constructor(
+			public data: Uint8Array,
+			public mimeType: string,
+		) {}
+		static image(data: Uint8Array, mimeType: string) {
+			return new MockLanguageModelDataPart(data, mimeType)
+		}
+	}
+
 	class MockLanguageModelToolCallPart {
 		type = "tool_call"
 		constructor(
@@ -54,6 +64,7 @@ vi.mock("vscode", () => {
 			})),
 		},
 		LanguageModelTextPart: MockLanguageModelTextPart,
+		LanguageModelDataPart: MockLanguageModelDataPart,
 		LanguageModelToolCallPart: MockLanguageModelToolCallPart,
 		lm: {
 			selectChatModels: vi.fn(),
@@ -237,7 +248,7 @@ describe("VsCodeLmHandler", () => {
 			expect(astraHandler.getModel().info.contextWindow).toBe(liveWindow)
 			expect(astraHandler.getModel().info.contextWindow).not.toBe(vscodeLlmModels["gpt-6-astra"].maxInputTokens)
 
-			expect(astraHandler.getModel().info.supportsImages).toBe(true)
+			expect(astraHandler.getModel().info.supportsImages).toBeUndefined()
 
 			astraHandler.dispose()
 		})
@@ -2332,43 +2343,42 @@ describe("VsCodeLmHandler", () => {
 			expect(model.info.contextWindow).toBe(openAiModelInfoSaneDefaults.contextWindow)
 		})
 
-		it("resolves supportsImages to true for a family the static table marks image-capable", async () => {
+		it("leaves supportsImages unknown without a live report for a static image-capable family", async () => {
 			const mockModel = { ...mockLanguageModelChat, family: "claude-sonnet-4.5" }
 			;(vscode.lm.selectChatModels as Mock).mockResolvedValue([mockModel])
 			handler["client"] = null
 			await handler.initializeClient()
 
 			expect(vscodeLlmModels["claude-sonnet-4.5"].supportsImages).toBe(true)
-			expect(handler.getModel().info.supportsImages).toBe(true)
+			expect(handler.getModel().info.supportsImages).toBeUndefined()
 		})
 
-		it("resolves supportsImages to false for a family the static table marks image-incapable", async () => {
+		it("leaves supportsImages unknown without a live report for a static image-incapable family", async () => {
 			const mockModel = { ...mockLanguageModelChat, family: "gpt-4o-mini" }
 			;(vscode.lm.selectChatModels as Mock).mockResolvedValue([mockModel])
 			handler["client"] = null
 			await handler.initializeClient()
 
 			expect(vscodeLlmModels["gpt-4o-mini"].supportsImages).toBe(false)
-			expect(handler.getModel().info.supportsImages).toBe(false)
+			expect(handler.getModel().info.supportsImages).toBeUndefined()
 		})
 
-		it.each([
-			["grok-4.7", false],
-			["gpt-6.1-sol", true],
-			["claude-fable-5", true],
-		])("resolves supportsImages for the new %s row to %s", (family, expected) => {
-			handler["client"] = { ...mockLanguageModelChat, family } as unknown as vscode.LanguageModelChat
+		it.each(["grok-4.7", "gpt-6.1-sol", "claude-fable-5"])(
+			"leaves supportsImages unknown without a live report for %s",
+			(family) => {
+				handler["client"] = { ...mockLanguageModelChat, family } as unknown as vscode.LanguageModelChat
 
-			expect(handler.getModel().info.supportsImages).toBe(expected)
-		})
+				expect(handler.getModel().info.supportsImages).toBeUndefined()
+			},
+		)
 
-		it("defaults supportsImages to false for a family missing from the static table", async () => {
+		it("leaves supportsImages unknown without a live report for a family missing from the static table", async () => {
 			const mockModel = { ...mockLanguageModelChat, family: "totally-unknown-family" }
 			;(vscode.lm.selectChatModels as Mock).mockResolvedValue([mockModel])
 			handler["client"] = null
 			await handler.initializeClient()
 
-			expect(handler.getModel().info.supportsImages).toBe(false)
+			expect(handler.getModel().info.supportsImages).toBeUndefined()
 		})
 	})
 

@@ -13,10 +13,7 @@ import { importSettingsFromPath, ImportOptions } from "../core/config/importExpo
  * This function is called during extension activation to allow users to pre-configure
  * their settings by placing a settings file at a predefined location.
  */
-export async function autoImportSettings(
-	outputChannel: vscode.OutputChannel,
-	{ providerSettingsManager, contextProxy, customModesManager }: ImportOptions,
-): Promise<void> {
+export async function autoImportSettings(outputChannel: vscode.OutputChannel, options: ImportOptions): Promise<void> {
 	try {
 		// Get the auto-import settings path from VSCode settings
 		const settingsPath = vscode.workspace.getConfiguration(Package.name).get<string>("autoImportSettingsPath")
@@ -37,11 +34,7 @@ export async function autoImportSettings(
 		}
 
 		// Attempt to import the configuration
-		const result = await importSettingsFromPath(resolvedPath, {
-			providerSettingsManager,
-			contextProxy,
-			customModesManager,
-		})
+		const result = await importSettingsFromPath(resolvedPath, options)
 
 		if (result.success) {
 			outputChannel.appendLine(`[AutoImport] Successfully imported settings from ${resolvedPath}`)

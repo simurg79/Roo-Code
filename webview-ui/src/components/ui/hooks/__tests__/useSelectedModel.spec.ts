@@ -22,11 +22,20 @@ import { useSelectedModel } from "../useSelectedModel"
 import { useRouterModels } from "../useRouterModels"
 import { useOpenRouterModelProviders } from "../useOpenRouterModelProviders"
 
+import { useVsCodeLmModels } from "../useVsCodeLmModels"
+
+vi.mock("../useVsCodeLmModels")
 vi.mock("../useRouterModels")
 vi.mock("../useOpenRouterModelProviders")
 
 const mockUseRouterModels = useRouterModels as Mock<typeof useRouterModels>
 const mockUseOpenRouterModelProviders = useOpenRouterModelProviders as Mock<typeof useOpenRouterModelProviders>
+
+const mockUseVsCodeLmModels = useVsCodeLmModels as Mock<typeof useVsCodeLmModels>
+
+beforeEach(() => {
+	mockUseVsCodeLmModels.mockReturnValue({ data: undefined, isLoading: false, isError: false } as any)
+})
 
 const createWrapper = () => {
 	const queryClient = new QueryClient({
@@ -802,22 +811,19 @@ describe("useSelectedModel", () => {
 
 			expect(result.current.provider).toBe("vscode-lm")
 			expect(result.current.id).toBe(`copilot/${listedFamily}`)
-			// contextWindow MUST equal the live window the condense gate consumes (client.maxInputTokens),
-			// not the empirically-measured contextWindow field on the static row.
 			expect(result.current.info?.contextWindow).toBe(vscodeLlmModels[listedFamily].maxInputTokens)
-			// The hook no longer forces supportsImages false; the family-table value flows through.
-			expect(result.current.info?.supportsImages).toBe(vscodeLlmModels[listedFamily].supportsImages)
+			expect(result.current.info?.supportsImages).toBeUndefined()
 		})
 
 		it.each([
-			["gpt-6-astra", 266789, true],
-			["grok-4.5", 199783, false],
-			["grok-4.6", 199784, false],
-			["gemini-3.7-flash", 935783, true],
-			["gemini-3.8-flash", 955113, true],
-			["claude-opus-5", 680456, true],
-			["gemini-3.6-flash", 935785, true],
-		])("feeds the gauge %s's static maxInputTokens", (family, expected, supportsImages) => {
+			["gpt-6-astra", 266789],
+			["grok-4.5", 199783],
+			["grok-4.6", 199784],
+			["gemini-3.7-flash", 935783],
+			["gemini-3.8-flash", 955113],
+			["claude-opus-5", 680456],
+			["gemini-3.6-flash", 935785],
+		])("feeds the gauge %s's static maxInputTokens", (family, expected) => {
 			const apiConfiguration: ProviderSettings = {
 				apiProvider: "vscode-lm",
 				vsCodeLmModelSelector: { vendor: "copilot", family },
@@ -832,7 +838,7 @@ describe("useSelectedModel", () => {
 			expect(result.current.info?.contextWindow).toBe(
 				vscodeLlmModels[family as keyof typeof vscodeLlmModels].maxInputTokens,
 			)
-			expect(result.current.info?.supportsImages).toBe(supportsImages)
+			expect(result.current.info?.supportsImages).toBeUndefined()
 		})
 
 		it("reads the same row regardless of the user-selected vendor", () => {
@@ -853,7 +859,7 @@ describe("useSelectedModel", () => {
 			expect(forVendor("some-other-vendor").id).toBe("some-other-vendor/gemini-3.8-flash")
 		})
 
-		it("surfaces supportsImages true for an image-capable family", () => {
+		it("does not inherit image support from an image-capable static family", () => {
 			const apiConfiguration: ProviderSettings = {
 				apiProvider: "vscode-lm",
 				vsCodeLmModelSelector: { vendor: "copilot", family: "claude-sonnet-4.5" },
@@ -863,10 +869,10 @@ describe("useSelectedModel", () => {
 			const { result } = renderHook(() => useSelectedModel(apiConfiguration), { wrapper })
 
 			expect(vscodeLlmModels["claude-sonnet-4.5"].supportsImages).toBe(true)
-			expect(result.current.info?.supportsImages).toBe(true)
+			expect(result.current.info?.supportsImages).toBeUndefined()
 		})
 
-		it("surfaces supportsImages false for an image-incapable family", () => {
+		it("does not inherit image rejection from an image-incapable static family", () => {
 			const apiConfiguration: ProviderSettings = {
 				apiProvider: "vscode-lm",
 				vsCodeLmModelSelector: { vendor: "copilot", family: "gpt-4o-mini" },
@@ -875,7 +881,7 @@ describe("useSelectedModel", () => {
 			const wrapper = createWrapper()
 			const { result } = renderHook(() => useSelectedModel(apiConfiguration), { wrapper })
 
-			expect(result.current.info?.supportsImages).toBe(false)
+			expect(result.current.info?.supportsImages).toBeUndefined()
 		})
 
 		it("falls back to the default model's window for an unlisted family (NOT 128000)", () => {
@@ -892,9 +898,126 @@ describe("useSelectedModel", () => {
 			// which would diverge from the gate and break the context bar / auto-condense.
 			expect(result.current.info?.contextWindow).not.toBe(128000)
 			expect(result.current.info?.contextWindow).toBe(vscodeLlmModels[vscodeLlmDefaultModelId].maxInputTokens)
-			// Image capability is unverified for an unlisted family, so it must not be inherited from the
-			// fallback row; this matches the provider's `?? false` resolution.
+			expect(result.current.info?.supportsImages).toBeUndefined()
+		})
+
+		const liveModel = {
+			id: "live-model",
+			vendor: "other-vendor",
+			family: "unlisted-family",
+			version: "1",
+			name: "Live model",
+			maxInputTokens: 12345,
+			supportsImages: true,
+		}
+
+		it.each([true, false, undefined])(
+			"uses the unique live capability %s and preserves fork budgets",
+			(supportsImages) => {
+				mockUseVsCodeLmModels.mockReturnValue({ data: [{ ...liveModel, supportsImages }] } as any)
+				const { result } = renderHook(
+					() => useSelectedModel({ apiProvider: "vscode-lm", vsCodeLmModelSelector: liveModel }),
+					{ wrapper: createWrapper() },
+				)
+
+				expect(result.current.info?.supportsImages).toBe(supportsImages)
+				expect(result.current.info?.contextWindow).toBe(vscodeLlmModels[vscodeLlmDefaultModelId].maxInputTokens)
+				expect(result.current.info?.maxTokens).toBe(openAiModelInfoSaneDefaults.maxTokens)
+				expect(mockUseVsCodeLmModels).toHaveBeenCalledWith(true)
+			},
+		)
+
+		it.each(["id", "vendor", "family", "version"] as const)("requires the specified %s to match", (field) => {
+			mockUseVsCodeLmModels.mockReturnValue({ data: [liveModel] } as any)
+			const { result } = renderHook(
+				() =>
+					useSelectedModel({
+						apiProvider: "vscode-lm",
+						vsCodeLmModelSelector: { ...liveModel, [field]: "different" },
+					}),
+				{ wrapper: createWrapper() },
+			)
+			expect(result.current.info?.supportsImages).toBeUndefined()
+		})
+
+		it.each(["id", "vendor", "family", "version"] as const)("allows selection by %s alone", (field) => {
+			mockUseVsCodeLmModels.mockReturnValue({ data: [liveModel] } as any)
+			const { result } = renderHook(
+				() =>
+					useSelectedModel({
+						apiProvider: "vscode-lm",
+						vsCodeLmModelSelector: { [field]: liveModel[field] },
+					}),
+				{ wrapper: createWrapper() },
+			)
+			expect(result.current.info?.supportsImages).toBe(true)
+		})
+
+		it.each([true, false])("rejects ambiguous matches regardless of listing order (%s first)", (firstSupport) => {
+			mockUseVsCodeLmModels.mockReturnValue({
+				data: [
+					{ ...liveModel, supportsImages: firstSupport },
+					{ ...liveModel, id: "second-model", supportsImages: !firstSupport },
+				],
+			} as any)
+			const { result } = renderHook(
+				() =>
+					useSelectedModel({ apiProvider: "vscode-lm", vsCodeLmModelSelector: { family: liveModel.family } }),
+				{ wrapper: createWrapper() },
+			)
+			expect(result.current.info?.supportsImages).toBeUndefined()
+		})
+
+		it("uses id and version to disambiguate entries sharing vendor and family", () => {
+			mockUseVsCodeLmModels.mockReturnValue({
+				data: [{ ...liveModel, id: "older-model", version: "0", supportsImages: false }, liveModel],
+			} as any)
+			const { result } = renderHook(
+				() => useSelectedModel({ apiProvider: "vscode-lm", vsCodeLmModelSelector: liveModel }),
+				{ wrapper: createWrapper() },
+			)
+			expect(result.current.info?.supportsImages).toBe(true)
+		})
+
+		it("keeps capability unknown before selection even with one discovered model", () => {
+			mockUseVsCodeLmModels.mockReturnValue({ data: [liveModel] } as any)
+			const { result } = renderHook(() => useSelectedModel({ apiProvider: "vscode-lm" }), {
+				wrapper: createWrapper(),
+			})
+			expect(result.current.info?.supportsImages).toBeUndefined()
+		})
+
+		it("updates capability when the selection changes without another discovery", () => {
+			mockUseVsCodeLmModels.mockReturnValue({
+				data: [liveModel, { ...liveModel, id: "text-model", supportsImages: false }],
+			} as any)
+			const { result, rerender } = renderHook(
+				({ id }) => useSelectedModel({ apiProvider: "vscode-lm", vsCodeLmModelSelector: { id } }),
+				{ initialProps: { id: liveModel.id }, wrapper: createWrapper() },
+			)
+			expect(result.current.info?.supportsImages).toBe(true)
+			rerender({ id: "text-model" })
 			expect(result.current.info?.supportsImages).toBe(false)
+			rerender({ id: "missing" })
+			expect(result.current.info?.supportsImages).toBeUndefined()
+		})
+
+		it("ignores nonboolean discovery capability", () => {
+			mockUseVsCodeLmModels.mockReturnValue({ data: [{ ...liveModel, supportsImages: "true" }] } as any)
+			const { result } = renderHook(
+				() => useSelectedModel({ apiProvider: "vscode-lm", vsCodeLmModelSelector: liveModel }),
+				{ wrapper: createWrapper() },
+			)
+			expect(result.current.info?.supportsImages).toBeUndefined()
+		})
+
+		it("does not wait for discovery to expose the text-only model budget", () => {
+			mockUseVsCodeLmModels.mockReturnValue({ data: undefined, isLoading: true, isError: false } as any)
+			const { result } = renderHook(() => useSelectedModel({ apiProvider: "vscode-lm" }), {
+				wrapper: createWrapper(),
+			})
+			expect(result.current.info?.contextWindow).toBe(vscodeLlmModels[vscodeLlmDefaultModelId].maxInputTokens)
+			expect(result.current.info?.supportsImages).toBeUndefined()
 		})
 	})
 })

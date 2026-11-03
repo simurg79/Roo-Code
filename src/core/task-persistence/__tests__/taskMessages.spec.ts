@@ -1,4 +1,3 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
 import * as os from "os"
 import * as path from "path"
 import * as fs from "fs/promises"
@@ -20,6 +19,10 @@ beforeEach(async () => {
 	hoisted.safeWriteJsonMock.mockClear()
 	// Create a unique, writable temp directory to act as globalStoragePath
 	tmpBaseDir = await fs.mkdtemp(path.join(os.tmpdir(), "roo-test-"))
+})
+
+afterEach(async () => {
+	await fs.rm(tmpBaseDir, { recursive: true, force: true })
 })
 
 describe("taskMessages.saveTaskMessages", () => {

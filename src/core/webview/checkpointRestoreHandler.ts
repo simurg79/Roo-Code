@@ -1,5 +1,5 @@
 import { Task } from "../task/Task"
-import { ClineProvider } from "./ClineProvider"
+import { ClineProvider, type PendingEditOperation } from "./ClineProvider"
 import { saveTaskMessages } from "../task-persistence"
 import * as vscode from "vscode"
 import pWaitFor from "p-wait-for"
@@ -26,12 +26,18 @@ export interface CheckpointRestoreConfig {
 export async function handleCheckpointRestoreOperation(config: CheckpointRestoreConfig): Promise<void> {
 	const { provider, currentCline, messageTs, checkpoint, operation, editData } = config
 
+	let checkpointRestored = false
+	let restoreAttempted = false
+	let cancelledByHandler = false
+	let pendingEditOwner: PendingEditOperation | undefined
+
 	try {
 		// For delete operations, ensure the task is properly aborted to handle any pending ask operations
 		// This prevents "Current ask promise was ignored" errors
 		// For edit operations, we don't abort because the checkpoint restore will handle it
 		if (operation === "delete" && currentCline && !currentCline.abort) {
-			currentCline.abortTask()
+			cancelledByHandler = true
+			await currentCline.abortTask()
 			// Wait a bit for the abort to complete
 			await pWaitFor(() => currentCline.abort === true, {
 				timeout: 1000,
@@ -44,7 +50,7 @@ export async function handleCheckpointRestoreOperation(config: CheckpointRestore
 		// For edit operations, set up pending edit data before restoration
 		if (operation === "edit" && editData) {
 			const operationId = `task-${currentCline.taskId}`
-			provider.setPendingEditOperation(operationId, {
+			pendingEditOwner = provider.setPendingEditOperation(operationId, {
 				messageTs,
 				editedContent: editData.editedContent,
 				images: editData.images,
@@ -54,16 +60,18 @@ export async function handleCheckpointRestoreOperation(config: CheckpointRestore
 		}
 
 		// Perform the checkpoint restoration
+		restoreAttempted = true
 		await currentCline.checkpointRestore({
 			ts: messageTs,
 			commitHash: checkpoint.hash,
 			mode: "restore",
 			operation,
+			...(pendingEditOwner ? { pendingEditOwner } : {}),
+			...(operation === "delete" ? { rehydrate: false } : {}),
 		})
+		checkpointRestored = true
 
-		// For delete operations, we need to save messages and reinitialize
-		// For edit operations, the reinitialization happens automatically
-		// and processes the pending edit
+		// Deletion owns its resume so installation cannot race this final save.
 		if (operation === "delete") {
 			// Save the updated messages to disk after checkpoint restoration
 			await saveTaskMessages({
@@ -74,15 +82,41 @@ export async function handleCheckpointRestoreOperation(config: CheckpointRestore
 
 			// Get the updated history item and reinitialize
 			const { historyItem } = await provider.getTaskWithId(currentCline.taskId)
-			await provider.createTaskWithHistoryItem(historyItem)
+			await provider.createTaskWithHistoryItem(historyItem, { expectedSession: currentCline })
 		}
 		// For edit operations, the task cancellation in checkpointRestore
 		// will trigger reinitialization, which will process pendingEditAfterRestore
 	} catch (error) {
+		if (!checkpointRestored && pendingEditOwner) {
+			provider.clearPendingEditOperation(`task-${currentCline.taskId}`, pendingEditOwner)
+		}
 		console.error(`Error in checkpoint restore (${operation}):`, error)
-		vscode.window.showErrorMessage(
-			`Error during checkpoint restore: ${error instanceof Error ? error.message : String(error)}`,
+		void vscode.window.showErrorMessage(
+			t("common:errors.checkpoint_restore_failed", {
+				error: error instanceof Error ? error.message : String(error),
+			}),
 		)
+		if (
+			operation === "delete" &&
+			cancelledByHandler &&
+			restoreAttempted &&
+			!checkpointRestored &&
+			currentCline.abort &&
+			provider.getCurrentTask() === currentCline
+		) {
+			try {
+				const restart = t("common:checkpoints.restart")
+				const response = await vscode.window.showWarningMessage(
+					t("common:checkpoints.restart_after_restore_failure"),
+					restart,
+				)
+				if (response === restart && provider.getCurrentTask() === currentCline) {
+					await provider.restartTaskIfCurrent(currentCline)
+				}
+			} catch (restartError) {
+				console.error("Failed to restart task after checkpoint restore failure:", restartError)
+			}
+		}
 		throw error
 	}
 }

@@ -23,6 +23,7 @@ import { customToolRegistry } from "@roo-code/core"
 
 import { type ApiMessage } from "../task-persistence/apiMessages"
 import { saveTaskMessages } from "../task-persistence"
+import { assertRecordedCheckpoint } from "../checkpoints/recordedCheckpoint"
 
 import { ClineProvider } from "./ClineProvider"
 import { handleCheckpointRestoreOperation } from "./checkpointRestoreHandler"
@@ -41,7 +42,6 @@ import { type RouterName, toRouterName } from "../../shared/api"
 import { MessageEnhancer } from "./messageEnhancer"
 
 import { CodeIndexManager } from "../../services/code-index/manager"
-import { checkExistKey } from "../../shared/checkExistApiConfig"
 import { experimentDefault } from "../../shared/experiments"
 import { Terminal } from "../../integrations/terminal/Terminal"
 import { openFile } from "../../integrations/misc/open-file"
@@ -82,6 +82,23 @@ import {
 	handleCreateWorktreeInclude,
 	handleCheckoutBranch,
 } from "./worktree"
+
+function findCompletionCheckpoint(messages: ClineMessage[]): ClineMessage | undefined {
+	let checkpoint: ClineMessage | undefined
+	let hasPrompt = false
+	for (const [messageIndex, message] of messages.entries()) {
+		if (
+			message.type === "say" &&
+			(message.say === "user_feedback" || (messageIndex === 0 && message.say === "text"))
+		) {
+			hasPrompt = true
+			checkpoint = undefined
+		} else if (hasPrompt && !checkpoint && message.say === "checkpoint_saved") {
+			checkpoint = message
+		}
+	}
+	return checkpoint
+}
 
 export const webviewMessageHandler = async (provider: ClineProvider, message: WebviewMessage) => {
 	// Utility functions provided for concise get/update of global state via contextProxy API.
@@ -543,54 +560,9 @@ export const webviewMessageHandler = async (provider: ClineProvider, message: We
 				provider.postMessageToWebview({ type: "mcpServers", mcpServers: mcpHub.getAllServers() })
 			}
 
-			provider.providerSettingsManager
-				.listConfig()
-				.then(async (listApiConfig) => {
-					if (!listApiConfig) {
-						return
-					}
-
-					if (listApiConfig.length === 1) {
-						// Check if first time init then sync with exist config.
-						if (!checkExistKey(listApiConfig[0])) {
-							const { apiConfiguration } = await provider.getState()
-
-							// Only save if the current configuration has meaningful settings
-							// (e.g., API keys). This prevents saving a default "anthropic"
-							// fallback when no real config exists, which can happen during
-							// CLI initialization before provider settings are applied.
-							if (checkExistKey(apiConfiguration)) {
-								await provider.providerSettingsManager.saveConfig(
-									listApiConfig[0].name ?? "default",
-									apiConfiguration,
-								)
-
-								listApiConfig[0].apiProvider = apiConfiguration.apiProvider
-							}
-						}
-					}
-
-					const currentConfigName = getGlobalState("currentApiConfigName")
-
-					if (currentConfigName) {
-						if (!(await provider.providerSettingsManager.hasConfig(currentConfigName))) {
-							// Current config name not valid, get first config in list.
-							const name = listApiConfig[0]?.name
-							await updateGlobalState("currentApiConfigName", name)
-
-							if (name) {
-								await provider.activateProviderProfile({ name })
-								return
-							}
-						}
-					}
-
-					await Promise.all([
-						await updateGlobalState("listApiConfigMeta", listApiConfig),
-						await provider.postMessageToWebview({ type: "listApiConfig", listApiConfig }),
-					])
-				})
-				.catch((error) =>
+			provider
+				.synchronizeProviderProfiles()
+				.catch((error: unknown) =>
 					provider.log(
 						`Error list api configuration: ${JSON.stringify(error, Object.getOwnPropertyNames(error), 2)}`,
 					),
@@ -1165,22 +1137,70 @@ export const webviewMessageHandler = async (provider: ClineProvider, message: We
 			}
 
 			break
+		case "completionCheckpointDiff": {
+			const task = provider.getCurrentTask()
+			const checkpoint = task && findCompletionCheckpoint(task.clineMessages)
+			if (task && checkpoint?.text) {
+				await task.checkpointDiff({ ts: checkpoint.ts, commitHash: checkpoint.text, mode: "to-current" })
+			}
+			break
+		}
+		case "completionCheckpointRestore":
 		case "checkpointRestore": {
-			const result = checkoutRestorePayloadSchema.safeParse(message.payload)
+			const completionTask =
+				message.type === "completionCheckpointRestore" ? provider.getCurrentTask() : undefined
+			const completionCheckpoint = completionTask && findCompletionCheckpoint(completionTask.clineMessages)
+			if (message.type === "completionCheckpointRestore" && !completionCheckpoint?.text) {
+				break
+			}
+			const result = checkoutRestorePayloadSchema.safeParse(
+				message.type === "completionCheckpointRestore"
+					? { ts: completionCheckpoint!.ts, commitHash: completionCheckpoint!.text, mode: "restore" }
+					: message.payload,
+			)
 
 			if (result.success) {
-				await provider.cancelTask()
-
-				try {
-					await pWaitFor(() => provider.getCurrentTask()?.isInitialized === true, { timeout: 3_000 })
-				} catch (error) {
-					vscode.window.showErrorMessage(t("common:errors.checkpoint_timeout"))
+				const taskBeforeCancel = completionTask ?? provider.getCurrentTask()
+				if (!taskBeforeCancel) {
+					break
 				}
-
+				let taskCancelled = false
+				let restoreCompleted = false
 				try {
-					await provider.getCurrentTask()?.checkpointRestore(result.data)
+					assertRecordedCheckpoint(taskBeforeCancel, result.data.commitHash)
+					await provider.cancelTask({ expectedSession: taskBeforeCancel, rehydrate: false })
+					taskCancelled = true
+					const taskAfterCancel = provider.getCurrentTask()
+					if (taskAfterCancel !== taskBeforeCancel) {
+						void vscode.window.showErrorMessage(t("common:errors.checkpoint_failed"))
+						break
+					}
+					try {
+						await pWaitFor(() => taskAfterCancel.isInitialized === true, { timeout: 3_000 })
+					} catch {
+						void vscode.window.showErrorMessage(t("common:errors.checkpoint_timeout"))
+						break
+					}
+					if (provider.getCurrentTask() !== taskAfterCancel) {
+						void vscode.window.showErrorMessage(t("common:errors.checkpoint_failed"))
+						break
+					}
+					restoreCompleted = await taskAfterCancel.checkpointRestore(result.data)
 				} catch (error) {
-					vscode.window.showErrorMessage(t("common:errors.checkpoint_failed"))
+					console.error(`[${message.type}] checkpointRestore failed:`, error)
+					void vscode.window.showErrorMessage(
+						t("common:errors.checkpoint_restore_failed", {
+							error: error instanceof Error ? error.message : String(error),
+						}),
+					)
+				} finally {
+					if (taskCancelled && !restoreCompleted && provider.getCurrentTask() === taskBeforeCancel) {
+						try {
+							await provider.restartTaskIfCurrent(taskBeforeCancel)
+						} catch (error) {
+							provider.log(`[${message.type}] failed to resume task: ${String(error)}`)
+						}
+					}
 				}
 			}
 

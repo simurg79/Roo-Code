@@ -53,6 +53,7 @@ export interface ApiHandlerCreateMessageMetadata {
 	 */
 	mode?: string
 	suppressPreviousResponseId?: boolean
+	condenseAllowance?: number
 	/**
 	 * Controls whether the response should be stored for 30 days in OpenAI's Responses API.
 	 * When true (default), responses are stored and can be referenced in future requests
@@ -96,6 +97,8 @@ export interface ApiHandler {
 	): ApiStream
 
 	getModel(): { id: string; info: ModelInfo }
+
+	resolveModelCapabilities?(): Promise<void>
 
 	/**
 	 * Optional: the context window (in tokens) to use for context-management /
