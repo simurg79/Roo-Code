@@ -126,7 +126,15 @@ export interface ExtensionMessage {
 	openAiModels?: string[]
 	ollamaModels?: ModelRecord
 	lmStudioModels?: ModelRecord
-	vsCodeLmModels?: { vendor?: string; family?: string; version?: string; id?: string }[]
+	vsCodeLmModels?: {
+		vendor?: string
+		family?: string
+		version?: string
+		id?: string
+		name?: string
+		maxInputTokens?: number
+		supportsImages?: boolean
+	}[]
 	mcpServers?: McpServer[]
 	commits?: GitCommit[]
 	listApiConfig?: ProviderSettingsEntry[]
@@ -450,6 +458,8 @@ export interface WebviewMessage {
 		| "openCustomModesSettings"
 		| "checkpointDiff"
 		| "checkpointRestore"
+		| "completionCheckpointDiff"
+		| "completionCheckpointRestore"
 		| "deleteMcpServer"
 		| "codebaseIndexEnabled"
 		| "searchFiles"

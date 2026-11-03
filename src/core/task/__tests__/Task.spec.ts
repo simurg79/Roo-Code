@@ -15,6 +15,12 @@ import { ContextProxy } from "../../config/ContextProxy"
 import { processUserContentMentions } from "../../mentions/processUserContentMentions"
 import { MultiSearchReplaceDiffStrategy } from "../../diff/strategies/multi-search-replace"
 
+import type { ApiHandler } from "../../../api"
+import { VsCodeLmHandler } from "../../../api/providers/vscode-lm"
+import { getCondenseAllowance } from "../../context-management"
+import { getModelMaxOutputTokens } from "../../../shared/api"
+import * as buildTools from "../build-tools"
+
 // Mock delay before any imports that might use it
 vi.mock("delay", () => ({
 	__esModule: true,
@@ -87,7 +93,56 @@ vi.mock("vscode", () => {
 	const mockTab = { input: { uri: { fsPath: "/mock/workspace/path/file.ts" } } }
 	const mockTabGroup = { tabs: [mockTab] }
 
+	class LanguageModelTextPart {
+		constructor(public value: string) {}
+	}
+	class LanguageModelToolCallPart {
+		constructor(
+			public callId: string,
+			public name: string,
+			public input: unknown,
+		) {}
+	}
+	class LanguageModelToolResultPart {
+		constructor(
+			public callId: string,
+			public content: unknown[],
+		) {}
+	}
+	class LanguageModelDataPart {
+		constructor(
+			public data: Uint8Array,
+			public mimeType: string,
+		) {}
+		static image(data: Uint8Array, mimeType: string) {
+			return new LanguageModelDataPart(data, mimeType)
+		}
+	}
+
 	return {
+		LanguageModelTextPart,
+		LanguageModelToolCallPart,
+		LanguageModelToolResultPart,
+		LanguageModelDataPart,
+		LanguageModelChatMessage: {
+			User: (content: unknown) => ({
+				role: "user",
+				content: Array.isArray(content) ? content : [new LanguageModelTextPart(String(content))],
+			}),
+			Assistant: (content: unknown) => ({
+				role: "assistant",
+				content: Array.isArray(content) ? content : [new LanguageModelTextPart(String(content))],
+			}),
+		},
+		lm: { selectChatModels: vi.fn() },
+		CancellationTokenSource: class {
+			token = { isCancellationRequested: false, onCancellationRequested: vi.fn() }
+			cancel() {
+				this.token.isCancellationRequested = true
+			}
+			dispose() {}
+		},
+		CancellationError: class extends Error {},
 		TabInputTextDiff: vi.fn(),
 		CodeActionKind: {
 			QuickFix: { value: "quickfix" },
@@ -123,6 +178,7 @@ vi.mock("vscode", () => {
 				stat: vi.fn().mockResolvedValue({ type: 1 }), // FileType.File = 1
 			},
 			onDidSaveTextDocument: vi.fn(() => mockDisposable),
+			onDidChangeConfiguration: vi.fn(() => mockDisposable),
 			getConfiguration: vi.fn(() => ({ get: (key: string, defaultValue: any) => defaultValue })),
 		},
 		env: {
@@ -305,6 +361,188 @@ describe("Cline", () => {
 				},
 			],
 		}))
+	})
+
+	describe("image capability request integration", () => {
+		it.each([
+			{ name: "II-02 supported", capabilities: { supportsImageToText: true }, supportsImages: true },
+			{ name: "II-03 unknown", capabilities: {}, supportsImages: undefined },
+		])("$name first request uses a fresh live handler", async ({ capabilities, supportsImages }) => {
+			let releaseSelection!: (models: vscode.LanguageModelChat[]) => void
+			const selection = new Promise<vscode.LanguageModelChat[]>((resolve) => {
+				releaseSelection = resolve
+			})
+			vi.mocked(vscode.lm.selectChatModels).mockReturnValue(selection)
+			const sendRequest = vi.fn().mockImplementation(async () => ({
+				stream: (async function* () {
+					yield new vscode.LanguageModelTextPart("ok")
+				})(),
+			}))
+			const liveModel = {
+				id: "fresh-image-model",
+				name: "Fresh model",
+				vendor: "test",
+				family: "unlisted-image-family",
+				version: "1",
+				maxInputTokens: 128000,
+				capabilities,
+				countTokens: vi.fn().mockResolvedValue(1),
+				sendRequest,
+			} as unknown as vscode.LanguageModelChat
+			const handler = new VsCodeLmHandler({ vsCodeLmModelSelector: { id: liveModel.id } })
+			const task = new Task({
+				provider: mockProvider,
+				apiConfiguration: mockApiConfig,
+				task: "test",
+				startTask: false,
+			})
+			task.api = handler
+			const state = {
+				apiConfiguration: { apiProvider: "vscode-lm" as const },
+				autoCondenseContext: true,
+				autoCondenseContextPercent: 80,
+				profileThresholds: { selected: 60 },
+				currentApiConfigName: "Current",
+				listApiConfigMeta: [{ name: "Current", id: "selected" }],
+			}
+			mockProvider.getState = vi.fn().mockResolvedValue(state)
+			vi.spyOn(task as any, "getSystemPrompt").mockResolvedValue("system")
+			vi.spyOn(task, "getTokenUsage").mockReturnValue({ contextTokens: 0 } as ReturnType<Task["getTokenUsage"]>)
+			const toolsSpy = vi
+				.spyOn(buildTools, "buildNativeToolsArrayWithRestrictions")
+				.mockResolvedValue({ tools: [] })
+			const image: Anthropic.Messages.ImageBlockParam = {
+				type: "image",
+				source: { type: "base64", media_type: "image/png", data: "AQID" },
+			}
+			task.apiConversationHistory = [
+				{
+					role: "user",
+					content: [{ type: "text", text: "user before" }, image, { type: "text", text: "user after" }],
+				},
+				{ role: "assistant", content: [{ type: "tool_use", id: "image-tool", name: "read_file", input: {} }] },
+				{
+					role: "user",
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: "image-tool",
+							content: [
+								{ type: "text", text: "tool before" },
+								image,
+								{ type: "text", text: "tool after" },
+							],
+						},
+					],
+				},
+			]
+			const originalHistory = structuredClone(task.apiConversationHistory)
+			try {
+				expect(handler["client"]).toBeNull()
+				expect(handler.getModel().info.supportsImages).toBeUndefined()
+				const capabilityHandler = handler as unknown as ApiHandler &
+					Required<Pick<ApiHandler, "resolveModelCapabilities">>
+				expect(capabilityHandler.resolveModelCapabilities).toBeTypeOf("function")
+				const resolveCapabilities = capabilityHandler.resolveModelCapabilities!.bind(handler)
+				const resolveSpy = vi
+					.spyOn(capabilityHandler, "resolveModelCapabilities")
+					.mockImplementation(async () => {
+						releaseSelection([liveModel])
+						await resolveCapabilities()
+					})
+				const createSpy = vi.spyOn(handler, "createMessage")
+				for await (const _chunk of task.attemptApiRequest(0, { skipProviderRateLimit: true })) {
+				}
+				expect(resolveSpy).toHaveBeenCalledOnce()
+				expect(handler.getModel().info.supportsImages).toBe(supportsImages)
+				expect(sendRequest).toHaveBeenCalledOnce()
+				const sentMessages = sendRequest.mock.calls[0][0] as vscode.LanguageModelChatMessage[]
+				const sentParts = sentMessages
+					.flatMap((message) => message.content)
+					.flatMap((part) => (part instanceof vscode.LanguageModelToolResultPart ? part.content : [part]))
+				const imageParts = sentParts.filter((part) => part instanceof vscode.LanguageModelDataPart)
+				expect(imageParts).toHaveLength(supportsImages ? 2 : 0)
+				for (const part of imageParts) {
+					expect(part).toMatchObject({ mimeType: "image/png", data: new Uint8Array([1, 2, 3]) })
+				}
+				const sentText = sentParts
+					.filter((part) => part instanceof vscode.LanguageModelTextPart)
+					.map((part) => (part as vscode.LanguageModelTextPart).value)
+					.join("\n")
+				for (const text of ["user before", "user after", "tool before", "tool after"])
+					expect(sentText).toContain(text)
+				if (!supportsImages) expect(sentText).toContain("[Referenced image in conversation]")
+				const expectedAllowance = getCondenseAllowance({
+					contextWindow: handler.getCondenseContextWindow(),
+					maxTokens: getModelMaxOutputTokens({
+						modelId: handler.getModel().id,
+						model: handler.getModel().info,
+						settings: state.apiConfiguration,
+					}),
+					autoCondenseContext: true,
+					autoCondenseContextPercent: 80,
+					profileThresholds: state.profileThresholds,
+					currentProfileId: "selected",
+					useAvailableInputForContextPercent: true,
+				})
+				expect(createSpy.mock.calls[0][2]?.condenseAllowance).toBe(expectedAllowance)
+				expect(task.apiConversationHistory).toEqual(originalHistory)
+				expect(state.profileThresholds).toEqual({ selected: 60 })
+			} finally {
+				releaseSelection([liveModel])
+				handler.dispose()
+				toolsSpy.mockRestore()
+				Task.resetGlobalApiRequestTime()
+			}
+		})
+		it("passes current-state allowance on the first request without an optional hook", async () => {
+			const task = new Task({
+				provider: mockProvider,
+				apiConfiguration: mockApiConfig,
+				task: "test",
+				startTask: false,
+			})
+			const state = {
+				apiConfiguration: mockApiConfig,
+				autoCondenseContext: true,
+				autoCondenseContextPercent: 80,
+				profileThresholds: { current: 25 },
+				currentApiConfigName: "Current",
+				listApiConfigMeta: [{ name: "Current", id: "current" }],
+			}
+			mockProvider.getState = vi.fn().mockResolvedValue(state)
+			vi.spyOn(task as any, "getSystemPrompt").mockResolvedValue("system")
+			vi.spyOn(task, "getTokenUsage").mockReturnValue({ contextTokens: 0 } as ReturnType<Task["getTokenUsage"]>)
+			task.apiConversationHistory = [{ role: "user", content: "hello" }]
+			const createSpy = vi.spyOn(task.api, "createMessage").mockImplementation(async function* () {
+				yield { type: "text", text: "ok" }
+			})
+			const toolsSpy = vi
+				.spyOn(buildTools, "buildNativeToolsArrayWithRestrictions")
+				.mockResolvedValue({ tools: [] })
+			try {
+				for await (const _chunk of task.attemptApiRequest(0, { skipProviderRateLimit: true })) {
+				}
+				const model = task.api.getModel()
+				expect(createSpy.mock.calls[0][2]?.condenseAllowance).toBe(
+					getCondenseAllowance({
+						contextWindow: model.info.contextWindow,
+						maxTokens: getModelMaxOutputTokens({
+							modelId: model.id,
+							model: model.info,
+							settings: state.apiConfiguration,
+						}),
+						autoCondenseContext: true,
+						autoCondenseContextPercent: 80,
+						profileThresholds: state.profileThresholds,
+						currentProfileId: "current",
+					}),
+				)
+			} finally {
+				toolsSpy.mockRestore()
+				Task.resetGlobalApiRequestTime()
+			}
+		})
 	})
 
 	describe("constructor", () => {
@@ -1812,6 +2050,111 @@ describe("Cline", () => {
 				// Verify cancelCurrentRequest was called
 				expect(cancelSpy).toHaveBeenCalled()
 			})
+		})
+	})
+
+	describe("history recovery start", () => {
+		it("CR-13 CR-14 actual history branch loads saved messages and reaches resume ask", async () => {
+			const task = new Task({
+				provider: mockProvider,
+				apiConfiguration: mockApiConfig,
+				startTask: false,
+				historyItem: {
+					id: "history",
+					number: 1,
+					task: "saved",
+					ts: 1,
+					tokensIn: 0,
+					tokensOut: 0,
+					totalCost: 0,
+				},
+			})
+			const saved = [{ ts: 1, type: "say", say: "text", text: "saved" }]
+			vi.spyOn(task as any, "getSavedClineMessages").mockResolvedValue(saved)
+			vi.spyOn(task as any, "getSavedApiConversationHistory").mockResolvedValue([])
+			const overwrite = vi.spyOn(task, "overwriteClineMessages").mockImplementation(async (messages) => {
+				task.clineMessages = messages
+			})
+			const start = vi.spyOn(task as any, "startTask").mockResolvedValue(undefined)
+			let rejectAsk!: (error: Error) => void
+			const askPromise = new Promise((_, reject) => {
+				rejectAsk = reject
+			})
+			const ask = vi.spyOn(task, "ask").mockImplementation(() => askPromise as any)
+			const log = vi.spyOn(mockProvider, "log")
+			log.mockClear()
+			task.resumeFromHistory()
+			task.resumeFromHistory()
+			for (let iteration = 0; iteration < 20; iteration++) await Promise.resolve()
+			expect(overwrite).toHaveBeenCalledExactlyOnceWith(saved)
+			expect(ask).toHaveBeenCalledExactlyOnceWith("resume_task")
+			expect(task.isInitialized).toBe(true)
+			expect(start).not.toHaveBeenCalled()
+			task.abort = true
+			rejectAsk(new Error("stopped resume"))
+			for (let iteration = 0; iteration < 10; iteration++) await Promise.resolve()
+			expect(log).not.toHaveBeenCalled()
+		})
+		it("CR-13 starts history once without clearing saved messages", () => {
+			const task = new Task({
+				provider: mockProvider,
+				apiConfiguration: mockApiConfig,
+				historyItem: {
+					id: "history",
+					number: 1,
+					task: "saved",
+					ts: 1,
+					tokensIn: 0,
+					tokensOut: 0,
+					totalCost: 0,
+				},
+				startTask: false,
+			})
+			task.clineMessages = [{ ts: 1, type: "say", say: "text", text: "saved" }]
+			const resume = vi.spyOn(task as any, "resumeTaskFromHistory").mockResolvedValue(undefined)
+			const start = vi.spyOn(task as any, "startTask").mockResolvedValue(undefined)
+			task.resumeFromHistory()
+			task.resumeFromHistory()
+			expect(resume).toHaveBeenCalledTimes(1)
+			expect(start).not.toHaveBeenCalled()
+			expect(task.clineMessages[0].text).toBe("saved")
+		})
+
+		it("CR-25 rejects nonhistory synchronously without setting started", () => {
+			const task = new Task({
+				provider: mockProvider,
+				apiConfiguration: mockApiConfig,
+				task: "new",
+				startTask: false,
+			})
+			expect(() => task.resumeFromHistory()).toThrow("not constructed from history")
+			expect((task as any)._started).toBe(false)
+		})
+
+		it.each(["abort", "abandoned", "active"])("CR-14 handles asynchronous failure for %s", async (status) => {
+			const task = new Task({
+				provider: mockProvider,
+				apiConfiguration: mockApiConfig,
+				historyItem: {
+					id: "history",
+					number: 1,
+					task: "saved",
+					ts: 1,
+					tokensIn: 0,
+					tokensOut: 0,
+					totalCost: 0,
+				},
+				startTask: false,
+			})
+			vi.spyOn(task as any, "resumeTaskFromHistory").mockRejectedValue(new Error("resume failure"))
+			const log = vi.spyOn(mockProvider, "log")
+			log.mockClear()
+			task.resumeFromHistory()
+			if (status === "abort") task.abort = true
+			if (status === "abandoned") task.abandoned = true
+			await Promise.resolve()
+			if (status === "active") expect(log).toHaveBeenCalledWith(expect.stringContaining("resume failure"))
+			else expect(log).not.toHaveBeenCalled()
 		})
 	})
 

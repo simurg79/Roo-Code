@@ -1,8 +1,19 @@
 import React from "react"
 import { render, screen, fireEvent } from "@/utils/test-utils"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { ChatRowContent } from "../ChatRow"
+import { ChatRowContent, getDelegatedChildTaskId } from "../ChatRow"
 import type { HistoryItem, ClineMessage } from "@roo-code/types"
+
+// Share the native renderer's React instance when Vite loads chat dependencies.
+vi.mock("react", async () => {
+	const { createRequire } = await import("node:module")
+	return createRequire(import.meta.url)("react")
+})
+
+vi.mock("../ChatView", () => ({ MAX_IMAGES_PER_MESSAGE: 20 }))
+vi.mock("../../common/MarkdownBlock", () => ({
+	default: ({ markdown }: { markdown?: string }) => <div>{markdown}</div>,
+}))
 
 // Mock vscode API
 const mockPostMessage = vi.fn()
@@ -52,7 +63,7 @@ vi.mock("@src/components/ui/hooks/useSelectedModel", () => ({
 
 const queryClient = new QueryClient()
 
-function renderChatRow(message: any, currentTaskItem?: Partial<HistoryItem>, clineMessages?: ClineMessage[]) {
+function renderChatRow(message: ClineMessage, currentTaskItem?: Partial<HistoryItem>, clineMessages?: ClineMessage[]) {
 	mockCurrentTaskItem = currentTaskItem
 	mockClineMessages = clineMessages || [message]
 
@@ -71,6 +82,39 @@ function renderChatRow(message: any, currentTaskItem?: Partial<HistoryItem>, cli
 			/>
 		</QueryClientProvider>,
 	)
+}
+
+function newTask(ts: number, childTaskId?: string): ClineMessage {
+	return {
+		ts,
+		type: "ask",
+		ask: "tool",
+		text: JSON.stringify({ tool: "newTask", mode: "code", content: "Implement feature X" }),
+		childTaskId,
+	}
+}
+
+function subtaskResult(ts: number, childTaskId?: string): ClineMessage {
+	return { ts, type: "say", say: "subtask_result", text: "Identical summary", childTaskId }
+}
+
+function expectSubtaskLink(childTaskId: string) {
+	fireEvent.click(screen.getByRole("button", { name: "Go to subtask" }))
+	expect(mockPostMessage).toHaveBeenCalledTimes(1)
+	expect(mockPostMessage).toHaveBeenCalledWith({ type: "showTaskWithId", text: childTaskId })
+}
+
+function expectNoSubtaskLink() {
+	expect(screen.queryByRole("button", { name: "Go to subtask" })).not.toBeInTheDocument()
+	expect(mockPostMessage).not.toHaveBeenCalled()
+}
+
+function interveningMessages(): ClineMessage[] {
+	return [
+		{ ts: 1100, type: "say", say: "text", text: "Working", childTaskId: "unrelated-child" },
+		{ ts: 1200, type: "ask", ask: "tool", text: "not valid JSON" },
+		{ ts: 1300, type: "ask", ask: "tool", text: JSON.stringify({ tool: "switchMode", mode: "code" }) },
+	]
 }
 
 describe("ChatRow - subtask links", () => {
@@ -175,7 +219,7 @@ describe("ChatRow - subtask links", () => {
 			}
 
 			// Pass both messages in the clineMessages array
-			renderChatRow(newTaskMessage, { delegatedToId: "child-task-123" }, [
+			renderChatRow(newTaskMessage, { childIds: ["child-task-123"] }, [
 				newTaskMessage,
 				subtaskResultMessage,
 			] as ClineMessage[])
@@ -266,7 +310,7 @@ describe("ChatRow - subtask links", () => {
 			})
 		})
 
-		it("should link to the matching child task when the result is not adjacent to its newTask row", () => {
+		it("S9: latest result uses completedByChildId before positional inference across intervening messages", () => {
 			const newTaskMessage = {
 				ts: 1000,
 				type: "ask" as const,
@@ -295,7 +339,7 @@ describe("ChatRow - subtask links", () => {
 
 			expect(mockPostMessage).toHaveBeenCalledWith({
 				type: "showTaskWithId",
-				text: "only-child",
+				text: "stale-child",
 			})
 		})
 
@@ -373,6 +417,208 @@ describe("ChatRow - subtask links", () => {
 				type: "showTaskWithId",
 				text: "stamped-child",
 			})
+		})
+	})
+
+	describe("S7–S12 approved navigation", () => {
+		it.each(["request", "result"] as const)(
+			"S7: own %s stamp survives missing conversation and metadata",
+			(row) => {
+				const message = row === "request" ? newTask(1000, "own-child") : subtaskResult(1000, "own-child")
+				renderChatRow(message, undefined, [])
+				expectSubtaskLink("own-child")
+			},
+		)
+
+		it.each(["request", "result"] as const)("S7: own %s stamp beats contradictory context", (row) => {
+			const message = row === "request" ? newTask(2000, "own-child") : subtaskResult(2000, "own-child")
+			renderChatRow(message, { childIds: ["wrong-child"], completedByChildId: "wrong-child" }, [
+				newTask(1000, "preceding-child"),
+				{ ...message, childTaskId: "stale-context-child" },
+			])
+			expectSubtaskLink("own-child")
+		})
+
+		it.each([0, 1])("S7: out-of-order identical result %s keeps its own child", (resultIndex) => {
+			const results = [subtaskResult(3000, "second-child"), subtaskResult(4000, "first-child")]
+			renderChatRow(
+				results[resultIndex],
+				{ childIds: ["first-child", "second-child"], completedByChildId: "second-child" },
+				[newTask(1000, "first-child"), newTask(2000, "second-child"), ...results],
+			)
+			expectSubtaskLink(results[resultIndex].childTaskId!)
+		})
+
+		it("S8: latest preceding request stamp wins across malformed and unrelated intervening messages", () => {
+			const result = subtaskResult(2000)
+			renderChatRow(result, { childIds: ["positional-child"], completedByChildId: "wrong-child" }, [
+				newTask(500, "older-child"),
+				newTask(1000, "preceding-child"),
+				...interveningMessages(),
+				result,
+			])
+			expectSubtaskLink("preceding-child")
+		})
+
+		it("S8: an unstamped newer request blocks borrowing an older request stamp", () => {
+			const result = subtaskResult(3000)
+			renderChatRow(result, { completedByChildId: "completed-child" }, [
+				newTask(1000, "older-child"),
+				newTask(2000),
+				result,
+			])
+			expectSubtaskLink("completed-child")
+		})
+
+		it("S9: latest result uses completedByChildId before a shifted legacy position even with a later request", () => {
+			const result = subtaskResult(3000)
+			renderChatRow(
+				result,
+				{ childIds: ["completed-child", "running-child"], completedByChildId: "completed-child" },
+				[newTask(1000), newTask(2000), result, newTask(4000)],
+			)
+			expectSubtaskLink("completed-child")
+		})
+
+		it("S9: earlier result without a position cannot use completedByChildId", () => {
+			const result = subtaskResult(1000)
+			renderChatRow(result, { completedByChildId: "latest-child" }, [result, subtaskResult(2000)])
+			expectNoSubtaskLink()
+		})
+
+		it.each(["rejected", "approved", "pending"] as const)(
+			"S10: %s request cannot steal another approval's child",
+			(row) => {
+				const rejected = newTask(1000)
+				const approved = newTask(2000, "approved-child")
+				const pending = newTask(4000)
+				renderChatRow(
+					{ rejected, approved, pending }[row],
+					{
+						childIds: ["approved-child"],
+						completedByChildId: "approved-child",
+					},
+					[rejected, approved, ...interveningMessages(), subtaskResult(3000), pending],
+				)
+				if (row === "approved") expectSubtaskLink("approved-child")
+				else expectNoSubtaskLink()
+			},
+		)
+
+		it("S10: earlier result rejects a positional child owned by a later request", () => {
+			const result = subtaskResult(2000)
+			renderChatRow(result, { childIds: ["owned-child"], completedByChildId: "owned-child" }, [
+				newTask(1000),
+				result,
+				newTask(3000, "owned-child"),
+				subtaskResult(4000),
+			])
+			expectNoSubtaskLink()
+		})
+
+		it("S10: pending legacy request after completion does not borrow completedByChildId or delegatedToId", () => {
+			const pending = newTask(3000)
+			renderChatRow(
+				pending,
+				{
+					childIds: ["first-child"],
+					completedByChildId: "first-child",
+					delegatedToId: "first-child",
+				},
+				[newTask(1000), subtaskResult(2000), pending],
+			)
+			expectNoSubtaskLink()
+		})
+
+		it.each([0, 1])("S10: legacy request %s keeps its positional child", (requestIndex) => {
+			const requests = [newTask(1000), newTask(2000)]
+			const childIds = ["first-child", "second-child"]
+			renderChatRow(requests[requestIndex], { childIds }, [requests[0], ...interveningMessages(), requests[1]])
+			expectSubtaskLink(childIds[requestIndex])
+		})
+
+		it.each([
+			{ ts: 1500, type: "say", say: "text", text: newTask(0).text, childTaskId: "lookalike-child" },
+			{ ts: 1500, type: "ask", ask: "followup", text: newTask(0).text, childTaskId: "lookalike-child" },
+		] as ClineMessage[])(
+			"S8/S10: non-request newTask JSON neither counts nor supplies a stamp: %j",
+			(lookalike) => {
+				const result = subtaskResult(2000)
+				renderChatRow(result, { childIds: ["first-child", "second-child"] }, [newTask(1000), lookalike, result])
+				expectSubtaskLink("first-child")
+			},
+		)
+
+		it.each([false, true])(
+			"S11: absent unstamped result cannot invent a link with preceding request %s",
+			(includeRequest) => {
+				renderChatRow(
+					subtaskResult(2000),
+					{ childIds: ["child"], completedByChildId: "child" },
+					includeRequest ? [newTask(1000, "preceding-child")] : [],
+				)
+				expectNoSubtaskLink()
+			},
+		)
+
+		it.each([false, true])(
+			"S11: unresolved result without metadata and with preceding request %s has no link",
+			(includeRequest) => {
+				const result = subtaskResult(2000)
+				renderChatRow(result, undefined, [...(includeRequest ? [newTask(1000)] : []), result])
+				expectNoSubtaskLink()
+			},
+		)
+
+		it.each([undefined, "child"])(
+			"S12: adjacent result suppresses a genuinely resolved request control with stamp %s",
+			(childTaskId) => {
+				const request = newTask(1000, childTaskId)
+				renderChatRow(request, { childIds: ["child"] }, [request, subtaskResult(2000, childTaskId)])
+				expectNoSubtaskLink()
+			},
+		)
+
+		it.each([undefined, "child"])(
+			"S12: intervening messages preserve request control with stamp %s",
+			(childTaskId) => {
+				const request = newTask(1000, childTaskId)
+				renderChatRow(request, { childIds: ["child"] }, [
+					request,
+					...interveningMessages(),
+					subtaskResult(2000),
+				])
+				expectSubtaskLink("child")
+			},
+		)
+
+		it("scaling: resolver scan cost stays linear over a 1x/2x/4x/8x history ladder", () => {
+			const measurements = [1, 2, 4, 8].map((scale) => {
+				const requests = Array.from({ length: 1000 * scale }, (_, requestIndex) => newTask(requestIndex))
+				const result = subtaskResult(requests.length)
+				const messages = [...requests, result, subtaskResult(requests.length + 1)]
+				const childIds = Array.from({ length: requests.length }, (_, requestIndex) => `child-${requestIndex}`)
+				for (let iteration = 0; iteration < 5; iteration++) {
+					getDelegatedChildTaskId(messages, result, childIds, "latest-child")
+				}
+				const samples = Array.from({ length: 5 }, () => {
+					let resolvedChildTaskId: string | undefined
+					const started = performance.now()
+					for (let iteration = 0; iteration < 10; iteration++) {
+						resolvedChildTaskId = getDelegatedChildTaskId(messages, result, childIds, "latest-child")
+					}
+					const duration = performance.now() - started
+					expect(resolvedChildTaskId).toBe(childIds.at(-1))
+					return duration
+				}).sort((first, second) => first - second)
+				return samples[2]
+			})
+			console.info(
+				`Resolver ladder milliseconds: ${measurements.map((duration) => duration.toFixed(2)).join(", ")}`,
+			)
+			console.info(`Resolver 4x/1x ratio: ${(measurements[2] / measurements[0]).toFixed(2)}`)
+			expect(measurements[2] / measurements[0]).toBeLessThan(8)
+			expect(measurements[3] / measurements[0]).toBeLessThan(16)
 		})
 	})
 

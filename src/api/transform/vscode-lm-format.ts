@@ -110,6 +110,10 @@ export function sanitizeSurrogatesDeep(value: unknown): unknown {
 
 const SUPPORTED_IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"])
 
+export function canCreateImageParts(): boolean {
+	return typeof vscode.LanguageModelDataPart?.image === "function"
+}
+
 function convertImagePart(
 	part: { source?: { type?: string; media_type?: string; data?: string } },
 	supportsImages: boolean,
@@ -126,7 +130,7 @@ function convertImagePart(
 		// Buffer.from never throws on malformed base64 — it yields empty/garbage bytes — so an empty
 		// result is the only signal that decoding failed, and it falls through to a visible placeholder.
 		if (bytes.length > 0) {
-			if (typeof vscode.LanguageModelDataPart?.image !== "function") {
+			if (!canCreateImageParts()) {
 				throw new Error("Roo Code: Image input requires a newer version of VS Code that can send image data.")
 			}
 			return vscode.LanguageModelDataPart.image(bytes, part.source.media_type)

@@ -1,6 +1,9 @@
 // npx vitest run core/webview/__tests__/ClineProvider.sticky-profile.spec.ts
 
 import * as vscode from "vscode"
+import * as fs from "fs/promises"
+import { t } from "../../../i18n"
+import { ORGANIZATION_ALLOW_ALL } from "@roo-code/types"
 import { ClineProvider } from "../ClineProvider"
 import { ContextProxy } from "../../config/ContextProxy"
 import type { HistoryItem } from "@roo-code/types"
@@ -21,9 +24,11 @@ vi.mock("vscode", () => ({
 		executeCommand: vi.fn().mockResolvedValue(undefined),
 	},
 	window: {
+		createTextEditorDecorationType: vi.fn(() => ({ dispose: vi.fn() })),
 		showInformationMessage: vi.fn(),
 		showWarningMessage: vi.fn(),
 		showErrorMessage: vi.fn(),
+		showOpenDialog: vi.fn(),
 		onDidChangeActiveTextEditor: vi.fn(() => ({ dispose: vi.fn() })),
 	},
 	workspace: {
@@ -57,7 +62,7 @@ let taskIdCounter = 0
 
 vi.mock("../../task/Task", () => ({
 	Task: vi.fn().mockImplementation((options) => ({
-		taskId: options.taskId || `test-task-id-${++taskIdCounter}`,
+		taskId: options.historyItem?.id || options.taskId || `test-task-id-${++taskIdCounter}`,
 		saveClineMessages: vi.fn(),
 		clineMessages: [],
 		apiConversationHistory: [],
@@ -65,6 +70,11 @@ vi.mock("../../task/Task", () => ({
 		overwriteApiConversationHistory: vi.fn(),
 		abortTask: vi.fn(),
 		handleWebviewAskResponse: vi.fn(),
+		resumeFromHistory: vi.fn(),
+		isInitialized: true,
+		dispose: vi.fn(),
+		on: vi.fn(),
+		off: vi.fn(),
 		getTaskNumber: vi.fn().mockReturnValue(0),
 		setTaskNumber: vi.fn(),
 		setParentTask: vi.fn(),
@@ -146,16 +156,19 @@ vi.mock("p-wait-for", () => ({
 	default: vi.fn().mockImplementation(async () => Promise.resolve()),
 }))
 
-vi.mock("fs/promises", () => ({
-	mkdir: vi.fn().mockResolvedValue(undefined),
-	writeFile: vi.fn().mockResolvedValue(undefined),
-	readFile: vi.fn().mockResolvedValue(""),
-	readdir: vi.fn().mockResolvedValue([]),
-	unlink: vi.fn().mockResolvedValue(undefined),
-	rmdir: vi.fn().mockResolvedValue(undefined),
-	access: vi.fn().mockResolvedValue(undefined),
-	rm: vi.fn().mockResolvedValue(undefined),
-}))
+vi.mock("fs/promises", () => {
+	const filesystem = {
+		mkdir: vi.fn().mockResolvedValue(undefined),
+		writeFile: vi.fn().mockResolvedValue(undefined),
+		readFile: vi.fn().mockResolvedValue(""),
+		readdir: vi.fn().mockResolvedValue([]),
+		unlink: vi.fn().mockResolvedValue(undefined),
+		rmdir: vi.fn().mockResolvedValue(undefined),
+		access: vi.fn().mockResolvedValue(undefined),
+		rm: vi.fn().mockResolvedValue(undefined),
+	}
+	return { ...filesystem, default: filesystem }
+})
 
 vi.mock("../../../utils/storage", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../../../utils/storage")>()
@@ -272,6 +285,1041 @@ describe("ClineProvider - Sticky Provider Profile", () => {
 		}
 	})
 
+	describe("checkpoint recovery core", () => {
+		it("CR-04 CR-23 expected owned cancellation rehydrates and submits once", async () => {
+			const session = setupRecovery()
+			const owner = stage()
+			provider.beginOwnedResume(session, owner)
+			await provider.cancelTask({ expectedSession: session, pendingEditOwner: owner })
+			const accepted = provider.getCurrentTask()!
+			expect(accepted).not.toBe(session)
+			expect(accepted.handleWebviewAskResponse).toHaveBeenCalledExactlyOnceWith(
+				"messageResponse",
+				"replacement",
+				["image"],
+			)
+			expect((provider as any).ownedResume).toBeUndefined()
+		})
+
+		it("CR-04 owned cancellation releases the marker without consuming the entry when the session changes during abort", async () => {
+			const session = setupRecovery()
+			const owner = stage()
+			provider.beginOwnedResume(session, owner)
+			const other = { ...session, instanceId: "other", isStreaming: false, handleWebviewAskResponse: vi.fn() }
+			session.abortTask.mockImplementationOnce(async () => {
+				;(provider as any).clineStack = [other]
+			})
+			const createSpy = vi.spyOn(provider, "createTaskWithHistoryItem")
+			await provider.cancelTask({ expectedSession: session, pendingEditOwner: owner })
+			expect(provider.getCurrentTask()).toBe(other)
+			expect(createSpy).not.toHaveBeenCalled()
+			expect(other.handleWebviewAskResponse).not.toHaveBeenCalled()
+			expect((provider as any).ownedResume).toBeUndefined()
+			expect((provider as any).pendingOperations.get("task-recovery")).toBe(owner)
+		})
+
+		it("CR-24 rejected older finally does not release a newer owned marker", async () => {
+			const session = setupRecovery()
+			const older = stage("older")
+			provider.beginOwnedResume(session, older)
+			const heldAbort = deferred()
+			session.abortTask.mockReturnValueOnce(heldAbort.promise)
+			const olderResume = provider.createTaskWithHistoryItem(history, {
+				expectedSession: session,
+				pendingEditOwner: older,
+			})
+			await flush()
+			const newer = stage("newer")
+			provider.beginOwnedResume(session, newer)
+			heldAbort.resolve()
+			expect(await olderResume).toBeUndefined()
+			expect((provider as any).ownedResume.attempt).toBe(newer)
+			const task = await provider.createTaskWithHistoryItem(history, {
+				expectedSession: session,
+				pendingEditOwner: newer,
+			})
+			expect(task!.handleWebviewAskResponse).toHaveBeenCalledExactlyOnceWith("messageResponse", "newer", [
+				"image",
+			])
+		})
+
+		it("CR-22 switch during mode write prevents profile activation", async () => {
+			const session = setupRecovery()
+			const heldMode = deferred()
+			const original = provider.contextProxy.setValue.bind(provider.contextProxy)
+			vi.spyOn(provider.contextProxy, "setValue").mockImplementation(async (key, value) => {
+				if (key === "mode") await heldMode.promise
+				await original(key, value)
+			})
+			const recovery = provider.createTaskWithHistoryItem(history, { expectedSession: session })
+			await flush()
+			const accepted = provider.getCurrentTask()!
+			const other = { ...session, instanceId: "other" }
+			;(provider as any).clineStack = [other]
+			heldMode.resolve()
+			await recovery
+			expect(provider.providerSettingsManager.activateProfile).not.toHaveBeenCalled()
+			expect(accepted.updateApiConfiguration).not.toHaveBeenCalled()
+			expect(other.updateApiConfiguration).not.toHaveBeenCalled()
+		})
+		it("CR-20 CR-26 createTask configuration and named activation share one unit", async () => {
+			const session = setupRecovery()
+			const heldValues = deferred()
+			const calls: string[] = []
+			vi.spyOn(provider.contextProxy, "setValues").mockImplementationOnce(async () => {
+				calls.push("values")
+				await heldValues.promise
+			})
+			vi.mocked(provider.providerSettingsManager.activateProfile).mockImplementationOnce(async () => {
+				calls.push("activate")
+				return { name: "user", id: "user-id", apiProvider: "anthropic" }
+			})
+			vi.spyOn(provider, "addClineToStack").mockResolvedValue(undefined)
+			const { Task } = await import("../../task/Task")
+			vi.mocked(Task).mockImplementationOnce(() => ({ start: vi.fn() }) as any)
+			const creating = provider.createTask(
+				"new",
+				undefined,
+				session,
+				{},
+				{ currentApiConfigName: "user", apiProvider: "anthropic" },
+			)
+			await flush()
+			const later = provider.runProfileUnit(async () => {
+				calls.push("later")
+			})
+			await flush()
+			expect(calls).toEqual(["values"])
+			heldValues.resolve()
+			await Promise.all([creating, later])
+			expect(calls).toEqual(["values", "activate", "later"])
+		})
+		it("CR-01 CR-02 construction cannot expose a rejected replacement", async () => {
+			const session = setupRecovery()
+			const other = { ...session, instanceId: "new" }
+			const { Task } = await import("../../task/Task")
+			const constructed = { dispose: vi.fn(), resumeFromHistory: vi.fn() }
+			vi.mocked(Task).mockImplementationOnce((options: any) => {
+				expect(options.startTask).toBe(false)
+				expect(options.onCreated).toBeUndefined()
+				;(provider as any).clineStack = [other]
+				return constructed as any
+			})
+			const events = vi.spyOn(provider, "emit")
+			expect(await provider.createTaskWithHistoryItem(history, { expectedSession: session })).toBeUndefined()
+			expect(provider.getCurrentTask()).toBe(other)
+			expect(constructed.dispose).toHaveBeenCalledOnce()
+			expect(constructed.resumeFromHistory).not.toHaveBeenCalled()
+			expect(events).not.toHaveBeenCalled()
+			expect(provider.postStateToWebview).not.toHaveBeenCalled()
+		})
+
+		it("CR-15 legacy history lifecycle never consumes a ready owner", async () => {
+			setupRecovery()
+			const owner = stage()
+			const item = { ...history, mode: undefined, apiConfigName: undefined }
+			const task = await provider.createTaskWithHistoryItem(item)
+			expect(task!.handleWebviewAskResponse).not.toHaveBeenCalled()
+			expect((provider as any).pendingOperations.get("task-recovery")).toBe(owner)
+			provider.clearPendingEditOperation("task-recovery", owner)
+		})
+
+		it.each(["parse", "custom", "apply"])(
+			"CR-10 CR-20 CR-27 import %s failure leaves chain usable",
+			async (phase) => {
+				setupRecovery()
+				configureImport(
+					phase === "custom"
+						? [{ slug: "custom", name: "Custom", roleDefinition: "custom", groups: ["read"] }]
+						: [],
+				)
+				if (phase === "parse") vi.mocked(fs.readFile).mockResolvedValue("invalid JSON")
+				if (phase === "custom")
+					vi.spyOn(provider.customModesManager, "updateCustomMode").mockRejectedValue(
+						new Error("custom failed"),
+					)
+				if (phase === "apply")
+					vi.mocked(provider.providerSettingsManager.import).mockRejectedValue(new Error("apply failed"))
+				const epoch = (provider as any).profileSelectionEpoch
+				const result = await provider.importSettingsFromPathAsUnit("settings.json")
+				expect(result.success).toBe(false)
+				expect((provider as any).profileSelectionEpoch).toBe(epoch + (phase === "apply" ? 1 : 0))
+				await provider.activateProviderProfile({ name: "user" })
+				expect(provider.contextProxy.getValue("currentApiConfigName")).toBe("user")
+			},
+		)
+
+		it.each(["mode-default", "profile-list"])(
+			"CR-01 CR-03 switch during read-only %s preparation",
+			async (phase) => {
+				const session = setupRecovery()
+				const held = deferred<any>()
+				const modeConfig = vi
+					.spyOn(provider.providerSettingsManager, "getModeConfigId")
+					.mockResolvedValue("saved-id")
+				if (phase === "mode-default") modeConfig.mockReturnValueOnce(held.promise)
+				else vi.mocked(provider.providerSettingsManager.listConfig).mockReturnValueOnce(held.promise)
+				const recovery = provider.createTaskWithHistoryItem(
+					{ ...history, apiConfigName: undefined },
+					{ expectedSession: session },
+				)
+				await flush()
+				const other = { ...session, instanceId: "same-id-new-session" }
+				;(provider as any).clineStack = [other]
+				held.resolve(phase === "mode-default" ? "saved-id" : [{ name: "saved-profile", id: "saved-id" }])
+				expect(await recovery).toBeUndefined()
+				expect(provider.getCurrentTask()).toBe(other)
+				expect(provider.providerSettingsManager.activateProfile).not.toHaveBeenCalled()
+				expect(provider.postStateToWebview).not.toHaveBeenCalled()
+			},
+		)
+		it("CR-16 waits for accepted Task initialization before consuming text/images", async () => {
+			const session = setupRecovery()
+			const owner = stage()
+			const heldReady = deferred()
+			const waitModule = await import("p-wait-for")
+			vi.mocked(waitModule.default).mockReturnValueOnce(heldReady.promise)
+			const recovery = provider.createTaskWithHistoryItem(history, {
+				expectedSession: session,
+				pendingEditOwner: owner,
+			})
+			await flush()
+			const task = provider.getCurrentTask()!
+			expect(task.handleWebviewAskResponse).not.toHaveBeenCalled()
+			expect((provider as any).ownedResume).toBeUndefined()
+			heldReady.resolve()
+			await recovery
+			expect(task.handleWebviewAskResponse).toHaveBeenCalledExactlyOnceWith("messageResponse", "replacement", [
+				"image",
+			])
+		})
+
+		it.each(["dialog", "file", "automatic"])(
+			"CR-26 CR-27 %s route enters real chain outside selection wait",
+			async (route) => {
+				setupRecovery()
+				configureImport()
+				const imports = await import("../../config/importExport")
+				const options = {
+					provider,
+					providerSettingsManager: provider.providerSettingsManager,
+					contextProxy: provider.contextProxy,
+					customModesManager: provider.customModesManager,
+				}
+				const held = deferred()
+				const unit = provider.runProfileUnit(() => held.promise)
+				const epoch = (provider as any).profileSelectionEpoch
+				let importing: Promise<unknown>
+				if (route === "dialog") {
+					const dialog = deferred<any>()
+					vi.mocked(vscode.window.showOpenDialog).mockReturnValueOnce(dialog.promise)
+					importing = imports.importSettings(options)
+					await flush()
+					expect((provider as any).profileSelectionEpoch).toBe(epoch)
+					dialog.resolve([{ fsPath: "settings.json" }])
+				} else if (route === "file") {
+					importing = imports.importSettingsFromFile(options, { fsPath: "settings.json" } as any)
+				} else {
+					vi.mocked(vscode.workspace.getConfiguration).mockReturnValue({
+						get: vi.fn(() => "settings.json"),
+					} as any)
+					const { autoImportSettings } = await import("../../../utils/autoImportSettings")
+					importing = autoImportSettings(mockOutputChannel, options)
+				}
+				await flush()
+				expect((provider as any).profileSelectionEpoch).toBe(epoch + 1)
+				expect(provider.providerSettingsManager.import).not.toHaveBeenCalled()
+				held.resolve()
+				await Promise.all([unit, importing])
+				expect(provider.contextProxy.getValue("currentApiConfigName")).toBe("imported")
+			},
+		)
+		it("CR-05 automatic already preparing yields when owned marker arrives", async () => {
+			const session = setupRecovery()
+			session.abortReason = "streaming_failed"
+			;(provider as any).taskCreationCallback(session)
+			const aborted = session.on.mock.calls.find(([event]: [string]) => event === "taskAborted")[1]
+			const heldAbort = deferred()
+			session.abortTask.mockReturnValueOnce(heldAbort.promise)
+			const automatic = aborted()
+			await flush()
+			const owner = stage()
+			provider.beginOwnedResume(session, owner)
+			heldAbort.resolve()
+			await automatic
+			expect(provider.getCurrentTask()).toBe(session)
+			const task = await provider.createTaskWithHistoryItem(history, {
+				expectedSession: session,
+				pendingEditOwner: owner,
+			})
+			expect(task!.handleWebviewAskResponse).toHaveBeenCalledOnce()
+		})
+
+		it("CR-24 hung owned setup expires and permits automatic recovery without submission", async () => {
+			vi.useFakeTimers()
+			try {
+				const session = setupRecovery()
+				const owner = stage()
+				provider.beginOwnedResume(session, owner)
+				const heldAbort = deferred()
+				session.abortTask.mockReturnValueOnce(heldAbort.promise)
+				const owned = provider.createTaskWithHistoryItem(history, {
+					expectedSession: session,
+					pendingEditOwner: owner,
+				})
+				await flush()
+				await vi.advanceTimersByTimeAsync(30000)
+				expect((provider as any).ownedResume).toBeUndefined()
+				const automatic = await provider.createTaskWithHistoryItem(history, { expectedSession: session })
+				expect(automatic!.handleWebviewAskResponse).not.toHaveBeenCalled()
+				heldAbort.resolve()
+				expect(await owned).toBeUndefined()
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
+		it("CR-24 hung A replaced by failed B immediately releases automatic suppression", async () => {
+			const session = setupRecovery()
+			const older = stage()
+			provider.beginOwnedResume(session, older)
+			const heldAbort = deferred()
+			session.abortTask.mockReturnValueOnce(heldAbort.promise)
+			const olderResume = provider.createTaskWithHistoryItem(history, {
+				expectedSession: session,
+				pendingEditOwner: older,
+			})
+			await flush()
+			const newer = stage()
+			provider.clearPendingEditOperation("task-recovery", newer)
+			expect((provider as any).ownedResume).toBeUndefined()
+			const automatic = await provider.createTaskWithHistoryItem(history, { expectedSession: session })
+			expect(automatic!.handleWebviewAskResponse).not.toHaveBeenCalled()
+			heldAbort.resolve()
+			expect(await olderResume).toBeUndefined()
+		})
+
+		it("CR-17 superseded timer cannot delete newer owner", async () => {
+			vi.useFakeTimers()
+			try {
+				setupRecovery()
+				const older = stage()
+				await vi.advanceTimersByTimeAsync(1000)
+				const newer = stage()
+				provider.clearPendingEditOperation("task-recovery", older)
+				await vi.advanceTimersByTimeAsync(29000)
+				expect((provider as any).pendingOperations.get("task-recovery")).toBe(newer)
+				provider.clearPendingEditOperation("task-recovery", newer)
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
+		it.each(["first-load", "setValues", "setConfiguration"])(
+			"CR-21 CR-26 %s invalidates prepared recovery",
+			async (writer) => {
+				const session = setupRecovery()
+				const heldAbort = deferred()
+				session.abortTask.mockReturnValueOnce(heldAbort.promise)
+				const recovery = provider.createTaskWithHistoryItem(history, { expectedSession: session })
+				await flush()
+				if (writer === "first-load") {
+					await provider.contextProxy.setValue("currentApiConfigName", "saved-profile")
+					vi.spyOn(provider.providerSettingsManager, "hasConfig").mockResolvedValue(true)
+					await provider.synchronizeProviderProfiles()
+				} else if (writer === "setValues") {
+					await provider.setValues({ currentApiConfigName: "user", apiProvider: "openai" })
+				} else {
+					const { API } = await import("../../../extension/api")
+					const api = Object.assign(Object.create(API.prototype), {
+						sidebarProvider: provider,
+					}) as InstanceType<typeof API>
+					vi.spyOn(provider.providerSettingsManager, "saveConfig").mockResolvedValue("user-id")
+					await api.setConfiguration({ currentApiConfigName: "user", apiProvider: "openai" })
+				}
+				heldAbort.resolve()
+				await recovery
+				expect(provider.providerSettingsManager.activateProfile).not.toHaveBeenCalled()
+			},
+		)
+
+		it.each(["upsert", "delete", "reset", "setValues", "setConfiguration", "first-load"])(
+			"CR-09 CR-21 CR-26 %s queued after commit lands last",
+			async (writer) => {
+				const session = setupRecovery()
+				const heldWrite = deferred()
+				const original = provider.contextProxy.setProviderSettings.bind(provider.contextProxy)
+				vi.spyOn(provider.contextProxy, "setProviderSettings").mockImplementationOnce(async (settings) => {
+					await heldWrite.promise
+					await original(settings)
+				})
+				const recovery = provider.createTaskWithHistoryItem(history, { expectedSession: session })
+				await flush()
+				let later: Promise<unknown>
+				if (writer === "upsert") {
+					vi.spyOn(provider.providerSettingsManager, "saveConfig").mockResolvedValue("user-id")
+					later = provider.upsertProviderProfile("user", { apiProvider: "openai" })
+				} else if (writer === "delete") {
+					await provider.contextProxy.setValue("listApiConfigMeta", [
+						{ name: "saved-profile", id: "saved-id" },
+						{ name: "user", id: "user" },
+					])
+					later = provider.deleteProviderProfile({ name: "saved-profile", id: "saved-id" })
+				} else if (writer === "reset") {
+					vi.mocked(vscode.window.showInformationMessage).mockResolvedValue(t("common:answers.yes") as any)
+					vi.spyOn(provider.contextProxy, "resetAllState").mockImplementation(async () => {
+						await provider.contextProxy.setValue("currentApiConfigName", "reset")
+					})
+					vi.spyOn(provider.providerSettingsManager, "resetAllConfigs").mockResolvedValue(undefined)
+					vi.spyOn(provider.customModesManager, "resetCustomModes").mockResolvedValue(undefined)
+					vi.spyOn(provider, "removeClineFromStack").mockResolvedValue(undefined)
+					later = provider.resetState()
+				} else if (writer === "setValues") {
+					later = provider.setValues({ currentApiConfigName: "user" })
+				} else if (writer === "setConfiguration") {
+					const { API } = await import("../../../extension/api")
+					const api = Object.assign(Object.create(API.prototype), {
+						sidebarProvider: provider,
+					}) as InstanceType<typeof API>
+					vi.spyOn(provider.providerSettingsManager, "saveConfig").mockResolvedValue("user-id")
+					later = api.setConfiguration({ currentApiConfigName: "user" })
+				} else {
+					vi.spyOn(provider.providerSettingsManager, "hasConfig").mockResolvedValue(false)
+					vi.mocked(provider.providerSettingsManager.listConfig).mockResolvedValue([
+						{ name: "user", id: "user", apiProvider: "openai" },
+					])
+					later = provider.synchronizeProviderProfiles()
+				}
+				await flush()
+				heldWrite.resolve()
+				await Promise.all([recovery, later])
+				expect(provider.contextProxy.getValue("currentApiConfigName")).toBe(
+					writer === "reset" ? "reset" : "user",
+				)
+			},
+		)
+		const factoryImplementations = new Map<any, any>()
+		beforeAll(async () => {
+			const taskModule = await import("../../task/Task")
+			const storageModule = await import("../../../utils/storage")
+			const waitModule = await import("p-wait-for")
+			for (const module of [fs, taskModule, storageModule, vscode.workspace, waitModule]) {
+				for (const value of Object.values(module)) {
+					if (vi.isMockFunction(value)) factoryImplementations.set(value, value.getMockImplementation())
+				}
+			}
+		})
+		afterEach(() => {
+			vi.restoreAllMocks()
+			for (const [mock, implementation] of factoryImplementations) mock.mockImplementation(implementation)
+		})
+		it.each(["owned-first", "automatic-first", "automatic-only"])(
+			"CR-05 CR-06 CR-07 automatic recovery %s",
+			async (order) => {
+				const session = setupRecovery()
+				session.abortReason = "streaming_failed"
+				;(provider as any).taskCreationCallback(session)
+				const aborted = session.on.mock.calls.find(([event]: [string]) => event === "taskAborted")[1]
+				const owner = stage()
+				if (order === "owned-first") {
+					provider.beginOwnedResume(session, owner)
+					await aborted()
+					expect(provider.getTaskWithId).not.toHaveBeenCalled()
+					const task = await provider.createTaskWithHistoryItem(history, {
+						expectedSession: session,
+						pendingEditOwner: owner,
+					})
+					expect(task!.handleWebviewAskResponse).toHaveBeenCalledOnce()
+				} else {
+					await aborted()
+					const automatic = provider.getCurrentTask()!
+					expect(automatic).not.toBe(session)
+					expect(automatic.handleWebviewAskResponse).not.toHaveBeenCalled()
+					if (order === "automatic-first") {
+						expect(
+							await provider.createTaskWithHistoryItem(history, {
+								expectedSession: session,
+								pendingEditOwner: owner,
+							}),
+						).toBeUndefined()
+					}
+					expect((provider as any).pendingOperations.get("task-recovery")).toBe(owner)
+					provider.clearPendingEditOperation("task-recovery", owner)
+				}
+			},
+		)
+
+		it("CR-24 accepted resume releases marker before a hung submission", async () => {
+			const session = setupRecovery()
+			const owner = stage()
+			provider.beginOwnedResume(session, owner)
+			const held = deferred()
+			const { Task } = await import("../../task/Task")
+			vi.mocked(Task).mockImplementationOnce(
+				(options: any) =>
+					({
+						taskId: options.historyItem.id,
+						resumeFromHistory: vi.fn(),
+						abortTask: vi.fn(),
+						dispose: vi.fn(),
+						emit: vi.fn(),
+						on: vi.fn(),
+						off: vi.fn(),
+						handleWebviewAskResponse: vi.fn(() => held.promise),
+						setTaskApiConfigName: vi.fn(),
+						updateApiConfiguration: vi.fn(),
+					}) as any,
+			)
+			const resume = provider.createTaskWithHistoryItem(history, {
+				expectedSession: session,
+				pendingEditOwner: owner,
+			})
+			await flush()
+			expect((provider as any).ownedResume).toBeUndefined()
+			expect((provider as any).pendingOperations.size).toBe(0)
+			held.resolve()
+			await resume
+		})
+
+		it.each(["before", "after"])("CR-20 real import %s guarded recovery commit", async (order) => {
+			const session = setupRecovery()
+			const heldAbort = deferred()
+			if (order === "before") session.abortTask.mockReturnValueOnce(heldAbort.promise)
+			configureImport()
+			const recovery = provider.createTaskWithHistoryItem(history, { expectedSession: session })
+			await flush()
+			if (order === "after") await recovery
+			const imported = await provider.importSettingsFromPathAsUnit("settings.json")
+			expect(imported.success).toBe(true)
+			if (order === "before") {
+				heldAbort.resolve()
+				await recovery
+			}
+			expect(provider.contextProxy.getValue("currentApiConfigName")).toBe("imported")
+			expect(provider.contextProxy.getProviderSettings().apiProvider).toBe("openai")
+			if (order === "before") expect(provider.providerSettingsManager.activateProfile).not.toHaveBeenCalled()
+		})
+
+		function configureImport(customModes: object[] = []) {
+			vi.mocked(fs.readFile).mockResolvedValue(
+				JSON.stringify({
+					providerProfiles: {
+						currentApiConfigName: "imported",
+						apiConfigs: { imported: { id: "imported-id", apiProvider: "openai" } },
+						modeApiConfigs: {},
+					},
+					globalSettings: { customModes },
+				}),
+			)
+			vi.spyOn(provider.providerSettingsManager, "export").mockResolvedValue({
+				currentApiConfigName: "saved-profile",
+				apiConfigs: {},
+				modeApiConfigs: {},
+			})
+			vi.spyOn(provider.providerSettingsManager, "import").mockResolvedValue(undefined)
+			vi.mocked(provider.providerSettingsManager.listConfig).mockResolvedValue([
+				{ name: "imported", id: "imported-id" },
+			])
+		}
+
+		it.each(["global", "name", "provider", "list", "metadata"])(
+			"CR-20 delayed import %s holds actual chain",
+			async (phase) => {
+				setupRecovery()
+				configureImport()
+				const held = deferred<any>()
+				if (phase === "global")
+					vi.spyOn(provider.contextProxy, "setValues").mockImplementationOnce(async () => {
+						await held.promise
+					})
+				if (phase === "name" || phase === "metadata") {
+					const original = provider.contextProxy.setValue.bind(provider.contextProxy)
+					vi.spyOn(provider.contextProxy, "setValue").mockImplementation(async (key, value) => {
+						if (key === (phase === "name" ? "currentApiConfigName" : "listApiConfigMeta"))
+							await held.promise
+						await original(key, value)
+					})
+				}
+				if (phase === "provider") {
+					const original = provider.contextProxy.setProviderSettings.bind(provider.contextProxy)
+					vi.spyOn(provider.contextProxy, "setProviderSettings").mockImplementationOnce(async (settings) => {
+						await held.promise
+						await original(settings)
+					})
+				}
+				if (phase === "list")
+					vi.mocked(provider.providerSettingsManager.listConfig).mockReturnValueOnce(held.promise)
+				let settled = false
+				const importing = provider.importSettingsFromPathAsUnit("settings.json").then((result) => {
+					settled = true
+					return result
+				})
+				await flush()
+				const later = vi.fn(async () => undefined)
+				const queued = provider.runProfileUnit(later)
+				await flush()
+				expect(settled).toBe(false)
+				expect(later).not.toHaveBeenCalled()
+				held.resolve([{ name: "imported", id: "imported-id" }])
+				await Promise.all([importing, queued])
+				expect(provider.contextProxy.getValue("currentApiConfigName")).toBe("imported")
+				expect(provider.contextProxy.getProviderSettings().apiProvider).toBe("openai")
+				expect(provider.contextProxy.getValue("listApiConfigMeta")).toEqual([
+					{ name: "imported", id: "imported-id" },
+				])
+			},
+		)
+
+		it("CR-20 CR-26 actual API setConfiguration pair is atomic", async () => {
+			setupRecovery()
+			const { API } = await import("../../../extension/api")
+			const api = Object.assign(Object.create(API.prototype), { sidebarProvider: provider }) as InstanceType<
+				typeof API
+			>
+			const held = deferred()
+			const calls: string[] = []
+			vi.spyOn(provider.contextProxy, "setValues").mockImplementationOnce(async () => {
+				calls.push("values")
+				await held.promise
+			})
+			vi.spyOn(provider.providerSettingsManager, "saveConfig").mockImplementationOnce(async () => {
+				calls.push("save")
+				return "id"
+			})
+			const configuration = api.setConfiguration({ currentApiConfigName: "api", apiProvider: "anthropic" })
+			await flush()
+			const later = provider.runProfileUnit(async () => {
+				calls.push("later")
+			})
+			await flush()
+			expect(calls).toEqual(["values"])
+			held.resolve()
+			await Promise.all([configuration, later])
+			expect(calls).toEqual(["values", "save", "later"])
+		})
+
+		it("CR-27 custom mode phase cannot hold actual profile chain", async () => {
+			setupRecovery()
+			configureImport([{ slug: "custom", name: "Custom", roleDefinition: "custom", groups: ["read"] }])
+			const heldModes = deferred()
+			vi.spyOn(provider.customModesManager, "updateCustomMode").mockReturnValue(heldModes.promise)
+			const importing = provider.importSettingsFromPathAsUnit("settings.json")
+			await flush()
+			expect(provider.customModesManager.updateCustomMode).toHaveBeenCalledOnce()
+			expect(provider.providerSettingsManager.import).not.toHaveBeenCalled()
+			await provider.activateProviderProfile({ name: "user" })
+			expect(provider.contextProxy.getValue("currentApiConfigName")).toBe("user")
+			heldModes.resolve()
+			await importing
+			expect(provider.providerSettingsManager.import).toHaveBeenCalledOnce()
+		})
+
+		it.each(["upsert", "delete", "reset", "createTask"])(
+			"CR-21 CR-26 %s writer invalidates prepared recovery",
+			async (writer) => {
+				const session = setupRecovery()
+				const held = deferred()
+				session.abortTask.mockReturnValueOnce(held.promise)
+				const recovery = provider.createTaskWithHistoryItem(history, { expectedSession: session })
+				await flush()
+				const epoch = (provider as any).profileSelectionEpoch
+				if (writer === "upsert") {
+					vi.spyOn(provider.providerSettingsManager, "saveConfig").mockResolvedValue("user-id")
+					await provider.upsertProviderProfile("user", { apiProvider: "openai" })
+				} else if (writer === "delete") {
+					await provider.contextProxy.setValues({
+						currentApiConfigName: "user",
+						listApiConfigMeta: [
+							{ name: "user", id: "user" },
+							{ name: "saved-profile", id: "saved-id" },
+						],
+					})
+					await provider.deleteProviderProfile({ name: "user", id: "user" })
+				} else if (writer === "reset") {
+					vi.mocked(vscode.window.showInformationMessage).mockResolvedValue(t("common:answers.yes") as any)
+					vi.spyOn(provider.contextProxy, "resetAllState").mockResolvedValue(undefined)
+					vi.spyOn(provider.providerSettingsManager, "resetAllConfigs").mockResolvedValue(undefined)
+					vi.spyOn(provider.customModesManager, "resetCustomModes").mockResolvedValue(undefined)
+					vi.spyOn(provider, "removeClineFromStack").mockResolvedValue(undefined)
+					await provider.resetState()
+				} else {
+					vi.spyOn(provider, "addClineToStack").mockResolvedValue(undefined)
+					const { Task } = await import("../../task/Task")
+					vi.mocked(Task).mockImplementationOnce(() => ({ start: vi.fn() }) as any)
+					await provider.createTask("new", undefined, session, {}, { apiProvider: "openai" })
+				}
+				expect((provider as any).profileSelectionEpoch).toBeGreaterThan(epoch)
+				held.resolve()
+				await recovery
+				expect(provider.providerSettingsManager.activateProfile).not.toHaveBeenCalled()
+			},
+		)
+		function deferred<Value = void>() {
+			let resolve!: (value: Value) => void
+			let reject!: (error: Error) => void
+			const promise = new Promise<Value>((resolvePromise, rejectPromise) => {
+				resolve = resolvePromise
+				reject = rejectPromise
+			})
+			return { promise, resolve, reject }
+		}
+
+		async function flush() {
+			for (let iteration = 0; iteration < 20; iteration++) await Promise.resolve()
+		}
+
+		const history: HistoryItem = {
+			id: "recovery",
+			number: 1,
+			ts: 1,
+			task: "saved",
+			tokensIn: 0,
+			tokensOut: 0,
+			totalCost: 0,
+			mode: "code",
+			apiConfigName: "saved-profile",
+		}
+
+		function setupRecovery() {
+			const session = {
+				taskId: history.id,
+				instanceId: "old",
+				abortTask: vi.fn().mockResolvedValue(undefined),
+				cancelCurrentRequest: vi.fn(),
+				isStreaming: false,
+				emit: vi.fn(),
+				setTaskApiConfigName: vi.fn(),
+				updateApiConfiguration: vi.fn(),
+				on: vi.fn(),
+				off: vi.fn(),
+			} as any
+			;(provider as any).clineStack = [session]
+			vi.spyOn(provider, "getState").mockResolvedValue({
+				apiConfiguration: { apiProvider: "anthropic" },
+				mode: "code",
+				organizationAllowList: ORGANIZATION_ALLOW_ALL,
+			} as any)
+			vi.spyOn(provider, "postStateToWebview").mockResolvedValue(undefined)
+			vi.spyOn(provider, "performPreparationTasks").mockResolvedValue(undefined)
+			vi.spyOn(provider.customModesManager, "getCustomModes").mockResolvedValue([])
+			vi.spyOn(provider.providerSettingsManager, "getProfile").mockResolvedValue({
+				name: "saved-profile",
+				id: "saved-id",
+				apiProvider: "anthropic",
+			})
+			vi.spyOn(provider.providerSettingsManager, "activateProfile").mockImplementation(async (args) => ({
+				name: "name" in args ? args.name : "saved-profile",
+				id: "saved-id",
+				apiProvider: "anthropic",
+			}))
+			vi.spyOn(provider.providerSettingsManager, "listConfig").mockResolvedValue([
+				{ name: "saved-profile", id: "saved-id" },
+			])
+			vi.spyOn(provider.providerSettingsManager, "setModeConfig").mockResolvedValue(undefined)
+			vi.spyOn(provider, "getTaskWithId").mockResolvedValue({ historyItem: history } as any)
+			vi.spyOn(provider as any, "getTaskHistoryItem").mockReturnValue(undefined)
+			return session
+		}
+
+		function stage(text = "replacement") {
+			const owner = provider.setPendingEditOperation("task-recovery", {
+				messageTs: 1,
+				messageIndex: 0,
+				apiConversationHistoryIndex: 0,
+				editedContent: text,
+				images: ["image"],
+			})
+			provider.markPendingEditReady("task-recovery", owner)
+			return owner
+		}
+
+		it.each(["history", "modes", "profile", "state", "abort"])(
+			"CR-01 CR-02 CR-03 CR-04 rejects same-id replacement during %s",
+			async (phase) => {
+				const session = setupRecovery()
+				const owner = stage()
+				const held = deferred<any>()
+				if (phase === "history") vi.mocked(provider.getTaskWithId).mockReturnValueOnce(held.promise)
+				if (phase === "modes")
+					vi.mocked(provider.customModesManager.getCustomModes).mockReturnValueOnce(held.promise)
+				if (phase === "profile")
+					vi.mocked(provider.providerSettingsManager.getProfile).mockReturnValueOnce(held.promise)
+				if (phase === "state") vi.mocked(provider.getState).mockReturnValueOnce(held.promise)
+				if (phase === "abort") session.abortTask.mockReturnValueOnce(held.promise)
+				const events = vi.spyOn(provider, "emit")
+				const resume =
+					phase === "history"
+						? provider.restartTaskIfCurrent(session)
+						: provider.createTaskWithHistoryItem(history, {
+								expectedSession: session,
+								pendingEditOwner: owner,
+							})
+				await flush()
+				const replacementSession = { ...session, instanceId: "new" }
+				;(provider as any).clineStack = [replacementSession]
+				held.resolve(
+					phase === "history"
+						? { historyItem: history }
+						: phase === "modes"
+							? []
+							: phase === "profile"
+								? { apiProvider: "anthropic" }
+								: { apiConfiguration: {} },
+				)
+				expect(await resume).toBeFalsy()
+				expect(provider.getCurrentTask()).toBe(replacementSession)
+				expect(events).not.toHaveBeenCalled()
+				expect(provider.postStateToWebview).not.toHaveBeenCalled()
+				expect(provider.providerSettingsManager.activateProfile).not.toHaveBeenCalled()
+				expect((provider as any).pendingOperations.get("task-recovery")).toBe(owner)
+				if (phase === "abort") {
+					const { Task } = await import("../../task/Task")
+					const constructed = vi.mocked(Task).mock.results.at(-1)!.value
+					expect(constructed.dispose).toHaveBeenCalledOnce()
+					expect(constructed.resumeFromHistory).not.toHaveBeenCalled()
+				}
+				provider.clearPendingEditOperation("task-recovery", owner)
+			},
+		)
+
+		it("CR-15 ownerless accepted recovery never consumes ready edit", async () => {
+			const session = setupRecovery()
+			const owner = stage()
+			const task = await provider.createTaskWithHistoryItem(history, { expectedSession: session })
+			expect(task!.resumeFromHistory).toHaveBeenCalledOnce()
+			expect(task!.handleWebviewAskResponse).not.toHaveBeenCalled()
+			expect((provider as any).pendingOperations.get("task-recovery")).toBe(owner)
+			provider.clearPendingEditOperation("task-recovery", owner)
+		})
+
+		it.each(["older-first", "newer-first"])("CR-16 CR-17 overlapping owners %s", async (order) => {
+			const session = setupRecovery()
+			const older = stage("older")
+			const olderAbort = deferred()
+			session.abortTask.mockReturnValueOnce(olderAbort.promise)
+			const olderResume = provider.createTaskWithHistoryItem(history, {
+				expectedSession: session,
+				pendingEditOwner: older,
+			})
+			await flush()
+			const newer = stage("newer")
+			expect(provider.clearPendingEditOperation("task-recovery", older)).toBe(false)
+			if (order === "older-first") {
+				olderAbort.resolve()
+				await olderResume
+				const active = provider.getCurrentTask()!
+				const task = await provider.createTaskWithHistoryItem(history, {
+					expectedSession: active,
+					pendingEditOwner: newer,
+				})
+				expect(task!.handleWebviewAskResponse).toHaveBeenCalledExactlyOnceWith("messageResponse", "newer", [
+					"image",
+				])
+			} else {
+				const task = await provider.createTaskWithHistoryItem(history, {
+					expectedSession: session,
+					pendingEditOwner: newer,
+				})
+				olderAbort.resolve()
+				expect(await olderResume).toBeUndefined()
+				expect(task!.handleWebviewAskResponse).toHaveBeenCalledExactlyOnceWith("messageResponse", "newer", [
+					"image",
+				])
+			}
+			expect((provider as any).pendingOperations.size).toBe(0)
+		})
+
+		it("CR-23 stop-only cancellation preserves identity and rejects superseded session", async () => {
+			const session = setupRecovery()
+			await provider.cancelTask({ expectedSession: session, rehydrate: false })
+			expect(provider.getCurrentTask()).toBe(session)
+			expect(session.cancelCurrentRequest).toHaveBeenCalledOnce()
+			const nextSession = { ...session, cancelCurrentRequest: vi.fn() }
+			;(provider as any).clineStack = [nextSession]
+			await provider.cancelTask({ expectedSession: session })
+			expect(nextSession.cancelCurrentRequest).not.toHaveBeenCalled()
+		})
+
+		it("restarts a stop-only cancelled session without consuming a pending edit", async () => {
+			const session = setupRecovery()
+			const owner = stage()
+			await provider.cancelTask({ expectedSession: session, rehydrate: false })
+			expect(session.abandoned).toBe(true)
+			expect(await provider.restartTaskIfCurrent(session)).toBe(true)
+			const replacement = provider.getCurrentTask()!
+			expect(replacement).not.toBe(session)
+			expect(replacement.resumeFromHistory).toHaveBeenCalledOnce()
+			expect(replacement.handleWebviewAskResponse).not.toHaveBeenCalled()
+			expect((provider as any).pendingOperations.get("task-recovery")).toBe(owner)
+			provider.clearPendingEditOperation("task-recovery", owner)
+		})
+
+		it("CR-23 superseded restore settles after navigation to another task without cancellation or pending consumption", async () => {
+			const session = setupRecovery()
+			const checkpointHash = "a".repeat(40)
+			const heldRestore = deferred()
+			const restoreCheckpoint = vi.fn(() => heldRestore.promise)
+			Object.assign(session, {
+				enableCheckpoints: true,
+				checkpointService: { restoreCheckpoint },
+				providerRef: new WeakRef(provider),
+				clineMessages: [{ ts: 1, type: "say", say: "checkpoint_saved", text: checkpointHash }],
+				combineMessages: vi.fn(() => []),
+				messageManager: { rewindToTimestamp: vi.fn().mockResolvedValue(undefined) },
+				recordCheckpointDeletedUsage: vi.fn().mockResolvedValue(undefined),
+				handleWebviewAskResponse: vi.fn(),
+			})
+			const olderOwner = provider.setPendingEditOperation("task-recovery", {
+				messageTs: 1,
+				messageIndex: 0,
+				apiConversationHistoryIndex: 0,
+				editedContent: "older",
+				images: ["older-image"],
+			})
+			const markReady = vi.spyOn(provider, "markPendingEditReady")
+			const beginOwnedResume = vi.spyOn(provider, "beginOwnedResume")
+			const cancelTask = vi.spyOn(provider, "cancelTask")
+			const createTask = vi.spyOn(provider, "createTaskWithHistoryItem")
+			const { checkpointRestore } = await import("../../checkpoints")
+			const restoring = checkpointRestore(session, {
+				ts: 1,
+				commitHash: checkpointHash,
+				mode: "restore",
+				operation: "edit",
+				pendingEditOwner: olderOwner,
+			})
+			await vi.waitFor(() => expect(restoreCheckpoint).toHaveBeenCalledExactlyOnceWith(checkpointHash))
+			const newerOwner = stage("newer")
+			const otherTask = {
+				...session,
+				taskId: "other-task",
+				instanceId: "other-session",
+				cancelCurrentRequest: vi.fn(),
+				abortTask: vi.fn(),
+				handleWebviewAskResponse: vi.fn(),
+			}
+			;(provider as any).clineStack = [otherTask]
+			expect(cancelTask).not.toHaveBeenCalled()
+			heldRestore.resolve()
+			await restoring
+			await cancelTask.mock.results[0].value
+			expect(markReady).toHaveBeenLastCalledWith("task-recovery", olderOwner)
+			expect(markReady.mock.results.at(-1)!.value).toBe(false)
+			expect(olderOwner.ready).toBe(false)
+			expect(cancelTask).toHaveBeenCalledExactlyOnceWith({ expectedSession: session })
+			expect(beginOwnedResume).not.toHaveBeenCalled()
+			expect(createTask).not.toHaveBeenCalled()
+			expect(session.cancelCurrentRequest).not.toHaveBeenCalled()
+			expect(session.abortTask).not.toHaveBeenCalled()
+			expect(otherTask.cancelCurrentRequest).not.toHaveBeenCalled()
+			expect(otherTask.abortTask).not.toHaveBeenCalled()
+			expect(session.handleWebviewAskResponse).not.toHaveBeenCalled()
+			expect(otherTask.handleWebviewAskResponse).not.toHaveBeenCalled()
+			expect(provider.getCurrentTask()).toBe(otherTask)
+			expect((provider as any).pendingOperations.get("task-recovery")).toBe(newerOwner)
+			expect(newerOwner.ready).toBe(true)
+			provider.clearPendingEditOperation("task-recovery", newerOwner)
+		})
+
+		it("CR-24 retirement releases only matching marker without submission", async () => {
+			vi.useFakeTimers()
+			try {
+				const session = setupRecovery()
+				const older = stage("older")
+				provider.beginOwnedResume(session, older)
+				const newer = stage("newer")
+				expect((provider as any).ownedResume).toBeUndefined()
+				provider.beginOwnedResume(session, newer)
+				;(provider as any).releaseOwnedResume(older)
+				expect((provider as any).ownedResume.attempt).toBe(newer)
+				await vi.advanceTimersByTimeAsync(30000)
+				expect((provider as any).ownedResume).toBeUndefined()
+				expect((provider as any).pendingOperations.size).toBe(0)
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
+		it.each(["before", "after"])("CR-08 CR-09 CR-11 user selection %s recovery commit", async (order) => {
+			const session = setupRecovery()
+			const heldAbort = deferred()
+			if (order === "before") session.abortTask.mockReturnValueOnce(heldAbort.promise)
+			const resume = provider.createTaskWithHistoryItem(history, { expectedSession: session })
+			await flush()
+			if (order === "after") await resume
+			await provider.activateProviderProfile({ name: "user-profile" })
+			if (order === "before") {
+				heldAbort.resolve()
+				await resume
+			}
+			expect(provider.contextProxy.getValue("currentApiConfigName")).toBe("user-profile")
+			expect(provider.providerSettingsManager.setModeConfig).toHaveBeenCalledTimes(1)
+			const calls = vi.mocked(provider.providerSettingsManager.activateProfile).mock.calls
+			expect(calls.at(-1)).toEqual([{ name: "user-profile" }])
+			if (order === "before") expect(calls).toHaveLength(1)
+		})
+
+		it("CR-10 CR-12 rejected unit does not block later selection or wait on notifications", async () => {
+			setupRecovery()
+			const notification = deferred<boolean>()
+			vi.mocked(provider.postStateToWebview).mockReturnValueOnce(notification.promise as any)
+			vi.mocked(provider.providerSettingsManager.activateProfile).mockRejectedValueOnce(new Error("failed"))
+			await expect(provider.activateProviderProfile({ name: "bad" })).rejects.toThrow("failed")
+			const first = provider.activateProviderProfile({ name: "first" })
+			await flush()
+			await provider.activateProviderProfile({ name: "last" })
+			expect(provider.contextProxy.getValue("currentApiConfigName")).toBe("last")
+			notification.resolve(true)
+			await first
+		})
+
+		it("CR-22 task switch during profile writes changes neither task handler nor sticky", async () => {
+			const session = setupRecovery()
+			const heldWrite = deferred()
+			vi.spyOn(provider.contextProxy, "setProviderSettings").mockReturnValueOnce(heldWrite.promise)
+			const resume = provider.createTaskWithHistoryItem(history, { expectedSession: session })
+			await flush()
+			const accepted = provider.getCurrentTask()!
+			const other = {
+				...session,
+				taskId: "other",
+				setTaskApiConfigName: vi.fn(),
+				updateApiConfiguration: vi.fn(),
+			}
+			;(provider as any).clineStack = [other]
+			heldWrite.resolve()
+			await resume
+			expect(accepted.updateApiConfiguration).not.toHaveBeenCalled()
+			expect(accepted.setTaskApiConfigName).not.toHaveBeenCalled()
+			expect(other.updateApiConfiguration).not.toHaveBeenCalled()
+			expect(other.setTaskApiConfigName).not.toHaveBeenCalled()
+		})
+
+		it("CR-21 CR-26 first-load uses one inner unit and bumps epoch", async () => {
+			setupRecovery()
+			await provider.contextProxy.setValue("currentApiConfigName", "invalid")
+			vi.spyOn(provider.providerSettingsManager, "hasConfig").mockResolvedValue(false)
+			const epoch = (provider as any).profileSelectionEpoch
+			await provider.synchronizeProviderProfiles()
+			expect((provider as any).profileSelectionEpoch).toBe(epoch + 1)
+			expect(provider.contextProxy.getValue("currentApiConfigName")).toBe("saved-profile")
+			expect(provider.providerSettingsManager.activateProfile).toHaveBeenCalledOnce()
+		})
+
+		it("CR-26 mode-only setValues bypasses held chain; all provider keys queue", async () => {
+			setupRecovery()
+			const held = deferred()
+			const first = provider.runProfileUnit(() => held.promise)
+			const epoch = (provider as any).profileSelectionEpoch
+			await provider.setValues({ mode: "architect" })
+			expect((provider as any).profileSelectionEpoch).toBe(epoch)
+			const setting = provider.setValues({ apiProvider: "anthropic" })
+			expect((provider as any).profileSelectionEpoch).toBe(epoch + 1)
+			held.resolve()
+			await Promise.all([first, setting])
+		})
+	})
+
 	describe("activateProviderProfile", () => {
 		beforeEach(async () => {
 			await provider.resolveWebviewView(mockWebviewView)
@@ -330,6 +1378,7 @@ describe("ClineProvider - Sticky Provider Profile", () => {
 					id: mockTask.taskId,
 					apiConfigName: "new-profile",
 				}),
+				{ broadcast: false },
 			)
 
 			// Verify task's setTaskApiConfigName was called

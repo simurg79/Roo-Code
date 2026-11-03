@@ -220,6 +220,51 @@ describe("autoImportSettings", () => {
 		expect(mockContextProxy.setValues).toHaveBeenCalled()
 	})
 
+	it.each([true, false])(
+		"routes auto-import through the provider and waits for its result (success: %s)",
+		async (success) => {
+			vi.mocked(vscode.workspace.getConfiguration).mockReturnValue({
+				get: vi.fn().mockReturnValue("~/Documents/config.json"),
+			} as any)
+			vi.mocked(fileExistsAtPath).mockResolvedValue(true)
+			let resolveImport!: (result: any) => void
+			const importResult = new Promise((resolve) => {
+				resolveImport = resolve
+			})
+			mockProvider.importSettingsFromPathAsUnit = vi.fn(function (this: unknown) {
+				expect(this).toBe(mockProvider)
+				return importResult
+			})
+			const importPromise = autoImportSettings(mockOutputChannel, {
+				providerSettingsManager: mockProviderSettingsManager,
+				contextProxy: mockContextProxy,
+				customModesManager: mockCustomModesManager,
+				provider: mockProvider,
+			})
+			await vi.waitFor(() => expect(mockProvider.importSettingsFromPathAsUnit).toHaveBeenCalledOnce())
+			expect(mockProvider.importSettingsFromPathAsUnit).toHaveBeenCalledWith("/home/user/Documents/config.json")
+			expect(vscode.window.showInformationMessage).not.toHaveBeenCalled()
+			expect(vscode.window.showWarningMessage).not.toHaveBeenCalled()
+			expect(fsPromises.readFile).not.toHaveBeenCalled()
+			expect(mockProviderSettingsManager.export).not.toHaveBeenCalled()
+			expect(mockProviderSettingsManager.import).not.toHaveBeenCalled()
+			resolveImport(
+				success
+					? { success: true, providerProfiles: {}, globalSettings: {} }
+					: { success: false, error: "Mode failure" },
+			)
+			await importPromise
+			if (success) {
+				expect(vscode.window.showInformationMessage).toHaveBeenCalledWith("info.auto_import_success")
+			} else {
+				expect(vscode.window.showWarningMessage).toHaveBeenCalledWith("warnings.auto_import_failed")
+				expect(mockOutputChannel.appendLine).toHaveBeenCalledWith(
+					"[AutoImport] Failed to import settings: Mode failure",
+				)
+			}
+		},
+	)
+
 	it("should handle invalid JSON gracefully", async () => {
 		const settingsPath = "~/config.json"
 		vi.mocked(vscode.workspace.getConfiguration).mockReturnValue({

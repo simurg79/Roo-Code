@@ -1063,7 +1063,7 @@ describe("importExport", () => {
 
 			expect(mockProviderSettingsManager.export).toHaveBeenCalled()
 			expect(mockContextProxy.export).toHaveBeenCalled()
-			expect(fs.mkdir).toHaveBeenCalledWith("/mock/path", { recursive: true })
+			expect(fs.mkdir).not.toHaveBeenCalled()
 
 			expect(safeWriteJson).toHaveBeenCalledWith("/mock/path/roo-code-settings.json", {
 				providerProfiles: mockProviderProfiles,
@@ -1126,14 +1126,14 @@ describe("importExport", () => {
 			expect(vscode.window.showSaveDialog).toHaveBeenCalled()
 			expect(mockProviderSettingsManager.export).toHaveBeenCalled()
 			expect(mockContextProxy.export).toHaveBeenCalled()
-			expect(fs.mkdir).toHaveBeenCalledWith("/mock/path", { recursive: true })
+			expect(fs.mkdir).not.toHaveBeenCalled()
 			expect(safeWriteJson).toHaveBeenCalled() // safeWriteJson is called, but it will throw
 			// The error is caught and the function exits silently.
 			// Optionally, ensure no error message was shown if that's part of "silent"
 			// expect(vscode.window.showErrorMessage).not.toHaveBeenCalled();
 		})
 
-		it("should handle errors during directory creation", async () => {
+		it("should leave directory creation to safeWriteJson", async () => {
 			;(vscode.window.showSaveDialog as Mock).mockResolvedValue({
 				fsPath: "/mock/path/roo-code-settings.json",
 			})
@@ -1145,7 +1145,7 @@ describe("importExport", () => {
 			})
 
 			mockContextProxy.export.mockResolvedValue({ mode: "code" })
-			;(fs.mkdir as Mock).mockRejectedValue(new Error("Directory creation error"))
+			;(safeWriteJson as Mock).mockRejectedValueOnce(new Error("Directory creation error"))
 
 			await exportSettings({
 				providerSettingsManager: mockProviderSettingsManager,
@@ -1155,8 +1155,8 @@ describe("importExport", () => {
 			expect(vscode.window.showSaveDialog).toHaveBeenCalled()
 			expect(mockProviderSettingsManager.export).toHaveBeenCalled()
 			expect(mockContextProxy.export).toHaveBeenCalled()
-			expect(fs.mkdir).toHaveBeenCalled()
-			expect(safeWriteJson).not.toHaveBeenCalled() // Should not be called since mkdir failed.
+			expect(fs.mkdir).not.toHaveBeenCalled()
+			expect(safeWriteJson).toHaveBeenCalled()
 		})
 
 		it("should use the correct default save location", async () => {

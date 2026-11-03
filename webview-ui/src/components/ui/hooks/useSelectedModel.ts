@@ -4,6 +4,7 @@ import {
 	type ModelInfo,
 	type ModelRecord,
 	type RouterModels,
+	type ExtensionMessage,
 	anthropicModels,
 	bedrockModels,
 	deepSeekModels,
@@ -38,6 +39,8 @@ import { useOpenRouterModelProviders } from "./useOpenRouterModelProviders"
 import { useLmStudioModels } from "./useLmStudioModels"
 import { useOllamaModels } from "./useOllamaModels"
 
+import { useVsCodeLmModels } from "./useVsCodeLmModels"
+
 /**
  * Helper to get a validated model ID for dynamic providers.
  * Returns the configured model ID if it exists in the available models, otherwise returns the default.
@@ -68,6 +71,7 @@ export const useSelectedModel = (apiConfiguration?: ProviderSettings) => {
 	const openRouterModelProviders = useOpenRouterModelProviders(openRouterModelId)
 	const lmStudioModels = useLmStudioModels(lmStudioModelId)
 	const ollamaModels = useOllamaModels(ollamaModelId)
+	const vsCodeLmModels = useVsCodeLmModels(activeProvider === "vscode-lm")
 
 	// Compute readiness only for the data actually needed for the selected provider
 	const needRouterModels = shouldFetchRouterModels
@@ -98,6 +102,7 @@ export const useSelectedModel = (apiConfiguration?: ProviderSettings) => {
 					openRouterModelProviders: (openRouterModelProviders.data || {}) as Record<string, ModelInfo>,
 					lmStudioModels: (lmStudioModels.data || undefined) as ModelRecord | undefined,
 					ollamaModels: (ollamaModels.data || undefined) as ModelRecord | undefined,
+					vsCodeLmModels: vsCodeLmModels.data,
 				})
 			: { id: getProviderDefaultModelId(activeProvider ?? "openrouter"), info: undefined }
 
@@ -125,6 +130,7 @@ function getSelectedModel({
 	openRouterModelProviders,
 	lmStudioModels,
 	ollamaModels,
+	vsCodeLmModels,
 }: {
 	provider: ProviderName
 	apiConfiguration: ProviderSettings
@@ -132,6 +138,7 @@ function getSelectedModel({
 	openRouterModelProviders: Record<string, ModelInfo>
 	lmStudioModels: ModelRecord | undefined
 	ollamaModels: ModelRecord | undefined
+	vsCodeLmModels: ExtensionMessage["vsCodeLmModels"]
 }): { id: string; info: ModelInfo | undefined } {
 	// the `undefined` case are used to show the invalid selection to prevent
 	// users from seeing the default model if their selection is invalid
@@ -307,13 +314,20 @@ function getSelectedModel({
 			// contextWindow MUST equal maxInputTokens: that is the exact value the gate consumes via
 			// getModel().info.contextWindow = Math.max(0, client.maxInputTokens) in src/api/providers/vscode-lm.ts,
 			// so the UI bar and the condense gate share a single source of truth.
+			const selector = apiConfiguration.vsCodeLmModelSelector
+			const matches = selector
+				? vsCodeLmModels?.filter((model) =>
+						(["id", "vendor", "family", "version"] as const).every(
+							(field) => selector[field] === undefined || selector[field] === model[field],
+						),
+					)
+				: undefined
+			const supportsImages = matches?.length === 1 ? matches[0].supportsImages : undefined
 			const info: ModelInfo = {
 				...openAiModelInfoSaneDefaults,
 				...listedModel,
 				contextWindow: listedModel.maxInputTokens,
-				// The fallback row supplies a usable window, but its image capability is unverified for an
-				// unlisted family, so default to false to match the provider's own resolution.
-				supportsImages: vscodeLlmModels[modelFamily as keyof typeof vscodeLlmModels]?.supportsImages ?? false,
+				supportsImages: typeof supportsImages === "boolean" ? supportsImages : undefined,
 			}
 			return { id, info }
 		}
