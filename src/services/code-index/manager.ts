@@ -1,7 +1,6 @@
 import * as vscode from "vscode"
 import { ContextProxy } from "../../core/config/ContextProxy"
-import { VectorStoreSearchResult } from "./interfaces"
-import { IndexingState } from "./interfaces/manager"
+import { IndexingState, type CodeIndexSearchResponse } from "./interfaces/manager"
 import { CodeIndexConfigManager } from "./config-manager"
 import { CodeIndexStateManager } from "./state-manager"
 import { CodeIndexServiceFactory } from "./service-factory"
@@ -16,6 +15,9 @@ import { t } from "../../i18n"
 import { IndexWriteGate } from "./index-write-gate"
 
 import { GenerationAllocator } from "./generation-allocator"
+import { FileFailureRegistry } from "./file-failure-registry"
+import { codeIndexLog } from "./code-index-log"
+import type { FailedFileStatus, FailedFileSummary } from "@roo-code/types"
 
 export class CodeIndexManager {
 	// --- Singleton Implementation ---
@@ -40,6 +42,13 @@ export class CodeIndexManager {
 	private currentAttempt = 0
 	private readonly idleStop = Promise.resolve()
 	private clearing: Promise<void> = Promise.resolve()
+	private startInFlight?: Promise<void>
+	private servicesRestartPending = false
+	private startupFailureMessage?: string
+	private startupEpoch = 0
+	public readonly fileFailureRegistry = new FileFailureRegistry()
+	private readonly progressEmitter = new vscode.EventEmitter<ReturnType<CodeIndexManager["getCurrentStatus"]>>()
+	private readonly statusSubscriptions: vscode.Disposable[] = []
 
 	public static getInstance(context: vscode.ExtensionContext, workspacePath?: string): CodeIndexManager | undefined {
 		// Resolve the workspace folder to get both fsPath and the real URI
@@ -100,6 +109,11 @@ export class CodeIndexManager {
 		this._folderUri = folderUri
 		this.context = context
 		this._stateManager = new CodeIndexStateManager()
+		this.configureDiagnostics()
+		this.statusSubscriptions.push(
+			this._stateManager.onProgressUpdate(() => this.progressEmitter.fire(this.getCurrentStatus())),
+			this.fileFailureRegistry.onDidChange(() => this.progressEmitter.fire(this.getCurrentStatus())),
+		)
 	}
 
 	// --- Public API ---
@@ -119,12 +133,17 @@ export class CodeIndexManager {
 	}
 
 	public async setWorkspaceEnabled(enabled: boolean): Promise<void> {
+		const wasEnabled = this.isWorkspaceEnabled
 		await this.context.workspaceState.update(this._workspaceEnabledKey(), enabled)
+		if (enabled && !wasEnabled) this.fileFailureRegistry.resetAllBudgets()
 		if (!enabled) {
 			this.disabledSinceFailure = true
+			this.startupEpoch++
+			if (!this._orchestrator) this.currentAttempt++
 			void this.stopWatcher()
 		} else if (this.disabledSinceFailure) {
 			this.parserFailed = false
+			this.startupFailureMessage = undefined
 			this.disabledSinceFailure = false
 		}
 	}
@@ -138,7 +157,7 @@ export class CodeIndexManager {
 	}
 
 	public get onProgressUpdate() {
-		return this._stateManager.onProgressUpdate
+		return this.progressEmitter.event
 	}
 
 	private assertInitialized() {
@@ -148,11 +167,7 @@ export class CodeIndexManager {
 	}
 
 	public get state(): IndexingState {
-		if (!this.isFeatureEnabled) {
-			return "Standby"
-		}
-		this.assertInitialized()
-		return this._orchestrator!.state
+		return this.getCurrentStatus().systemStatus
 	}
 
 	public get isFeatureEnabled(): boolean {
@@ -177,13 +192,14 @@ export class CodeIndexManager {
 	 * Must be called before using any other methods.
 	 * @returns Object indicating if a restart is needed
 	 */
-	public async initialize(contextProxy: ContextProxy): Promise<{ requiresRestart: boolean }> {
+	public async initialize(contextProxy: ContextProxy, autoStart = true): Promise<{ requiresRestart: boolean }> {
 		// 1. ConfigManager Initialization and Configuration Loading
 		if (!this._configManager) {
 			this._configManager = new CodeIndexConfigManager(contextProxy)
 		}
 		// Load configuration once to get current state and restart requirements
 		const { requiresRestart } = await this._configManager.loadConfiguration()
+		this.configureDiagnostics()
 
 		// 2. Check if feature is enabled
 		if (!this.isFeatureEnabled) {
@@ -207,10 +223,15 @@ export class CodeIndexManager {
 
 		if (this.disabledSinceFailure) {
 			this.parserFailed = false
+			this.startupFailureMessage = undefined
 			this.disabledSinceFailure = false
+			this.fileFailureRegistry.resetAllBudgets()
 		}
-		if (this.parserFailed) {
-			this._stateManager.setSystemState("Error", this.parserFailureMessage)
+		if (autoStart && (this.parserFailed || this.startupFailureMessage)) {
+			this._stateManager.setSystemState(
+				"Error",
+				this.parserFailed ? this.parserFailureMessage : this.startupFailureMessage,
+			)
 			return { requiresRestart }
 		}
 
@@ -220,6 +241,8 @@ export class CodeIndexManager {
 			await this._cacheManager.initialize()
 			this.writeGate.recover(Object.keys(this._cacheManager.getOpenFiles()), this._cacheManager.loadedAt)
 		}
+
+		if (!autoStart) return { requiresRestart }
 
 		// 6. Determine if Core Services Need Recreation
 		const needsServiceRecreation = !this._serviceFactory || requiresRestart || this.servicesStopped
@@ -234,49 +257,88 @@ export class CodeIndexManager {
 			(needsServiceRecreation && (!this._orchestrator || this._orchestrator.state !== "Indexing"))
 
 		if (shouldStartOrRestartIndexing) {
-			this._orchestrator?.startIndexing()
+			await this.scheduleScan()
 		}
 
 		return { requiresRestart }
 	}
 
-	/**
-	 * Initiates the indexing process (initial scan and starts watcher).
-	 * Automatically recovers from error state if needed before starting.
-	 *
-	 * @important This method should NEVER be awaited as it starts a long-running background process.
-	 * The indexing will continue asynchronously and progress will be reported through events.
-	 */
-	public async startIndexing(): Promise<void> {
-		if (!this.isFeatureEnabled || !this.isWorkspaceEnabled) {
-			return
-		}
-
-		if (
-			this.parserFailed ||
-			this.servicesStopped ||
-			this._orchestrator?.state === "Indexed" ||
-			this._orchestrator?.state === "Standby"
-		) {
+	/** Resolves after startup, without waiting for the background scan. */
+	public startIndexing(contextProxy?: ContextProxy): Promise<void> {
+		codeIndexLog.info("Start requested", { attempt: this.currentAttempt, overlapping: !!this.startInFlight })
+		if (this.startInFlight) return this.startInFlight
+		if (this._orchestrator?.isScanning) return this._orchestrator.startupResult
+		return this.runStartup(async (epoch) => {
+			if (contextProxy) await this.initialize(contextProxy, false)
+			if (epoch !== this.startupEpoch || !this.isFeatureEnabled || !this.isWorkspaceEnabled) return
 			this.parserFailed = false
+			this.startupFailureMessage = undefined
 			await this._recreateServices()
-		} else if (this.getCurrentStatus().systemStatus === "Error") {
-			await this.recoverFromError()
+			if (epoch !== this.startupEpoch || !this.isWorkspaceEnabled) return
+			this.fileFailureRegistry.resetAllBudgets()
+			this.assertInitialized()
+		})
+	}
 
-			// After recovery, we need to reinitialize since recoverFromError clears all services
-			// This will be handled by the caller (webviewMessageHandler) checking isInitialized
-			return
-		}
+	private runStartup(operation: (epoch: number) => Promise<void>): Promise<void> {
+		if (this.startInFlight) return this.startInFlight
+		const epoch = this.startupEpoch
+		const startup = Promise.resolve().then(async () => {
+			try {
+				await operation(epoch)
+				while (
+					epoch === this.startupEpoch &&
+					!this.parserFailed &&
+					this.isFeatureEnabled &&
+					this.isWorkspaceEnabled
+				) {
+					if (this.servicesRestartPending) {
+						this.servicesRestartPending = false
+						await this._recreateServices()
+						continue
+					}
+					await this.scheduleScan()
+					if (!this.servicesRestartPending) break
+				}
+			} catch (error) {
+				if (epoch !== this.startupEpoch) {
+					codeIndexLog.info("Startup superseded", { attempt: this.currentAttempt })
+					return
+				}
+				this.startupFailureMessage = codeIndexLog.redact(error instanceof Error ? error.message : String(error))
+				this._stateManager.setSystemState("Error", this.startupFailureMessage)
+				codeIndexLog.error("Indexing startup failed", { error, attempt: this.currentAttempt })
+				throw error
+			}
+		})
+		this.startInFlight = startup.finally(() => {
+			this.startInFlight = undefined
+			this.servicesRestartPending = false
+		})
+		return this.startInFlight
+	}
 
-		this.assertInitialized()
-		await this._orchestrator!.startIndexing()
+	private async scheduleScan(): Promise<void> {
+		const orchestrator = this._orchestrator
+		if (!orchestrator) return
+		const scan = orchestrator.startIndexing()
+		void Promise.resolve(scan).catch((error) => {
+			if (orchestrator !== this._orchestrator) return
+			codeIndexLog.error("Background scan failed", { error, attempt: this.currentAttempt })
+		})
+		await orchestrator.startupResult
 	}
 
 	/**
 	 * Stops any in-progress indexing operation and the file watcher.
 	 */
 	public stopIndexing(): Promise<void> {
-		if (!this._orchestrator) return this.idleStop
+		codeIndexLog.info("Stop requested", { attempt: this.currentAttempt, source: "stop-indexing" })
+		this.startupEpoch++
+		if (!this._orchestrator) {
+			if (this.startInFlight) this.currentAttempt++
+			return this.idleStop
+		}
 		const stopped = this._orchestrator.stopIndexing()
 		this.servicesStopped = this._orchestrator.stopped
 		return stopped
@@ -286,6 +348,9 @@ export class CodeIndexManager {
 	 * Stops the file watcher and potentially cleans up resources.
 	 */
 	public stopWatcher(): Promise<void> {
+		codeIndexLog.info("Stop requested", { attempt: this.currentAttempt, source: "stop-watcher" })
+		this.startupEpoch++
+		if (this.startInFlight) this.currentAttempt++
 		if (!this._orchestrator) return this.idleStop
 		this.servicesStopped = true
 		return this._orchestrator.stopWatcher()
@@ -319,7 +384,7 @@ export class CodeIndexManager {
 			this._stateManager.setSystemState("Standby", "")
 		} catch (error) {
 			// Log error but continue with recovery - clearing service instances is more important
-			console.error("Failed to clear error state during recovery:", error)
+			codeIndexLog.error("Failed to clear error state during recovery", { error })
 		} finally {
 			// Force re-initialization by clearing service instances
 			// This ensures a clean slate even if state update failed
@@ -339,6 +404,8 @@ export class CodeIndexManager {
 	public dispose(): void {
 		this.currentAttempt++
 		void this.stopWatcher()
+		this.statusSubscriptions.forEach((subscription) => subscription?.dispose())
+		this.progressEmitter.dispose()
 		this._stateManager.dispose()
 	}
 
@@ -360,17 +427,68 @@ export class CodeIndexManager {
 
 	public getCurrentStatus() {
 		const status = this._stateManager.getCurrentStatus()
+		const failedFiles: FailedFileStatus[] = this.fileFailureRegistry.list().map((failure) => ({
+			path: codeIndexLog.redact(
+				path.isAbsolute(failure.path) ? path.relative(this.workspacePath, failure.path) : failure.path,
+			),
+			activity: failure.activity,
+			reason: codeIndexLog.redact(failure.reason),
+			state:
+				this.servicesStopped || !this.isWorkspaceEnabled || !this.isFeatureEnabled
+					? "exhausted"
+					: failure.state,
+		}))
+		const representative = failedFiles.find((failure) => failure.state === "retrying") ?? failedFiles[0]
+		const failedFileSummary: FailedFileSummary | undefined = representative
+			? { ...representative, count: failedFiles.length }
+			: undefined
+		const stopped = this.servicesStopped || !this.isWorkspaceEnabled || !this.isFeatureEnabled
+		const retrying = failedFiles.some((failure) => failure.state === "retrying")
+		const recoveryMessage =
+			failedFiles.length > 0 && status?.systemStatus !== "Error" && status?.systemStatus !== "Stopping"
+				? t(
+						stopped
+							? "embeddings:orchestrator.indexingStoppedPartial"
+							: retrying
+								? "embeddings:orchestrator.indexingFilesRetrying"
+								: "embeddings:orchestrator.indexingFilesFailed",
+					)
+				: status?.message
 		return {
 			...status,
+			...(status?.systemStatus !== "Error" && status?.systemStatus !== "Stopping" && failedFiles.length > 0
+				? {
+						systemStatus: (this.servicesStopped || !this.isWorkspaceEnabled || !this.isFeatureEnabled
+							? "Standby"
+							: this._orchestrator?.isActive ||
+								  failedFiles.some((failure) => failure.state === "retrying")
+								? "Indexing"
+								: "Standby") as IndexingState,
+					}
+				: {}),
+			...(this.parserFailed || this.startupFailureMessage
+				? {
+						systemStatus: "Error" as const,
+						message: codeIndexLog.redact(
+							this.parserFailed ? this.parserFailureMessage : this.startupFailureMessage!,
+						),
+					}
+				: {}),
+			...(!this.parserFailed && !this.startupFailureMessage && recoveryMessage !== undefined
+				? { message: codeIndexLog.redact(recoveryMessage) }
+				: {}),
+			failedFiles,
+			failedFileSummary,
 			workspacePath: this.workspacePath,
 			workspaceEnabled: this.isWorkspaceEnabled,
 			autoEnableDefault: this.autoEnableDefault,
 		}
 	}
 
-	public async searchIndex(query: string, directoryPrefix?: string): Promise<VectorStoreSearchResult[]> {
+	public async searchIndex(query: string, directoryPrefix?: string): Promise<CodeIndexSearchResponse> {
 		if (!this.isFeatureEnabled) {
-			return []
+			const failedFiles = this.fileFailureRegistry.list().map((failure) => failure.path)
+			return { results: [], partial: failedFiles.length > 0, failedFiles }
 		}
 		this.assertInitialized()
 		return this._searchService!.searchIndex(query, directoryPrefix)
@@ -382,11 +500,14 @@ export class CodeIndexManager {
 	 */
 	private async _recreateServices(): Promise<void> {
 		const attempt = ++this.currentAttempt
+		this._stateManager.setDiagnosticContext({ source: "manager", attempt })
+		codeIndexLog.info("Rebuild requested", { attempt })
 		const isCurrentAttempt = () => this.currentAttempt === attempt
 		this.generationAllocator ??= new GenerationAllocator(this._cacheManager!)
 		// Stop watcher if it exists
 		if (this._orchestrator) {
-			void this.stopWatcher()
+			this.servicesStopped = true
+			void this._orchestrator.stopWatcher()
 		}
 		// Clear existing services to ensure clean state
 		this._orchestrator = undefined
@@ -399,6 +520,7 @@ export class CodeIndexManager {
 			this._cacheManager!,
 			this.writeGate,
 			this.generationAllocator,
+			this.fileFailureRegistry,
 		)
 
 		const ignoreInstance = ignore()
@@ -417,7 +539,7 @@ export class CodeIndexManager {
 			ignoreInstance.add(".gitignore")
 		} catch (error) {
 			// Should never happen: reading file failed even though it exists
-			console.error("Unexpected error loading .gitignore:", error)
+			codeIndexLog.debug("Could not load .gitignore", { error })
 		}
 
 		// Create RooIgnoreController instance
@@ -426,7 +548,10 @@ export class CodeIndexManager {
 		// Clear publishes Standby before deleteCollection() settles; a retry must not write concurrently.
 		await this.clearing
 
-		if (!isCurrentAttempt()) return
+		if (!isCurrentAttempt()) {
+			codeIndexLog.info("Rebuild superseded", { attempt })
+			return
+		}
 
 		// (Re)Create shared service instances
 		const { embedder, vectorStore, scanner, fileWatcher, parser } = this._serviceFactory.createServices(
@@ -441,6 +566,7 @@ export class CodeIndexManager {
 		if (!isCurrentAttempt()) {
 			parser?.stop()
 			fileWatcher.dispose()
+			codeIndexLog.info("Rebuild superseded", { attempt })
 			return
 		}
 		if (!validationResult.valid) {
@@ -472,6 +598,7 @@ export class CodeIndexManager {
 			this.writeGate,
 			this.generationAllocator,
 			isCurrentAttempt,
+			this.fileFailureRegistry,
 		)
 		this.servicesStopped = false
 
@@ -481,10 +608,31 @@ export class CodeIndexManager {
 			this._stateManager,
 			embedder,
 			vectorStore,
+			this.fileFailureRegistry,
 		)
 
 		// Clear any error state after successful recreation
 		this._stateManager.setSystemState("Standby", "")
+	}
+
+	private configureDiagnostics(): void {
+		const configurations = [...new Set([...CodeIndexManager.instances.values(), this])]
+			.map((manager) => manager._configManager?.getConfig?.())
+			.filter((config) => config !== undefined)
+		codeIndexLog.configure({
+			workspacePaths: [...CodeIndexManager.instances.keys(), this.workspacePath],
+			secrets: configurations
+				.flatMap((config) => [
+					config.openAiOptions?.openAiNativeApiKey,
+					config.openAiCompatibleOptions?.apiKey,
+					config.geminiOptions?.apiKey,
+					config.mistralOptions?.apiKey,
+					config.vercelAiGatewayOptions?.apiKey,
+					config.openRouterOptions?.apiKey,
+					config.qdrantApiKey,
+				])
+				.filter((secret): secret is string => !!secret),
+		})
 	}
 
 	/**
@@ -496,6 +644,8 @@ export class CodeIndexManager {
 	public async handleSettingsChange(): Promise<void> {
 		if (this._configManager) {
 			const { requiresRestart } = await this._configManager.loadConfiguration()
+
+			this.configureDiagnostics()
 
 			const isFeatureEnabled = this.isFeatureEnabled
 			const isFeatureConfigured = this.isFeatureConfigured
@@ -509,11 +659,20 @@ export class CodeIndexManager {
 
 			if (this.disabledSinceFailure) {
 				this.parserFailed = false
+				this.startupFailureMessage = undefined
 				this.disabledSinceFailure = false
+				this.fileFailureRegistry.resetAllBudgets()
 			}
 			if (this.parserFailed) return
-			if ((requiresRestart || this.servicesStopped) && isFeatureEnabled && isFeatureConfigured) {
-				try {
+			if (this.startInFlight) {
+				// A service set already being built may have captured the previous settings.
+				this.servicesRestartPending ||= requiresRestart
+				return this.startInFlight
+			}
+			const startupFailed = this.startupFailureMessage !== undefined
+			if ((requiresRestart || this.servicesStopped || startupFailed) && isFeatureEnabled && isFeatureConfigured) {
+				return this.runStartup(async (epoch) => {
+					this.startupFailureMessage = undefined
 					// Ensure cacheManager is initialized before recreating services
 					if (!this._cacheManager) {
 						this._cacheManager = new CacheManager(this.context, this.workspacePath)
@@ -524,15 +683,9 @@ export class CodeIndexManager {
 						)
 					}
 
-					// Recreate services with new configuration
+					if (epoch !== this.startupEpoch) return
 					await this._recreateServices()
-					if (this.isWorkspaceEnabled) void this._orchestrator?.startIndexing()
-				} catch (error) {
-					// Error state already set in _recreateServices
-					console.error("Failed to recreate services:", error)
-					// Re-throw the error so the caller knows validation failed
-					throw error
-				}
+				})
 			}
 		}
 	}

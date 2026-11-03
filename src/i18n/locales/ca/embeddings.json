@@ -73,6 +73,8 @@
 		"indexingRequiresWorkspace": "Indexació requereix una carpeta de workspace oberta",
 		"indexingStopping": "S'està aturant la indexació...",
 		"indexingStopped": "Indexació aturada per l'usuari.",
-		"indexingStoppedPartial": "Indexació aturada. Dades d'índex parcials conservades."
+		"indexingStoppedPartial": "Indexació aturada. Dades d'índex parcials conservades.",
+		"indexingFilesRetrying": "S'estan reintentant els fitxers fallits. Índex parcial disponible.",
+		"indexingFilesFailed": "Queden errors en fitxers. No hi ha reintents automàtics pendents. Índex parcial disponible."
 	}
 }

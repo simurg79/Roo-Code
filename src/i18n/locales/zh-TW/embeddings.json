@@ -73,6 +73,8 @@
 		"indexingRequiresWorkspace": "索引需要開啟的工作區資料夾",
 		"indexingStopping": "正在停止索引...",
 		"indexingStopped": "使用者已停止索引。",
-		"indexingStoppedPartial": "索引已停止。部分索引資料已保留。"
+		"indexingStoppedPartial": "索引已停止。部分索引資料已保留。",
+		"indexingFilesRetrying": "正在重試失敗的檔案。部分索引可用。",
+		"indexingFilesFailed": "仍有檔案失敗。沒有待執行的自動重試。部分索引可用。"
 	}
 }

@@ -1,3 +1,4 @@
+import "../../__tests__/mock-code-index-log"
 import * as path from "path"
 import * as vscode from "vscode"
 import { stat } from "fs/promises"
@@ -16,6 +17,8 @@ import { CodeBlock } from "../../interfaces"
 import { listFiles } from "../../../glob/list-files"
 import { generateRelativeFilePath } from "../../shared/get-relative-path"
 import { INDEX_STOP_LIMIT_MS, PARSE_TIMEOUT_MS, PARSING_CONCURRENCY } from "../../constants"
+import { FileFailureRegistry } from "../../file-failure-registry"
+import { codeIndexLog } from "../../code-index-log"
 
 vi.mock("../../../../i18n", () => ({ t: (key: string) => key }))
 
@@ -95,9 +98,11 @@ describe("DirectoryScanner durable per-file recovery", () => {
 	let ignore: any
 	let scanner: DirectoryScanner
 	let listedPaths: string[]
+	let failures: FileFailureRegistry
 
 	const drain = () => vi.advanceTimersByTimeAsync(0)
-	const createScanner = () => new DirectoryScanner(embedder, store, parser, cache, ignore, 1, gate, generations)
+	const createScanner = () =>
+		new DirectoryScanner(embedder, store, parser, cache, ignore, 1, gate, generations, failures)
 	const createOrchestrator = (isCurrent = () => true, sharedState?: any) => {
 		const state = sharedState ?? {
 			state: "Standby",
@@ -161,6 +166,7 @@ describe("DirectoryScanner durable per-file recovery", () => {
 		return point
 	}
 	const reload = async () => {
+		failures = new FileFailureRegistry()
 		cache = new CacheManager(context, workspacePath)
 		await cache.initialize()
 		generations = new GenerationAllocator(cache)
@@ -187,6 +193,7 @@ describe("DirectoryScanner durable per-file recovery", () => {
 			})
 		listedPaths = [fileA]
 		vi.mocked(listFiles).mockImplementation(async () => [[...listedPaths], false])
+		failures = new FileFailureRegistry()
 		cache = new CacheManager(context, workspacePath)
 		gate = new IndexWriteGate()
 		generations = new GenerationAllocator(cache)
@@ -221,6 +228,76 @@ describe("DirectoryScanner durable per-file recovery", () => {
 		vi.useRealTimers()
 	})
 
+	it("recovers a scan store request without reembedding and logs every retry plus its summary", async () => {
+		store.upsertPoints.mockRejectedValueOnce(Object.assign(new Error("unavailable"), { status: 503 }))
+		store.upsertPoints.mockRejectedValueOnce(Object.assign(new Error("unavailable"), { status: 503 }))
+		const pending = scanner.scanDirectory(workspacePath)
+		await vi.advanceTimersByTimeAsync(1500 + LATE_WRITE_GRACE_MS)
+		expect((await pending).incompleteFiles).toEqual([])
+		expect(embedder.createEmbeddings).toHaveBeenCalledOnce()
+		expect(store.upsertPoints).toHaveBeenCalledTimes(3)
+		const batch = vi.mocked(codeIndexLog.createFailureBatch).mock.results.at(-1)!.value
+		expect(batch.record.mock.calls.map(([failure]: any[]) => failure.attempt)).toEqual([1, 2])
+		expect(batch.flush).toHaveBeenCalledOnce()
+		expect(codeIndexLog.info).toHaveBeenCalledWith(
+			"Scan summary",
+			expect.objectContaining({
+				processed: 1,
+				skipped: 0,
+				failed: 0,
+				blocksFound: 1,
+				blocksIndexed: 1,
+				partialReason: undefined,
+			}),
+		)
+	})
+
+	it.each(["read", "parse", "fatal"])("records %s failures before ending the scan", async (activity) => {
+		if (activity === "read") vi.mocked(stat).mockRejectedValueOnce(new Error("read failed"))
+		else
+			parser.parseFile.mockRejectedValueOnce(
+				activity === "fatal" ? new ParserFatalError("parser-abort", fileA) : new Error("parse failed"),
+			)
+		const pending = scanner.scanDirectory(workspacePath, vi.fn())
+		if (activity === "fatal") await expect(pending).rejects.toBeInstanceOf(ParserFatalError)
+		else expect((await pending).incompleteFiles).toContain(fileA)
+		expect(failures.list()).toEqual([
+			expect.objectContaining({
+				path: "a.ts",
+				activity: activity === "read" ? "read" : "parse",
+				attempt: 1,
+				state: "exhausted",
+				classification: "permanent",
+			}),
+		])
+	})
+
+	it("blocks unchanged exhausted files in later scans but renews only changed paths", async () => {
+		parser.parseFile.mockRejectedValueOnce(new Error("parse failed"))
+		await scanner.scanDirectory(workspacePath, vi.fn())
+		await scanner.scanDirectory(workspacePath, vi.fn())
+		expect(parser.parseFile).toHaveBeenCalledOnce()
+		listedPaths = [fileA, fileB]
+		await scanner.scanDirectory(workspacePath, vi.fn())
+		expect(parser.parseFile.mock.calls.map(([filePath]: string[]) => filePath)).toEqual([fileA, fileB])
+		expect(failures.isExhausted("a.ts", contentHash, "parse")).toBe(true)
+	})
+
+	it("removes a registry-only deleted source and retains failed removal until explicit retry", async () => {
+		vi.mocked(stat).mockRejectedValueOnce(new Error("read failed"))
+		await scanner.scanDirectory(workspacePath, vi.fn())
+		expect(cache.getTrackedPaths()).toEqual([])
+		listedPaths = []
+		store.deletePointsByFilePath.mockRejectedValueOnce(new Error("delete failed"))
+		await scanner.scanDirectory(workspacePath, vi.fn())
+		await scanner.scanDirectory(workspacePath, vi.fn())
+		expect(store.deletePointsByFilePath).toHaveBeenCalledOnce()
+		expect(failures.list()[0]).toMatchObject({ activity: "delete", revision: "removed" })
+		failures.resetAllBudgets()
+		await scanner.scanDirectory(workspacePath)
+		expect(failures.list()).toEqual([])
+	})
+
 	it.each(["cancel", "disable", "fatal"])("T5 preserves completed A while B is in flight on %s", async (stop) => {
 		listedPaths = [fileA, fileB]
 		const held = deferred<CodeBlock[]>()
@@ -245,6 +322,7 @@ describe("DirectoryScanner durable per-file recovery", () => {
 		await pending
 		parser.parseFile.mockImplementation(async (filePath: string) => blocks(filePath))
 		embedder.createEmbeddings.mockClear()
+		failures.resetAllBudgets()
 		await scanner.scanDirectory(workspacePath)
 		expect(embedder.createEmbeddings).toHaveBeenCalledTimes(1)
 		expect(scanner.hasIncompleteFiles).toBe(false)
@@ -318,6 +396,7 @@ describe("DirectoryScanner durable per-file recovery", () => {
 		} else {
 			expect(cache.getHash(fileA)).toBeUndefined()
 			expect(cache.getOpenFiles()[fileA]).toBe(true)
+			failures.resetAllBudgets()
 			await scanner.scanDirectory(workspacePath)
 			expect(filePoints(fileA)).toHaveLength(3)
 			expect(cache.getHash(fileA)).toBe(contentHash)
@@ -390,6 +469,7 @@ describe("DirectoryScanner durable per-file recovery", () => {
 			const failed = await scanner.scanDirectory(workspacePath, vi.fn())
 			expect(failed.incompleteFiles).toEqual([fileA])
 			expect(cache.getOpenFiles()[fileA]).toBe(true)
+			failures.resetAllBudgets()
 			const result = await scanner.scanDirectory(workspacePath)
 			expect(result.incompleteFiles).toEqual([])
 			expect(filePoints(fileA)).toEqual([])
@@ -473,7 +553,7 @@ describe("DirectoryScanner durable per-file recovery", () => {
 			listedPaths = [fileA]
 			ignore.ignores.mockReturnValue(false)
 			const retry = createScanner().scanDirectory(workspacePath)
-			await vi.advanceTimersByTimeAsync(LATE_WRITE_GRACE_MS)
+			await vi.advanceTimersByTimeAsync(LATE_WRITE_GRACE_MS + INDEX_STOP_LIMIT_MS)
 			await retry
 			const currentIds = filePoints(fileA).map((point) => point.id)
 			expect(cache.getHash(fileA)).toBe(contentHash)
@@ -503,6 +583,7 @@ describe("DirectoryScanner durable per-file recovery", () => {
 		const progress = vi.fn()
 		const controller = new AbortController()
 		let finished = false
+		failures.resetAllBudgets()
 		const retry = scanner
 			.scanDirectory(workspacePath, vi.fn(), progress, undefined, controller.signal)
 			.then((result) => {
@@ -531,6 +612,7 @@ describe("DirectoryScanner durable per-file recovery", () => {
 			expect(result.incompleteFiles).toEqual([fileA])
 			expect(cache.getHash(fileA)).toBeUndefined()
 			for (const pointId of currentIds) expect(points.has(pointId)).toBe(true)
+			failures.resetAllBudgets()
 			await scanner.scanDirectory(workspacePath)
 			expect(filePoints(fileA)).toHaveLength(1)
 		} else {
@@ -716,6 +798,7 @@ describe("DirectoryScanner durable per-file recovery", () => {
 		expect(state.setSystemState).toHaveBeenLastCalledWith(
 			"Standby",
 			"embeddings:orchestrator.indexingStoppedPartial",
+			"stop",
 		)
 		worker.emit("message", { id: worker.requests[0].id, blocks: blocks(fileA) })
 		await orchestrator.startIndexing()
@@ -780,6 +863,7 @@ describe("DirectoryScanner durable per-file recovery", () => {
 			return count(filePath, generation)
 		})
 		const progress = vi.fn()
+		failures.resetAllBudgets()
 		const result = await scanner.scanDirectory(workspacePath, vi.fn(), progress)
 		expect(Date.now()).toBe(rejectedAt)
 		expect(result.incompleteFiles).toEqual([fileA])
@@ -789,6 +873,7 @@ describe("DirectoryScanner durable per-file recovery", () => {
 		expect(currentIds).toHaveLength(1)
 		expect(filePoints(fileA)).toHaveLength(2)
 		for (const pointId of currentIds) expect(points.has(pointId)).toBe(true)
+		failures.resetAllBudgets()
 		const retry = scanner.scanDirectory(workspacePath)
 		await vi.advanceTimersByTimeAsync(LATE_WRITE_GRACE_MS)
 		await retry
@@ -930,7 +1015,7 @@ describe("DirectoryScanner durable per-file recovery", () => {
 				if (outcome === "unrelated") {
 					expect(cache.getHash(fileB)).toBe(contentHash)
 					expect(filePoints(fileB).map((point) => point.id)).toEqual(unrelatedIds)
-					expect(retry.state.reportBlockIndexingProgress).toHaveBeenCalledWith(1, 2)
+					expect(retry.state.reportBlockIndexingProgress).toHaveBeenCalledWith(1, 2, "scan")
 				}
 			}
 			expect(verified).toEqual([{ at: expiryAt - 2, counts: { current: 1, other: 0 } }])
@@ -958,6 +1043,7 @@ describe("DirectoryScanner durable per-file recovery", () => {
 				expect(retry.state.setSystemState).toHaveBeenLastCalledWith(
 					"Standby",
 					"embeddings:orchestrator.indexingStoppedPartial",
+					"stop",
 				)
 				expect(cache.getHash(fileA)).toBeUndefined()
 				expect(cache.getOpenFiles()[fileA]).toBe(true)
@@ -1004,6 +1090,7 @@ describe("DirectoryScanner durable per-file recovery", () => {
 				expect(retry.state.setSystemState).toHaveBeenLastCalledWith(
 					"Standby",
 					"embeddings:orchestrator.indexingStoppedPartial",
+					"stop",
 				)
 				expect(cache.getHash(fileA)).toBeUndefined()
 				expect(cache.getOpenFiles()[fileA]).toBe(true)
@@ -1025,7 +1112,8 @@ describe("DirectoryScanner durable per-file recovery", () => {
 				expect(cache.getOpenFiles()[fileA]).toBe(true)
 				expect(retry.state.setSystemState).toHaveBeenLastCalledWith(
 					"Standby",
-					"embeddings:orchestrator.indexingStoppedPartial",
+					"embeddings:orchestrator.indexingFilesFailed",
+					"scan-end",
 				)
 				expect(store.markIndexingComplete).not.toHaveBeenCalled()
 			} else {

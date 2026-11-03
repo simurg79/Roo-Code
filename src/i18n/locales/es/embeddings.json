@@ -73,6 +73,8 @@
 		"indexingRequiresWorkspace": "La indexación requiere una carpeta de workspace abierta",
 		"indexingStopping": "Deteniendo la indexación...",
 		"indexingStopped": "Indexación detenida por el usuario.",
-		"indexingStoppedPartial": "Indexación detenida. Datos de índice parciales conservados."
+		"indexingStoppedPartial": "Indexación detenida. Datos de índice parciales conservados.",
+		"indexingFilesRetrying": "Reintentando los archivos fallidos. Índice parcial disponible.",
+		"indexingFilesFailed": "Quedan errores en archivos. No hay reintentos automáticos pendientes. Índice parcial disponible."
 	}
 }

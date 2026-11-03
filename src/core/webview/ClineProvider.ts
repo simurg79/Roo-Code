@@ -63,7 +63,6 @@ import { McpHub } from "../../services/mcp/McpHub"
 import { McpServerManager } from "../../services/mcp/McpServerManager"
 import { ShadowCheckpointService } from "../../services/checkpoints/ShadowCheckpointService"
 import { CodeIndexManager } from "../../services/code-index/manager"
-import type { IndexProgressUpdate } from "../../services/code-index/interfaces/manager"
 import { SkillsManager } from "../../services/skills/SkillsManager"
 
 import { fileExistsAtPath } from "../../utils/fs"
@@ -2573,14 +2572,12 @@ export class ClineProvider
 
 		// Subscribe to the new manager's progress updates if it exists
 		if (currentManager) {
-			this.codeIndexStatusSubscription = currentManager.onProgressUpdate((update: IndexProgressUpdate) => {
+			this.codeIndexStatusSubscription = currentManager.onProgressUpdate((update) => {
 				// Only send updates if this manager is still the current one
 				if (currentManager === this.getCurrentWorkspaceCodeIndexManager()) {
-					// Get the full status from the manager to ensure we have all fields correctly formatted
-					const fullStatus = currentManager.getCurrentStatus()
 					this.postMessageToWebview({
 						type: "indexingStatusUpdate",
-						values: fullStatus,
+						values: update,
 					})
 				}
 			})

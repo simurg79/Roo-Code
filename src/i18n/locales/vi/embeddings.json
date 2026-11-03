@@ -73,6 +73,8 @@
 		"indexingRequiresWorkspace": "Lập chỉ mục yêu cầu một thư mục workspace đang mở",
 		"indexingStopping": "Đang dừng lập chỉ mục...",
 		"indexingStopped": "Lập chỉ mục đã bị dừng bởi người dùng.",
-		"indexingStoppedPartial": "Lập chỉ mục đã dừng. Dữ liệu chỉ mục một phần được bảo toàn."
+		"indexingStoppedPartial": "Lập chỉ mục đã dừng. Dữ liệu chỉ mục một phần được bảo toàn.",
+		"indexingFilesRetrying": "Đang thử lại các tệp bị lỗi. Có thể dùng chỉ mục một phần.",
+		"indexingFilesFailed": "Vẫn còn tệp bị lỗi. Không có lần thử lại tự động nào đang chờ. Có thể dùng chỉ mục một phần."
 	}
 }

@@ -1,3 +1,4 @@
+import { codeIndexLog } from "../code-index-log"
 import { readFile } from "fs/promises"
 import { createHash } from "crypto"
 import * as path from "path"
@@ -62,7 +63,7 @@ export class CodeParser implements ICodeParser {
 				content = await readFile(filePath, "utf8")
 				fileHash = this.createFileHash(content)
 			} catch (error) {
-				console.error(`Error reading file ${filePath}:`, error)
+				codeIndexLog.error(`Error reading file ${filePath}:`, error)
 				return []
 			}
 		}
@@ -132,7 +133,7 @@ export class CodeParser implements ICodeParser {
 					await pendingLoad
 				} catch (error) {
 					if (isParserAbort(error)) throw error
-					console.error(`Error in pending parser load for ${filePath}:`, error)
+					codeIndexLog.error(`Error in pending parser load for ${filePath}:`, error)
 					return []
 				}
 			} else {
@@ -145,7 +146,7 @@ export class CodeParser implements ICodeParser {
 					}
 				} catch (error) {
 					if (isParserAbort(error)) throw error
-					console.error(`Error loading language parser for ${filePath}:`, error)
+					codeIndexLog.error(`Error loading language parser for ${filePath}:`, error)
 					return []
 				} finally {
 					this.pendingLoads.delete(ext)
@@ -155,7 +156,7 @@ export class CodeParser implements ICodeParser {
 
 		const language = this.loadedParsers[ext]
 		if (!language) {
-			console.warn(`No parser available for file extension: ${ext}`)
+			codeIndexLog.warn(`No parser available for file extension: ${ext}`)
 			return []
 		}
 

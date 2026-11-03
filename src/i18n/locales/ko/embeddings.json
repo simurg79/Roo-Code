@@ -73,6 +73,8 @@
 		"indexingRequiresWorkspace": "인덱싱에는 열린 워크스페이스 폴더가 필요합니다",
 		"indexingStopping": "인덱싱을 중지하는 중...",
 		"indexingStopped": "사용자에 의해 인덱싱이 중지되었습니다.",
-		"indexingStoppedPartial": "인덱싱이 중지되었습니다. 부분 인덱스 데이터가 보존되었습니다."
+		"indexingStoppedPartial": "인덱싱이 중지되었습니다. 부분 인덱스 데이터가 보존되었습니다.",
+		"indexingFilesRetrying": "실패한 파일을 다시 시도하고 있습니다. 부분 인덱스를 사용할 수 있습니다.",
+		"indexingFilesFailed": "파일 오류가 남아 있습니다. 대기 중인 자동 재시도가 없습니다. 부분 인덱스를 사용할 수 있습니다."
 	}
 }

@@ -1,4 +1,6 @@
+import { codeIndexLog } from "../code-index-log"
 import { OpenAI } from "openai"
+import type { TransientClass } from "../shared/indexing-errors"
 import { waitForRetry } from "./cancellation"
 import { IEmbedder, EmbeddingResponse, EmbedderInfo } from "../interfaces/embedder"
 import {
@@ -35,6 +37,7 @@ interface OpenRouterEmbeddingResponse {
  * through a single endpoint, automatically handling fallbacks and cost optimization.
  */
 export class OpenRouterEmbedder implements IEmbedder {
+	readonly internallyRetriedClasses: ReadonlySet<TransientClass> = new Set(["rate-limit"])
 	private embeddingsClient: OpenAI
 	private readonly defaultModelId: string
 	private readonly apiKey: string
@@ -73,6 +76,7 @@ export class OpenRouterEmbedder implements IEmbedder {
 		try {
 			this.embeddingsClient = new OpenAI({
 				baseURL: this.baseUrl,
+				maxRetries: 0,
 				apiKey: apiKey,
 				defaultHeaders: {
 					"HTTP-Referer": "https://github.com/RooCodeInc/Roo-Code",
@@ -109,7 +113,7 @@ export class OpenRouterEmbedder implements IEmbedder {
 					const prefixedText = `${queryPrefix}${text}`
 					const estimatedTokens = Math.ceil(prefixedText.length / 4)
 					if (estimatedTokens > MAX_ITEM_TOKENS) {
-						console.warn(
+						codeIndexLog.warn(
 							t("embeddings:textWithPrefixExceedsTokenLimit", {
 								index,
 								estimatedTokens,
@@ -138,7 +142,7 @@ export class OpenRouterEmbedder implements IEmbedder {
 				const itemTokens = Math.ceil(text.length / 4)
 
 				if (itemTokens > this.maxItemTokens) {
-					console.warn(
+					codeIndexLog.warn(
 						t("embeddings:textExceedsTokenLimit", {
 							index: i,
 							itemTokens,
@@ -261,7 +265,7 @@ export class OpenRouterEmbedder implements IEmbedder {
 						const globalDelay = await this.getGlobalRateLimitDelay()
 						const delayMs = Math.max(baseDelay, globalDelay)
 
-						console.warn(
+						codeIndexLog.warn(
 							t("embeddings:rateLimitRetry", {
 								delayMs,
 								attempt: attempts + 1,
@@ -274,7 +278,7 @@ export class OpenRouterEmbedder implements IEmbedder {
 				}
 
 				// Log the error for debugging
-				console.error(`OpenRouter embedder error (attempt ${attempts + 1}/${MAX_RETRIES}):`, error)
+				codeIndexLog.error(`OpenRouter embedder error (attempt ${attempts + 1}/${MAX_RETRIES}):`, error)
 
 				// Format and throw the error
 				throw formatEmbeddingError(error, MAX_RETRIES)

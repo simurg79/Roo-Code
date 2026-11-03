@@ -1,3 +1,4 @@
+import "./mock-code-index-log"
 import { build } from "esbuild"
 import { copyFile, mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -97,8 +98,8 @@ describe("ParseWorkerClient real worker (T15)", () => {
 			const worker = createWorker("wasm-hang")
 			const entered = new Promise<void>((resolve, reject) => {
 				worker.once("error", reject)
-				worker.stdout!.on("data", (chunk: Buffer) => {
-					if (chunk.toString().includes("parse worker entering wasm fault loop")) resolve()
+				worker.on("message", (reply) => {
+					if (reply.diagnostic?.message === "parse worker entering wasm fault loop") resolve()
 				})
 			})
 			const client = new ParseWorkerClient(() => worker)

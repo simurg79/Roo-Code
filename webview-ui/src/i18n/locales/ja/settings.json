@@ -151,6 +151,22 @@
 		},
 		"description": "プロジェクトのセマンティック検索を有効にするためのコードベースインデックス設定を構成します。<0>詳細はこちら</0>",
 		"statusTitle": "ステータス",
+		"indexingFilesRetrying": "インデックス作成に失敗したファイル: {{count}}。{{path}} を再試行中: {{reason}}",
+		"indexingFilesFailed": "インデックス作成に失敗したファイル: {{count}}。{{path}} の自動再試行は終了しました: {{reason}}",
+		"failedFileDetails": "失敗したファイルの詳細",
+		"failedFileReason": "理由",
+		"failedFileStates": {
+			"retrying": "自動再試行待ち",
+			"exhausted": "自動再試行終了"
+		},
+		"failedFileActivities": {
+			"read": "ファイルの読み取り",
+			"parse": "ファイルの解析",
+			"embed": "埋め込みの作成",
+			"upsert": "インデックス済みブロックの保存",
+			"delete": "インデックス済みブロックの削除",
+			"verify": "インデックス結果の検証"
+		},
 		"settingsTitle": "インデックス設定",
 		"disabledMessage": "コードベースインデックスは現在無効になっています。グローバル設定で有効にしてインデックスオプションを構成してください。",
 		"embedderProviderLabel": "エンベッダープロバイダー",

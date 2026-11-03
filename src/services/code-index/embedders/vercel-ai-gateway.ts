@@ -20,6 +20,10 @@ import { t } from "../../../i18n"
  * - mistral/mistral-embed (dimension: 1024)
  */
 export class VercelAiGatewayEmbedder implements IEmbedder {
+	get internallyRetriedClasses() {
+		return this.openAICompatibleEmbedder.internallyRetriedClasses
+	}
+
 	private readonly openAICompatibleEmbedder: OpenAICompatibleEmbedder
 	private static readonly VERCEL_AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh/v1"
 	private static readonly DEFAULT_MODEL = "openai/text-embedding-3-large"

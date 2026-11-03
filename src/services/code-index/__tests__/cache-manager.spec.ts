@@ -1,3 +1,5 @@
+import "./mock-code-index-log"
+import { codeIndexLog } from "../code-index-log"
 import * as vscode from "vscode"
 import { createHash } from "crypto"
 import { CacheManager } from "../cache-manager"
@@ -204,7 +206,7 @@ describe("CacheManager", () => {
 	})
 
 	it("logs debounced-save errors without an unhandled rejection", async () => {
-		const log = vi.spyOn(console, "error").mockImplementation(() => {})
+		const log = vi.spyOn(codeIndexLog, "error").mockImplementation(() => {})
 		vi.mocked(safeWriteJson).mockRejectedValueOnce(new Error("Write denied"))
 		cache.completeFile("file.ts", "hash")
 		await vi.advanceTimersByTimeAsync(1500)

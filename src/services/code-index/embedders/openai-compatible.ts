@@ -1,4 +1,6 @@
+import { codeIndexLog } from "../code-index-log"
 import { OpenAI } from "openai"
+import type { TransientClass } from "../shared/indexing-errors"
 import { waitForRetry } from "./cancellation"
 import { IEmbedder, EmbeddingResponse, EmbedderInfo } from "../interfaces/embedder"
 import {
@@ -32,6 +34,7 @@ interface OpenAIEmbeddingResponse {
  */
 
 export class OpenAICompatibleEmbedder implements IEmbedder {
+	readonly internallyRetriedClasses: ReadonlySet<TransientClass> = new Set(["rate-limit"])
 	private embeddingsClient: OpenAI
 	private readonly defaultModelId: string
 	private readonly baseUrl: string
@@ -71,6 +74,7 @@ export class OpenAICompatibleEmbedder implements IEmbedder {
 		try {
 			this.embeddingsClient = new OpenAI({
 				baseURL: baseUrl,
+				maxRetries: 0,
 				apiKey: apiKey,
 			})
 		} catch (error) {
@@ -105,7 +109,7 @@ export class OpenAICompatibleEmbedder implements IEmbedder {
 					const prefixedText = `${queryPrefix}${text}`
 					const estimatedTokens = Math.ceil(prefixedText.length / 4)
 					if (estimatedTokens > MAX_ITEM_TOKENS) {
-						console.warn(
+						codeIndexLog.warn(
 							t("embeddings:textWithPrefixExceedsTokenLimit", {
 								index,
 								estimatedTokens,
@@ -134,7 +138,7 @@ export class OpenAICompatibleEmbedder implements IEmbedder {
 				const itemTokens = Math.ceil(text.length / 4)
 
 				if (itemTokens > this.maxItemTokens) {
-					console.warn(
+					codeIndexLog.warn(
 						t("embeddings:textExceedsTokenLimit", {
 							index: i,
 							itemTokens,
@@ -336,7 +340,7 @@ export class OpenAICompatibleEmbedder implements IEmbedder {
 						const globalDelay = await this.getGlobalRateLimitDelay()
 						const delayMs = Math.max(baseDelay, globalDelay)
 
-						console.warn(
+						codeIndexLog.warn(
 							t("embeddings:rateLimitRetry", {
 								delayMs,
 								attempt: attempts + 1,
@@ -349,7 +353,7 @@ export class OpenAICompatibleEmbedder implements IEmbedder {
 				}
 
 				// Log the error for debugging
-				console.error(`OpenAI Compatible embedder error (attempt ${attempts + 1}/${MAX_RETRIES}):`, error)
+				codeIndexLog.error(`OpenAI Compatible embedder error (attempt ${attempts + 1}/${MAX_RETRIES}):`, error)
 
 				// Format and throw the error
 				throw formatEmbeddingError(error, MAX_RETRIES)

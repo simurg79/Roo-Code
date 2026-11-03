@@ -73,6 +73,8 @@
 		"indexingRequiresWorkspace": "Indexierung erfordert einen offenen Workspace-Ordner",
 		"indexingStopping": "Indexierung wird gestoppt...",
 		"indexingStopped": "Indexierung vom Benutzer gestoppt.",
-		"indexingStoppedPartial": "Indexierung gestoppt. Teilweise Indexdaten beibehalten."
+		"indexingStoppedPartial": "Indexierung gestoppt. Teilweise Indexdaten beibehalten.",
+		"indexingFilesRetrying": "Fehlgeschlagene Dateien werden erneut versucht. Teilindex verfügbar.",
+		"indexingFilesFailed": "Dateifehler bestehen weiterhin. Keine automatischen Wiederholungen ausstehend. Teilindex verfügbar."
 	}
 }

@@ -1,5 +1,6 @@
 // npx vitest services/code-index/processors/__tests__/scanner.spec.ts
 
+import "../../__tests__/mock-code-index-log"
 import { DirectoryScanner } from "../scanner"
 import { stat } from "fs/promises"
 import { ParserFatalError } from "../../parser-errors"

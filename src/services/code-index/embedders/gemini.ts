@@ -14,6 +14,10 @@ import { t } from "../../../i18n"
  * migrated to gemini-embedding-001 for backward compatibility.
  */
 export class GeminiEmbedder implements IEmbedder {
+	get internallyRetriedClasses() {
+		return this.openAICompatibleEmbedder.internallyRetriedClasses
+	}
+
 	private readonly openAICompatibleEmbedder: OpenAICompatibleEmbedder
 	private static readonly GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 	private static readonly DEFAULT_MODEL = "gemini-embedding-001"

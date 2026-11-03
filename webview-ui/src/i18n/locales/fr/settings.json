@@ -101,6 +101,22 @@
 		"title": "Indexation de la base de code",
 		"description": "Configurez les paramètres d'indexation de la base de code pour activer la recherche sémantique dans votre projet. <0>En savoir plus</0>",
 		"statusTitle": "Statut",
+		"indexingFilesRetrying": "Fichiers avec des erreurs d'indexation : {{count}}. Nouvelle tentative pour {{path}} : {{reason}}",
+		"indexingFilesFailed": "Fichiers avec des erreurs d'indexation : {{count}}. Tentatives automatiques terminées pour {{path}} : {{reason}}",
+		"failedFileDetails": "Détails des fichiers en échec",
+		"failedFileReason": "Raison",
+		"failedFileStates": {
+			"retrying": "Nouvelle tentative automatique en attente",
+			"exhausted": "Tentatives automatiques terminées"
+		},
+		"failedFileActivities": {
+			"read": "Lire le fichier",
+			"parse": "Analyser le fichier",
+			"embed": "Créer les embeddings",
+			"upsert": "Enregistrer les blocs indexés",
+			"delete": "Supprimer les blocs indexés",
+			"verify": "Vérifier le résultat indexé"
+		},
 		"enableLabel": "Activer l'indexation de la base de code",
 		"enableDescription": "Activer l'indexation du code pour une recherche et une compréhension du contexte améliorées",
 		"settingsTitle": "Paramètres d'indexation",

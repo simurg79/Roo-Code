@@ -1,3 +1,4 @@
+import "../../__tests__/mock-code-index-log"
 import type { MockedClass, MockedFunction } from "vitest"
 import { OpenAI } from "openai"
 

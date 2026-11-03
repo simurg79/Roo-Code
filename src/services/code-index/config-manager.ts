@@ -1,3 +1,4 @@
+import { codeIndexLog } from "./code-index-log"
 import { ApiHandlerOptions } from "../../shared/api"
 import { ContextProxy } from "../../core/config/ContextProxy"
 import { EmbedderProvider } from "./interfaces/manager"
@@ -94,7 +95,7 @@ export class CodeIndexConfigManager {
 			if (!isNaN(dimension) && dimension > 0) {
 				this.modelDimension = dimension
 			} else {
-				console.warn(
+				codeIndexLog.warn(
 					`Invalid codebaseIndexEmbedderModelDimension value: ${rawDimension}. Must be a positive number.`,
 				)
 				this.modelDimension = undefined

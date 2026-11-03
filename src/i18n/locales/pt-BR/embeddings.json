@@ -73,6 +73,8 @@
 		"indexingRequiresWorkspace": "A indexação requer uma pasta de workspace aberta",
 		"indexingStopping": "Interrompendo a indexação...",
 		"indexingStopped": "Indexação interrompida pelo usuário.",
-		"indexingStoppedPartial": "Indexação interrompida. Dados de índice parciais preservados."
+		"indexingStoppedPartial": "Indexação interrompida. Dados de índice parciais preservados.",
+		"indexingFilesRetrying": "Tentando novamente os arquivos com falha. Índice parcial disponível.",
+		"indexingFilesFailed": "Ainda há falhas em arquivos. Nenhuma tentativa automática pendente. Índice parcial disponível."
 	}
 }

@@ -73,6 +73,8 @@
 		"indexingRequiresWorkspace": "インデックス作成には、開かれたワークスペースフォルダーが必要です",
 		"indexingStopping": "インデックス作成を停止しています...",
 		"indexingStopped": "ユーザーによりインデックス作成が停止されました。",
-		"indexingStoppedPartial": "インデックス作成が停止されました。部分的なインデックスデータは保持されています。"
+		"indexingStoppedPartial": "インデックス作成が停止されました。部分的なインデックスデータは保持されています。",
+		"indexingFilesRetrying": "失敗したファイルを再試行しています。部分的なインデックスを利用できます。",
+		"indexingFilesFailed": "ファイルの失敗が残っています。自動再試行の予定はありません。部分的なインデックスを利用できます。"
 	}
 }

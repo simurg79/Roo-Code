@@ -151,6 +151,22 @@
 		},
 		"description": "Projenizin anlamsal aramasını etkinleştirmek için kod tabanı indeksleme ayarlarını yapılandırın. <0>Daha fazla bilgi</0>",
 		"statusTitle": "Durum",
+		"indexingFilesRetrying": "İndeksleme hatası olan dosyalar: {{count}}. {{path}} yeniden deneniyor: {{reason}}",
+		"indexingFilesFailed": "İndeksleme hatası olan dosyalar: {{count}}. {{path}} için otomatik yeniden denemeler sona erdi: {{reason}}",
+		"failedFileDetails": "Başarısız dosya ayrıntıları",
+		"failedFileReason": "Neden",
+		"failedFileStates": {
+			"retrying": "Otomatik yeniden deneme bekleniyor",
+			"exhausted": "Otomatik yeniden denemeler sona erdi"
+		},
+		"failedFileActivities": {
+			"read": "Dosyayı okuma",
+			"parse": "Dosyayı ayrıştırma",
+			"embed": "Embedding oluşturma",
+			"upsert": "İndekslenen blokları kaydetme",
+			"delete": "İndekslenen blokları kaldırma",
+			"verify": "İndekslenen sonucu doğrulama"
+		},
 		"settingsTitle": "İndeksleme Ayarları",
 		"disabledMessage": "Kod tabanı indeksleme şu anda devre dışı. İndeksleme seçeneklerini yapılandırmak için genel ayarlarda etkinleştirin.",
 		"embedderProviderLabel": "Gömücü Sağlayıcı",

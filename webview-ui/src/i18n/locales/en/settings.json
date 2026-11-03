@@ -163,6 +163,22 @@
 		"title": "Codebase Indexing",
 		"description": "Configure codebase indexing settings to enable semantic search of your project. <0>Learn more</0>",
 		"statusTitle": "Status",
+		"indexingFilesRetrying": "Files with indexing failures: {{count}}. Retrying {{path}}: {{reason}}",
+		"indexingFilesFailed": "Files with indexing failures: {{count}}. Automatic retry ended for {{path}}: {{reason}}",
+		"failedFileDetails": "Failed file details",
+		"failedFileReason": "Reason",
+		"failedFileStates": {
+			"retrying": "Automatic retry pending",
+			"exhausted": "Automatic retry ended"
+		},
+		"failedFileActivities": {
+			"read": "Read file",
+			"parse": "Parse file",
+			"embed": "Create embeddings",
+			"upsert": "Save indexed blocks",
+			"delete": "Remove indexed blocks",
+			"verify": "Verify indexed result"
+		},
 		"enableLabel": "Enable Codebase Indexing",
 		"enableDescription": "Enable code indexing for improved search and context understanding",
 		"settingsTitle": "Indexing Settings",

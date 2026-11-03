@@ -433,6 +433,37 @@ describe("ClineProvider", () => {
 		})
 	})
 
+	test("forwards failed-file event payloads and ignores events from a previous workspace", () => {
+		const status = {
+			systemStatus: "Indexing",
+			processedItems: 0,
+			totalItems: 1,
+			failedFiles: [{ path: "bad.ts", activity: "embed", reason: "retrying", state: "retrying" }],
+			failedFileSummary: { count: 1, path: "bad.ts", activity: "embed", reason: "retrying", state: "retrying" },
+		}
+		let callback!: (update: typeof status) => void
+		const manager = {
+			onProgressUpdate: vi.fn((listener) => {
+				callback = listener
+				return { dispose: vi.fn() }
+			}),
+			getCurrentStatus: vi.fn(() => status),
+		}
+		const current = vi.spyOn(provider, "getCurrentWorkspaceCodeIndexManager").mockReturnValue(manager as any)
+		const post = vi.spyOn(provider, "postMessageToWebview").mockResolvedValue(undefined)
+		;(provider as any).codeIndexManager = undefined
+		;(provider as any).updateCodeIndexStatusSubscription()
+		expect(post).toHaveBeenLastCalledWith({ type: "indexingStatusUpdate", values: status })
+		post.mockClear()
+		callback(status)
+		expect(post).toHaveBeenCalledExactlyOnceWith({ type: "indexingStatusUpdate", values: status })
+		current.mockReturnValue(undefined)
+		callback(status)
+		expect(post).toHaveBeenCalledOnce()
+		current.mockRestore()
+		post.mockRestore()
+	})
+
 	test("constructor initializes correctly", () => {
 		expect(provider).toBeInstanceOf(ClineProvider)
 		// Since getVisibleInstance returns the last instance where view.visible is true

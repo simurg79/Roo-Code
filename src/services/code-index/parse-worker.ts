@@ -1,3 +1,4 @@
+import { codeIndexLog } from "./code-index-log"
 import { parentPort } from "node:worker_threads"
 import { readFile } from "node:fs/promises"
 import * as path from "node:path"
@@ -16,7 +17,7 @@ parentPort!.on("message", async (request: ParseRequest) => {
 		if (nextFault === "wasm-hang") {
 			const bytes = new Uint8Array(await readFile(path.join(__dirname, "fault-loop.wasm")))
 			const { instance } = await WebAssembly.instantiate(bytes)
-			console.log("parse worker entering wasm fault loop")
+			codeIndexLog.info("parse worker entering wasm fault loop")
 			;(instance.exports.loop as () => void)()
 		}
 		const blocks = await parser.parseFile(request.filePath, {

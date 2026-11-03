@@ -151,6 +151,22 @@
 		},
 		"description": "Skonfiguruj ustawienia indeksowania bazy kodu, aby włączyć wyszukiwanie semantyczne w swoim projekcie. <0>Dowiedz się więcej</0>",
 		"statusTitle": "Status",
+		"indexingFilesRetrying": "Pliki z błędami indeksowania: {{count}}. Ponawianie dla {{path}}: {{reason}}",
+		"indexingFilesFailed": "Pliki z błędami indeksowania: {{count}}. Automatyczne próby zakończone dla {{path}}: {{reason}}",
+		"failedFileDetails": "Szczegóły plików z błędami",
+		"failedFileReason": "Przyczyna",
+		"failedFileStates": {
+			"retrying": "Oczekiwanie na automatyczną ponowną próbę",
+			"exhausted": "Automatyczne próby zakończone"
+		},
+		"failedFileActivities": {
+			"read": "Odczyt pliku",
+			"parse": "Parsowanie pliku",
+			"embed": "Tworzenie embeddingów",
+			"upsert": "Zapisywanie zindeksowanych bloków",
+			"delete": "Usuwanie zindeksowanych bloków",
+			"verify": "Weryfikacja wyniku indeksowania"
+		},
 		"settingsTitle": "Ustawienia indeksowania",
 		"disabledMessage": "Indeksowanie bazy kodu jest obecnie wyłączone. Włącz je w ustawieniach globalnych, aby skonfigurować opcje indeksowania.",
 		"embedderProviderLabel": "Dostawca Embeddera",
