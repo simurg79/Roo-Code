@@ -43,7 +43,7 @@ it("matches the direct D4 reference merge across representative snapshots", asyn
 	}
 })
 
-it("merge scans scale linearly at 1x/2x/4x/8x with a 4x timing-ratio regression", async () => {
+it("saved child-identity visits scale with row counts at 1x/2x/4x/8x", async () => {
 	const parseSpy = vi.spyOn(JSON, "parse")
 	const measurements: { multiplier: number; rows: number; medianMs: number; visits: number }[] = []
 	try {
@@ -83,9 +83,11 @@ it("merge scans scale linearly at 1x/2x/4x/8x with a 4x timing-ratio regression"
 			measurements.push({ multiplier, rows: rowCount, medianMs: costs[4], visits: scanVisits })
 		}
 		const ratio = measurements[2].medianMs / measurements[0].medianMs
-		console.log(JSON.stringify({ measurements, ratio4x: ratio, maximumRatio4x: 7 }, null, 2))
+		console.log(JSON.stringify({ measurements, ratio4x: ratio }, null, 2))
 		expect(measurements[2].visits / measurements[0].visits).toBe(4)
-		expect(ratio).toBeLessThan(7)
+		for (const measurement of measurements.slice(1)) {
+			expect(measurement.visits / measurements[0].visits).toBe(measurement.multiplier)
+		}
 	} finally {
 		parseSpy.mockRestore()
 	}

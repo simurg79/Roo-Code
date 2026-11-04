@@ -3714,12 +3714,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				// If we reach here without continuing, return false (will always be false for now)
 				return false
 			} catch (error) {
-				// This should never happen since the only thing that can throw an
-				// error is the attemptApiRequest, which is wrapped in a try catch
-				// that sends an ask where if noButtonClicked, will clear current
-				// task and destroy this instance. However to avoid unhandled
-				// promise rejection, we will end this loop which will end execution
-				// of this instance (see `startTask`).
+				// Stops during content readiness and unexpected errors reach here;
+				// end the loop to prevent an unhandled rejection.
 				return true // Needs to be true so parent loop knows to end task.
 			}
 		}
