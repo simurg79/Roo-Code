@@ -1,3 +1,4 @@
+import { codeIndexLog } from "./code-index-log"
 import * as vscode from "vscode"
 import { createHash } from "crypto"
 import { ICacheManager } from "./interfaces/cache"
@@ -20,7 +21,7 @@ export class CacheManager implements ICacheManager {
 			`roo-index-cache-${createHash("sha256").update(workspacePath).digest("hex")}.json`,
 		)
 		this.debouncedSave = debounce(() => {
-			void this.saveNow().catch((error) => console.error("Failed to save cache:", error))
+			void this.saveNow().catch((error) => codeIndexLog.error("Failed to save cache:", error))
 		}, 1500)
 	}
 

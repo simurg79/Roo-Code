@@ -1,9 +1,22 @@
 import { CodeIndexOrchestrator } from "../orchestrator"
 import { ParserFatalError } from "../parser-errors"
 import { INDEX_STOP_LIMIT_MS } from "../constants"
+import { FileFailureRegistry } from "../file-failure-registry"
+
+import { CodeIndexStateManager } from "../state-manager"
+import { codeIndexLog } from "../code-index-log"
+
+vi.mock("../code-index-log", () => ({ codeIndexLog: { info: vi.fn(), error: vi.fn() } }))
 
 vi.mock("../generation-allocator", () => ({ GenerationAllocator: vi.fn() }))
-vi.mock("vscode", () => ({ workspace: { workspaceFolders: [{ uri: { fsPath: "/workspace" } }] } }))
+vi.mock("vscode", () => ({
+	workspace: { workspaceFolders: [{ uri: { fsPath: "/workspace" } }] },
+	EventEmitter: class {
+		event = vi.fn()
+		fire = vi.fn()
+		dispose = vi.fn()
+	},
+}))
 vi.mock("../../../i18n", () => ({ t: (key: string) => key }))
 
 function deferred() {
@@ -32,20 +45,16 @@ describe("CodeIndexOrchestrator lifecycle", () => {
 	let current: boolean
 	let fatal: ReturnType<typeof vi.fn>
 	let orchestrator: CodeIndexOrchestrator
+	let failures: FileFailureRegistry
 
 	beforeEach(() => {
 		vi.useFakeTimers()
-		let status = "Standby"
-		state = {
-			get state() {
-				return status
-			},
-			setSystemState: vi.fn((next: string) => {
-				status = next
-			}),
-			reportBlockIndexingProgress: vi.fn(),
-			reportFileQueueProgress: vi.fn(),
-		}
+		vi.clearAllMocks()
+		state = new CodeIndexStateManager()
+		state.setDiagnosticContext({ source: "manager", attempt: 57 })
+		vi.spyOn(state, "setSystemState")
+		vi.spyOn(state, "reportBlockIndexingProgress")
+		vi.spyOn(state, "reportFileQueueProgress")
 		cache = { getOpenFiles: vi.fn(() => ({})), clearCacheFile: vi.fn(), flush: vi.fn() }
 		store = {
 			initialize: vi.fn().mockResolvedValue(false),
@@ -78,6 +87,7 @@ describe("CodeIndexOrchestrator lifecycle", () => {
 		allocator = { initialize: vi.fn() }
 		current = true
 		fatal = vi.fn()
+		failures = new FileFailureRegistry()
 		orchestrator = new CodeIndexOrchestrator(
 			{ isFeatureConfigured: true } as any,
 			state,
@@ -92,6 +102,7 @@ describe("CodeIndexOrchestrator lifecycle", () => {
 			gate,
 			allocator,
 			() => current,
+			failures,
 		)
 	})
 
@@ -116,9 +127,192 @@ describe("CodeIndexOrchestrator lifecycle", () => {
 		expect(state.state).toBe("Indexed")
 	})
 
+	it("exposes startup completion before the scan settles", async () => {
+		const held = deferred()
+		scanner.scanDirectory.mockReturnValue(held.promise)
+		const scan = orchestrator.startIndexing()
+		await orchestrator.startupResult
+		expect(scanner.scanDirectory).toHaveBeenCalledOnce()
+		expect(state.state).toBe("Indexing")
+		held.resolve()
+		await scan
+	})
+
+	it.each(["resolve", "reject"])("settles startup promptly on stop before initialization can %s", async (ending) => {
+		const held = deferred()
+		store.initialize.mockReturnValue(held.promise)
+		const scan = orchestrator.startIndexing()
+		const startupSettled = vi.fn()
+		void orchestrator.startupResult.then(startupSettled, startupSettled)
+		await drain()
+		expect(startupSettled).not.toHaveBeenCalled()
+		const stop = orchestrator.stopIndexing()
+		await drain()
+		expect(startupSettled).toHaveBeenCalledOnce()
+		await vi.advanceTimersByTimeAsync(INDEX_STOP_LIMIT_MS)
+		await stop
+		expect(state.state).toBe("Standby")
+		if (ending === "resolve") held.resolve()
+		else held.reject(new Error("late initialization failure"))
+		await scan
+		expect(allocator.initialize).not.toHaveBeenCalled()
+		expect(scanner.scanDirectory).not.toHaveBeenCalled()
+		expect(startupSettled).toHaveBeenCalledOnce()
+		expect(state.state).toBe("Standby")
+	})
+
+	it("logs scan, changed-file batch and stop transitions with the original attempt", async () => {
+		scanner.scanDirectory.mockImplementation(async (_directory: string, _onError: any, onIndexed: any) => {
+			state.setSystemState("Standby", "Paused", "test")
+			onIndexed(1)
+			return { stats: { processed: 1, skipped: 0 }, totalBlockCount: 1 }
+		})
+		await orchestrator.startIndexing()
+		expect(codeIndexLog.info).toHaveBeenCalledWith(
+			"State transition",
+			expect.objectContaining({ newState: "Indexed", source: "scan-end", attempt: 57 }),
+		)
+		watcher.onDidStartBatchProcessing.mock.calls[0][0]()
+		state.setSystemState("Standby", "Paused", "test")
+		watcher.onBatchProgressUpdate.mock.calls[0][0]({ processedInBatch: 1, totalInBatch: 2 })
+		watcher.onDidFinishBatchProcessing.mock.calls[0][0]()
+		for (const [newState, source] of [
+			["Indexing", "scan"],
+			["Indexing", "changed-file-batch"],
+			["Indexed", "changed-file-batch"],
+		]) {
+			expect(codeIndexLog.info).toHaveBeenCalledWith(
+				"State transition",
+				expect.objectContaining({ newState, source, attempt: 57 }),
+			)
+		}
+		watcher.isProcessing = true
+		await orchestrator.stopIndexing()
+		for (const newState of ["Stopping", "Standby"]) {
+			expect(codeIndexLog.info).toHaveBeenCalledWith(
+				"State transition",
+				expect.objectContaining({ newState, source: "stop", attempt: 57 }),
+			)
+		}
+	})
+
+	it("returns to Indexed when all failed files recover without a new scan", async () => {
+		failures.renew("bad.ts", "revision")
+		failures.record("bad.ts", "revision", "read", "read failed", 1, "exhausted")
+		await orchestrator.startIndexing()
+		expect(state.state).toBe("Standby")
+		expect(store.markIndexingComplete).not.toHaveBeenCalled()
+		const completion = deferred()
+		store.markIndexingComplete.mockReturnValue(completion.promise)
+		failures.clear("bad.ts", "revision")
+		await drain()
+		expect(store.markIndexingComplete).toHaveBeenCalledOnce()
+		expect(state.state).toBe("Standby")
+		completion.resolve()
+		await drain()
+		expect(state.state).toBe("Indexed")
+		expect(scanner.scanDirectory).toHaveBeenCalledOnce()
+	})
+
+	it.each(["stop", "parser", "superseded", "batch"])(
+		"does not issue recovery completion after queued work becomes %s",
+		async (ending) => {
+			failures.renew("bad.ts", "revision")
+			failures.record("bad.ts", "revision", "read", "read failed", 1, "exhausted")
+			await orchestrator.startIndexing()
+			const queued = deferred()
+			gate.run.mockImplementation(async (_signal: AbortSignal, write: () => Promise<void>) => {
+				await queued.promise
+				return write()
+			})
+			failures.clear("bad.ts", "revision")
+			if (ending === "stop") await orchestrator.stopWatcher()
+			if (ending === "parser")
+				watcher.onParserFatal.mock.calls[0][0](new ParserFatalError("parser-abort", "bad.ts"))
+			if (ending === "superseded") current = false
+			if (ending === "batch") watcher.onDidStartBatchProcessing.mock.calls[0][0]()
+			queued.resolve()
+			await drain()
+			expect(store.markIndexingComplete).not.toHaveBeenCalled()
+			if (ending === "batch") {
+				watcher.onDidFinishBatchProcessing.mock.calls[0][0]()
+				await drain()
+				expect(store.markIndexingComplete).toHaveBeenCalledOnce()
+				expect(state.state).toBe("Indexed")
+			}
+		},
+	)
+
+	it.each(["stop", "superseded", "failure"])("handles pending recovery completion on %s", async (ending) => {
+		failures.renew("bad.ts", "revision")
+		failures.record("bad.ts", "revision", "read", "read failed", 1, "exhausted")
+		await orchestrator.startIndexing()
+		const completion = deferred()
+		store.markIndexingComplete.mockReturnValue(completion.promise)
+		failures.clear("bad.ts", "revision")
+		await drain()
+		if (ending === "stop") await orchestrator.stopWatcher()
+		if (ending === "superseded") current = false
+		state.setSystemState.mockClear()
+		if (ending === "failure") completion.reject(new Error("metadata failed"))
+		else completion.resolve()
+		await drain()
+		if (ending === "failure") {
+			expect(state.state).toBe("Error")
+			expect(codeIndexLog.error).toHaveBeenCalledWith("Recovery completion failed", { error: expect.any(Error) })
+		} else expect(state.setSystemState).not.toHaveBeenCalled()
+	})
+
+	it.each(["stop", "parser", "superseded"])("recovery never overrides %s", async (ending) => {
+		failures.renew("bad.ts", "revision")
+		failures.record("bad.ts", "revision", "read", "read failed", 1, "exhausted")
+		await orchestrator.startIndexing()
+		if (ending === "stop") await orchestrator.stopWatcher()
+		if (ending === "parser") watcher.onParserFatal.mock.calls[0][0](new ParserFatalError("parser-abort", "bad.ts"))
+		if (ending === "superseded") current = false
+		state.setSystemState.mockClear()
+		failures.clear("bad.ts", "revision")
+		expect(state.setSystemState).not.toHaveBeenCalled()
+	})
+
+	it("distinguishes active retries, exhausted failures and a user stop", async () => {
+		await orchestrator.startIndexing()
+		failures.renew("bad.ts", "revision")
+		failures.record("bad.ts", "revision", "embed", "failed", 1, "retrying")
+		expect(state.getCurrentStatus()).toMatchObject({
+			systemStatus: "Indexing",
+			message: "embeddings:orchestrator.indexingFilesRetrying",
+		})
+		failures.record("bad.ts", "revision", "embed", "failed", 3, "exhausted")
+		expect(state.getCurrentStatus()).toMatchObject({
+			systemStatus: "Standby",
+			message: "embeddings:orchestrator.indexingFilesFailed",
+		})
+		watcher.isProcessing = true
+		watcher.onDidStartBatchProcessing.mock.calls[0][0]()
+		await orchestrator.stopIndexing()
+		expect(state.getCurrentStatus()).toMatchObject({
+			systemStatus: "Standby",
+			message: "embeddings:orchestrator.indexingStoppedPartial",
+		})
+	})
+
+	it("keeps recovery Indexing while a watcher batch remains active", async () => {
+		await orchestrator.startIndexing()
+		watcher.onDidStartBatchProcessing.mock.calls[0][0](["bad.ts"])
+		failures.renew("bad.ts", "revision")
+		failures.record("bad.ts", "revision", "embed", "retrying", 1, "retrying")
+		failures.clear("bad.ts", "revision")
+		expect(state.state).toBe("Indexing")
+		watcher.onDidFinishBatchProcessing.mock.calls[0][0]({ processedFiles: [] })
+		expect(state.state).toBe("Indexed")
+	})
+
 	it("refuses scanning after a durable reservation failure without destroying data", async () => {
 		allocator.initialize.mockRejectedValue(new Error("Storage reservation failed"))
-		await orchestrator.startIndexing()
+		const scan = orchestrator.startIndexing()
+		await expect(orchestrator.startupResult).rejects.toThrow("Storage reservation failed")
+		await scan
 		expect(scanner.scanDirectory).not.toHaveBeenCalled()
 		expect(state.state).toBe("Error")
 		expect(store.clearCollection).not.toHaveBeenCalled()
@@ -130,6 +324,8 @@ describe("CodeIndexOrchestrator lifecycle", () => {
 		async (reason) => {
 			scanner.scanDirectory.mockImplementation(
 				async (_directory: string, onError: any, onIndexed: any, onParsed: any) => {
+					failures.renew("bad.ts", "revision")
+					failures.record("bad.ts", "revision", "verify", "save failed", 3, "exhausted")
 					if (reason === "batch error") onError(new Error("save failed"))
 					if (reason === "missing blocks") {
 						onParsed(10)
@@ -147,7 +343,8 @@ describe("CodeIndexOrchestrator lifecycle", () => {
 			expect(state.state).toBe("Standby")
 			expect(state.setSystemState).toHaveBeenLastCalledWith(
 				"Standby",
-				"embeddings:orchestrator.indexingStoppedPartial",
+				"embeddings:orchestrator.indexingFilesFailed",
+				"scan-end",
 			)
 		},
 	)
@@ -158,6 +355,8 @@ describe("CodeIndexOrchestrator lifecycle", () => {
 		watcher.onDidStartBatchProcessing.mock.calls[0][0](["bad.ts"])
 		watcher.onBatchProgressUpdate.mock.calls[0][0]({ processedInBatch: 1, totalInBatch: 1 })
 		expect(state.state).toBe("Indexing")
+		failures.renew("bad.ts", "revision")
+		failures.record("bad.ts", "revision", "read", "read failed", 1, "exhausted")
 		watcher.onDidFinishBatchProcessing.mock.calls[0][0]({ processedFiles: [{ path: "bad.ts", status: "error" }] })
 		expect(state.state).toBe("Standby")
 		expect(state.setSystemState.mock.calls.some(([next]: string[]) => next === "Indexed")).toBe(false)
@@ -171,6 +370,7 @@ describe("CodeIndexOrchestrator lifecycle", () => {
 		expect(state.setSystemState).toHaveBeenLastCalledWith(
 			"Standby",
 			"embeddings:orchestrator.indexingStoppedPartial",
+			"stop",
 		)
 	})
 
@@ -208,6 +408,7 @@ describe("CodeIndexOrchestrator lifecycle", () => {
 		expect(state.setSystemState).toHaveBeenLastCalledWith(
 			"Standby",
 			"embeddings:orchestrator.indexingStoppedPartial",
+			"stop",
 		)
 		expect(worker.logStopTimeout).toHaveBeenCalledTimes(pending === "worker" ? 1 : 0)
 		held.resolve()
@@ -232,14 +433,18 @@ describe("CodeIndexOrchestrator lifecycle", () => {
 		workerFinished.resolve()
 		await stop
 		await scan
-		expect(state.setSystemState).toHaveBeenLastCalledWith("Standby", "embeddings:orchestrator.indexingStopped")
+		expect(state.setSystemState).toHaveBeenLastCalledWith(
+			"Standby",
+			"embeddings:orchestrator.indexingStopped",
+			"stop",
+		)
 		expect(gate.abandon).not.toHaveBeenCalled()
 	})
 
 	it("preserves incomplete-file status even when every stop wait settles", async () => {
 		const scanFinished = deferred()
 		scanner.scanDirectory.mockReturnValue(scanFinished.promise)
-		scanner.hasIncompleteFiles = true
+		cache.getOpenFiles.mockReturnValue({ "bad.ts": true })
 		void orchestrator.startIndexing()
 		await drain()
 		const stop = orchestrator.stopIndexing()
@@ -248,6 +453,7 @@ describe("CodeIndexOrchestrator lifecycle", () => {
 		expect(state.setSystemState).toHaveBeenLastCalledWith(
 			"Standby",
 			"embeddings:orchestrator.indexingStoppedPartial",
+			"stop",
 		)
 	})
 
@@ -283,6 +489,10 @@ describe("CodeIndexOrchestrator lifecycle", () => {
 			await orchestrator.stopIndexing()
 			lateProgress(100)
 			expect(state.state).toBe("Error")
+			expect(codeIndexLog.info).toHaveBeenCalledWith(
+				"State transition",
+				expect.objectContaining({ newState: "Error", source: "error", attempt: 57 }),
+			)
 			expect(state.setSystemState.mock.calls.some(([next]: string[]) => next === "Stopping")).toBe(false)
 			expect(fatal).toHaveBeenCalledOnce()
 			expect(worker.stop).toHaveBeenCalledOnce()
@@ -300,6 +510,10 @@ describe("CodeIndexOrchestrator lifecycle", () => {
 		await orchestrator.startIndexing()
 		await orchestrator.stopIndexing()
 		expect(state.state).toBe("Error")
+		expect(codeIndexLog.info).toHaveBeenCalledWith(
+			"State transition",
+			expect.objectContaining({ newState: "Error", source: "error", attempt: 57 }),
+		)
 		expect(store.clearCollection).not.toHaveBeenCalled()
 		expect(cache.clearCacheFile).not.toHaveBeenCalled()
 	})

@@ -1,3 +1,5 @@
+import "../../__tests__/mock-code-index-log"
+import { codeIndexLog } from "../../code-index-log"
 import type { MockedFunction } from "vitest"
 import { BedrockRuntimeClient, InvokeModelCommand } from "@aws-sdk/client-bedrock-runtime"
 
@@ -46,8 +48,8 @@ vitest.mock("../../../../i18n", () => ({
 
 // Mock console methods
 const consoleMocks = {
-	error: vitest.spyOn(console, "error").mockImplementation(() => {}),
-	warn: vitest.spyOn(console, "warn").mockImplementation(() => {}),
+	error: vitest.spyOn(codeIndexLog, "error").mockImplementation(() => {}),
+	warn: vitest.spyOn(codeIndexLog, "warn").mockImplementation(() => {}),
 }
 
 describe("BedrockEmbedder", () => {
@@ -396,7 +398,7 @@ describe("BedrockEmbedder", () => {
 				const result = await embedder.createEmbeddings(testTexts)
 
 				// Verify warning was logged
-				expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("exceeds maximum token limit"))
+				expect(codeIndexLog.warn).toHaveBeenCalledWith(expect.stringContaining("exceeds maximum token limit"))
 
 				// Verify only normal texts were processed
 				expect(mockSend).toHaveBeenCalledTimes(2)
@@ -409,7 +411,7 @@ describe("BedrockEmbedder", () => {
 
 				const result = await embedder.createEmbeddings(testTexts)
 
-				expect(console.warn).toHaveBeenCalledTimes(2)
+				expect(codeIndexLog.warn).toHaveBeenCalledTimes(2)
 				expect(mockSend).not.toHaveBeenCalled()
 				expect(result).toEqual({
 					embeddings: [],
@@ -456,7 +458,7 @@ describe("BedrockEmbedder", () => {
 				const result = await resultPromise
 
 				expect(mockSend).toHaveBeenCalledTimes(3)
-				expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("Rate limit hit, retrying in"))
+				expect(codeIndexLog.warn).toHaveBeenCalledWith(expect.stringContaining("Rate limit hit, retrying in"))
 				expect(result).toEqual({
 					embeddings: [[0.1, 0.2, 0.3]],
 					usage: { promptTokens: 2, totalTokens: 2 },
@@ -475,7 +477,7 @@ describe("BedrockEmbedder", () => {
 				)
 
 				expect(mockSend).toHaveBeenCalledTimes(1)
-				expect(console.warn).not.toHaveBeenCalledWith(expect.stringContaining("Rate limit hit"))
+				expect(codeIndexLog.warn).not.toHaveBeenCalledWith(expect.stringContaining("Rate limit hit"))
 			})
 		})
 
@@ -493,7 +495,7 @@ describe("BedrockEmbedder", () => {
 					"Failed to create embeddings after 3 attempts: API connection failed",
 				)
 
-				expect(console.error).toHaveBeenCalledWith(
+				expect(codeIndexLog.error).toHaveBeenCalledWith(
 					expect.stringContaining("Bedrock embedder error"),
 					expect.any(Error),
 				)

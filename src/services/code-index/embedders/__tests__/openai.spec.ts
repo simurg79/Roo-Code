@@ -1,3 +1,5 @@
+import "../../__tests__/mock-code-index-log"
+import { codeIndexLog } from "../../code-index-log"
 import type { MockedClass, MockedFunction } from "vitest"
 import { OpenAI } from "openai"
 
@@ -25,8 +27,8 @@ vitest.mock("../../../../i18n", () => ({
 
 // Mock console methods
 const consoleMocks = {
-	error: vitest.spyOn(console, "error").mockImplementation(() => {}),
-	warn: vitest.spyOn(console, "warn").mockImplementation(() => {}),
+	error: vitest.spyOn(codeIndexLog, "error").mockImplementation(() => {}),
+	warn: vitest.spyOn(codeIndexLog, "warn").mockImplementation(() => {}),
 }
 
 describe("OpenAiEmbedder", () => {
@@ -58,7 +60,7 @@ describe("OpenAiEmbedder", () => {
 
 	describe("constructor", () => {
 		it("should initialize with provided options", () => {
-			expect(MockedOpenAI).toHaveBeenCalledWith({ apiKey: "test-api-key" })
+			expect(MockedOpenAI).toHaveBeenCalledWith({ apiKey: "test-api-key", maxRetries: 0 })
 			expect(embedder.embedderInfo.name).toBe("openai")
 		})
 
@@ -67,7 +69,7 @@ describe("OpenAiEmbedder", () => {
 				openAiEmbeddingModelId: "text-embedding-3-small",
 			})
 
-			expect(MockedOpenAI).toHaveBeenCalledWith({ apiKey: "not-provided" })
+			expect(MockedOpenAI).toHaveBeenCalledWith({ apiKey: "not-provided", maxRetries: 0 })
 		})
 
 		it("should use default model if not specified", () => {
@@ -214,7 +216,7 @@ describe("OpenAiEmbedder", () => {
 				const result = await embedder.createEmbeddings(testTexts)
 
 				// Verify warning was logged
-				expect(console.warn).toHaveBeenCalledWith(expect.stringContaining(`exceeds maximum token limit`))
+				expect(codeIndexLog.warn).toHaveBeenCalledWith(expect.stringContaining(`exceeds maximum token limit`))
 
 				// Verify only normal texts were processed
 				expect(mockEmbeddingsCreate).toHaveBeenCalledWith(
@@ -268,7 +270,7 @@ describe("OpenAiEmbedder", () => {
 
 				const result = await embedder.createEmbeddings(testTexts)
 
-				expect(console.warn).toHaveBeenCalledTimes(2)
+				expect(codeIndexLog.warn).toHaveBeenCalledTimes(2)
 				expect(mockEmbeddingsCreate).not.toHaveBeenCalled()
 				expect(result).toEqual({
 					embeddings: [],
@@ -310,7 +312,7 @@ describe("OpenAiEmbedder", () => {
 				const result = await resultPromise
 
 				expect(mockEmbeddingsCreate).toHaveBeenCalledTimes(3)
-				expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("Rate limit hit, retrying in"))
+				expect(codeIndexLog.warn).toHaveBeenCalledWith(expect.stringContaining("Rate limit hit, retrying in"))
 				expect(result).toEqual({
 					embeddings: [[0.1, 0.2, 0.3]],
 					usage: { promptTokens: 10, totalTokens: 15 },
@@ -329,7 +331,7 @@ describe("OpenAiEmbedder", () => {
 				)
 
 				expect(mockEmbeddingsCreate).toHaveBeenCalledTimes(1)
-				expect(console.warn).not.toHaveBeenCalledWith(expect.stringContaining("Rate limit hit"))
+				expect(codeIndexLog.warn).not.toHaveBeenCalledWith(expect.stringContaining("Rate limit hit"))
 			})
 
 			it("should throw error immediately on non-retryable errors", async () => {
@@ -361,7 +363,7 @@ describe("OpenAiEmbedder", () => {
 					"Failed to create embeddings after 3 attempts: API connection failed",
 				)
 
-				expect(console.error).toHaveBeenCalledWith(
+				expect(codeIndexLog.error).toHaveBeenCalledWith(
 					expect.stringContaining("OpenAI embedder error"),
 					expect.any(Error),
 				)

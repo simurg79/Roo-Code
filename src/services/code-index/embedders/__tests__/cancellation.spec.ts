@@ -1,3 +1,4 @@
+import "../../__tests__/mock-code-index-log"
 import { OpenAiEmbedder } from "../openai"
 import { OpenAICompatibleEmbedder } from "../openai-compatible"
 import { OpenRouterEmbedder } from "../openrouter"

@@ -3,6 +3,7 @@ import { FileCompletion, FileIndexWriter } from "../file-completion"
 import { IndexWriteGate, LATE_WRITE_GRACE_MS } from "../index-write-gate"
 import { QDRANT_CODE_BLOCK_NAMESPACE } from "../constants"
 import type { CodeBlock } from "../interfaces"
+import { FileFailureRegistry } from "../file-failure-registry"
 
 function deferred<Value = void>() {
 	let resolve!: (value: Value) => void
@@ -78,6 +79,7 @@ describe("FileIndexWriter", () => {
 	let gate: IndexWriteGate
 	let attempt: AbortController
 	let writer: FileIndexWriter
+	let failures: FileFailureRegistry
 
 	function blocks(count: number): CodeBlock[] {
 		return Array.from({ length: count }, (_, offset) => ({
@@ -111,12 +113,223 @@ describe("FileIndexWriter", () => {
 		}
 		gate = new IndexWriteGate()
 		attempt = new AbortController()
-		writer = new FileIndexWriter(cache, store, gate, generations, "/workspace")
+		failures = new FileFailureRegistry()
+		writer = new FileIndexWriter(cache, store, gate, generations, "/workspace", failures)
 	})
 
 	afterEach(() => {
 		vi.clearAllTimers()
 		vi.useRealTimers()
+	})
+
+	it.each(["embed", "upsert", "delete", "verify", "remove"])(
+		"retries only %s at 500/1000 ms and preserves its generation",
+		async (activity) => {
+			const request =
+				activity === "embed"
+					? embedder.createEmbeddings
+					: activity === "upsert"
+						? store.upsertPoints
+						: activity === "verify"
+							? store.countPointsForFile
+							: store.deletePointsByFilePath
+			const success = request.getMockImplementation()
+			request.mockRejectedValueOnce(Object.assign(new Error("unavailable"), { status: 503 }))
+			request.mockRejectedValueOnce(Object.assign(new Error("unavailable"), { status: 503 }))
+			if (success) request.mockImplementation(success)
+			const records = vi.fn()
+			failures.onDidRecord(records)
+			const pending =
+				activity === "remove"
+					? writer.remove(filePath, attempt.signal)
+					: writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal)
+			await vi.advanceTimersByTimeAsync(0)
+			expect(request).toHaveBeenCalledTimes(1)
+			expect(failures.list()[0]).toMatchObject({ attempt: 1, state: "retrying", classification: "server" })
+			await vi.advanceTimersByTimeAsync(499)
+			expect(request).toHaveBeenCalledTimes(1)
+			await vi.advanceTimersByTimeAsync(1)
+			expect(request).toHaveBeenCalledTimes(2)
+			await vi.advanceTimersByTimeAsync(999)
+			expect(request).toHaveBeenCalledTimes(2)
+			await vi.advanceTimersByTimeAsync(1)
+			expect(request).toHaveBeenCalledTimes(3)
+			await vi.advanceTimersByTimeAsync(LATE_WRITE_GRACE_MS)
+			await pending
+			expect(generations.allocate).toHaveBeenCalledOnce()
+			expect(embedder.createEmbeddings).toHaveBeenCalledTimes(
+				activity === "embed" ? 3 : activity === "remove" ? 0 : 1,
+			)
+			expect(records).toHaveBeenCalledTimes(2)
+			expect(failures.list()).toEqual([])
+		},
+	)
+
+	it("keeps exhausted store budgets across writer recreation and unrelated renewal", async () => {
+		store.upsertPoints.mockRejectedValue(Object.assign(new Error("unavailable"), { status: 503 }))
+		const pending = writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal).catch((error) => error)
+		await vi.advanceTimersByTimeAsync(1500)
+		expect(await pending).toMatchObject({ activity: "upsert", attempts: 3, classification: "server" })
+		failures.renew("other.ts", "new")
+		const recreated = new FileIndexWriter(cache, store, gate, generations, "/workspace", failures)
+		await expect(recreated.replace(filePath, "hash", blocks(2), embedder, attempt.signal)).rejects.toThrow(
+			"unavailable",
+		)
+		expect(store.upsertPoints).toHaveBeenCalledTimes(3)
+		expect(embedder.createEmbeddings).toHaveBeenCalledOnce()
+		expect(failures.list()[0]).toMatchObject({ attempt: 3, state: "exhausted" })
+	})
+
+	it.each(["allocation", "invalidation"])(
+		"exhausts a new revision after %s fails despite an old entry",
+		async (stage) => {
+			store.upsertPoints.mockRejectedValue(Object.assign(new Error("old server failure"), { status: 503 }))
+			const old = writer.replace(filePath, "r1", blocks(2), embedder, attempt.signal).catch((error) => error)
+			await vi.advanceTimersByTimeAsync(1500)
+			expect(await old).toMatchObject({ attempts: 3 })
+			const failingOperation = stage === "allocation" ? generations.allocate : cache.invalidateFile
+			failingOperation.mockRejectedValue(new Error(`new ${stage} failure`))
+			const records = vi.fn()
+			failures.onDidRecord(records)
+
+			await expect(writer.replace(filePath, "r2", blocks(2), embedder, attempt.signal)).rejects.toThrow(
+				`new ${stage} failure`,
+			)
+			const calls = failingOperation.mock.calls.length
+			await expect(writer.replace(filePath, "r2", blocks(2), embedder, attempt.signal)).rejects.toThrow(
+				`new ${stage} failure`,
+			)
+			expect(failingOperation).toHaveBeenCalledTimes(calls)
+			expect(records).toHaveBeenCalledOnce()
+			expect(failures.list()[0]).toMatchObject({
+				revision: "r2",
+				reason: `new ${stage} failure`,
+				attempt: 1,
+				state: "exhausted",
+			})
+			expect(store.upsertPoints).toHaveBeenCalledTimes(3)
+		},
+	)
+
+	it.each(["allocation", "invalidation"])(
+		"exhausts a retained successful retry when the same revision later fails %s",
+		async (stage) => {
+			failures.renew("file.ts", "hash")
+			const request = vi
+				.fn()
+				.mockRejectedValueOnce(Object.assign(new Error("temporary failure"), { status: 503 }))
+			const retry = writer.retryTransient(request, {
+				signal: attempt.signal,
+				file: filePath,
+				revision: "hash",
+				activity: "embed",
+			})
+			await vi.advanceTimersByTimeAsync(500)
+			await retry
+			expect(failures.list()[0]).toMatchObject({ state: "retrying", attempt: 1 })
+			const failingOperation = stage === "allocation" ? generations.allocate : cache.invalidateFile
+			failingOperation.mockRejectedValue(new Error(`${stage} failed`))
+			await expect(writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal)).rejects.toThrow(
+				`${stage} failed`,
+			)
+			expect(failures.list()[0]).toMatchObject({
+				activity: "embed",
+				reason: "temporary failure",
+				attempt: 1,
+				classification: "server",
+				state: "exhausted",
+			})
+			expect(cache.completeFile).not.toHaveBeenCalled()
+		},
+	)
+
+	it.each(["allocation", "invalidation"])(
+		"exhausts recovered retries when completion fails before a later %s failure",
+		async (stage) => {
+			embedder.createEmbeddings.mockRejectedValueOnce(
+				Object.assign(new Error("temporary embedding failure"), { status: 503 }),
+			)
+			cache.completeFile.mockImplementation(() => {
+				throw new Error("completion failed")
+			})
+			const pending = writer
+				.replace(filePath, "hash", blocks(2), embedder, attempt.signal)
+				.catch((error) => error)
+			await vi.advanceTimersByTimeAsync(500)
+			expect(await pending).toMatchObject({ message: "completion failed" })
+			expect(embedder.createEmbeddings).toHaveBeenCalledTimes(2)
+			expect(store.countPointsForFile).toHaveBeenCalledOnce()
+			const failure = {
+				activity: "embed",
+				reason: "temporary embedding failure",
+				attempt: 1,
+				classification: "server",
+				state: "exhausted",
+			}
+			expect(failures.list()[0]).toMatchObject(failure)
+			expect(failures.getFailure("file.ts", "hash", "embed")).toMatchObject(failure)
+
+			const failingOperation = stage === "allocation" ? generations.allocate : cache.invalidateFile
+			failingOperation.mockRejectedValue(new Error(`later ${stage} failure`))
+			const calls = failingOperation.mock.calls.length
+			await expect(writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal)).rejects.toThrow(
+				"temporary embedding failure",
+			)
+			expect(failingOperation).toHaveBeenCalledTimes(calls)
+			expect(failures.list()[0]).toMatchObject(failure)
+		},
+	)
+
+	it.each(["owned", "permanent", "abort", "revision"])("ends automatic attempts for %s", async (ending) => {
+		if (ending === "owned") embedder.internallyRetriedClasses = new Set(["rate-limit"])
+		embedder.createEmbeddings.mockRejectedValue(
+			Object.assign(new Error("failed"), {
+				status: ending === "owned" ? 429 : ending === "permanent" ? 401 : 503,
+			}),
+		)
+		const pending = writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal).catch((error) => error)
+		await vi.advanceTimersByTimeAsync(0)
+		if (ending === "abort") attempt.abort()
+		if (ending === "revision") {
+			failures.renew("file.ts", "new")
+			failures.record("file.ts", "new", "read", "new failure", 1, "exhausted")
+		}
+		await vi.advanceTimersByTimeAsync(1500)
+		await pending
+		expect(embedder.createEmbeddings).toHaveBeenCalledOnce()
+		expect(store.upsertPoints).not.toHaveBeenCalled()
+		expect(failures.list()[0].state).toBe("exhausted")
+		if (ending === "revision") expect(failures.list()[0].reason).toBe("new failure")
+	})
+
+	it("discards issued old-revision embeddings without mutating the new failure", async () => {
+		const held = deferred<{ embeddings: number[][] }>()
+		embedder.createEmbeddings.mockReturnValueOnce(held.promise)
+		const pending = writer.replace(filePath, "old", blocks(2), embedder, attempt.signal).catch((error) => error)
+		await vi.advanceTimersByTimeAsync(0)
+		failures.renew("file.ts", "new")
+		failures.record("file.ts", "new", "parse", "new failure", 1, "exhausted")
+		held.resolve({ embeddings: [[1], [1]] })
+		expect(await pending).toMatchObject({ name: "AbortError" })
+		expect(store.upsertPoints).not.toHaveBeenCalled()
+		expect(cache.completeFile).not.toHaveBeenCalled()
+		expect(failures.list()[0].reason).toBe("new failure")
+	})
+
+	it("waits for an issued superseded revision save before completing the newer revision", async () => {
+		const held = deferred()
+		store.upsertPoints.mockReturnValueOnce(held.promise)
+		const old = writer.replace(filePath, "old", blocks(2), embedder, attempt.signal).catch((error) => error)
+		await vi.advanceTimersByTimeAsync(0)
+		const current = writer.replace(filePath, "new", blocks(2), embedder, attempt.signal)
+		await vi.advanceTimersByTimeAsync(0)
+		expect(store.upsertPoints).toHaveBeenCalledTimes(2)
+		expect(cache.completeFile).not.toHaveBeenCalled()
+		held.resolve()
+		await current
+		expect(await old).toMatchObject({ name: "AbortError" })
+		expect(cache.completeFile).toHaveBeenCalledExactlyOnceWith(filePath, "new")
+		expect(store.countPointsForFile).toHaveBeenCalledTimes(2)
 	})
 
 	it("awaits durable invalidation before any embedding or vector mutation", async () => {
@@ -147,8 +360,37 @@ describe("FileIndexWriter", () => {
 			expect(cache.completeFile).not.toHaveBeenCalled()
 			expect(cache.completeRemoval).not.toHaveBeenCalled()
 			expect(gate.needsReconciliation(filePath)).toBe(false)
+			expect(failures.list()).toEqual([
+				expect.objectContaining({
+					path: "file.ts",
+					revision: operation === "replace" ? "hash" : "removed",
+					activity: operation === "replace" ? "upsert" : "delete",
+					reason: "Disk full",
+					state: "exhausted",
+				}),
+			])
 		},
 	)
+
+	it.each(["replace", "remove"] as const)("records %s allocation failures before any mutation", async (operation) => {
+		generations.allocate.mockRejectedValue(new Error("watermark save failed"))
+		const pending =
+			operation === "replace"
+				? writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal)
+				: writer.remove(filePath, attempt.signal)
+		await expect(pending).rejects.toThrow("watermark save failed")
+		expect(cache.invalidateFile).not.toHaveBeenCalled()
+		expect(embedder.createEmbeddings).not.toHaveBeenCalled()
+		expect(store.upsertPoints).not.toHaveBeenCalled()
+		expect(store.deletePointsByFilePath).not.toHaveBeenCalled()
+		expect(failures.list()[0]).toMatchObject({
+			path: "file.ts",
+			activity: operation === "replace" ? "upsert" : "delete",
+			reason: "watermark save failed",
+			state: "exhausted",
+			classification: "permanent",
+		})
+	})
 
 	it("upserts every registered batch before fenced cleanup, verification, hash and progress", async () => {
 		const finalBatch = deferred()
@@ -171,7 +413,7 @@ describe("FileIndexWriter", () => {
 		expect(store.countPointsForFile.mock.invocationCallOrder[0]).toBeLessThan(
 			cache.completeFile.mock.invocationCallOrder[0],
 		)
-		expect(embedder.createEmbeddings).toHaveBeenNthCalledWith(1, ["block 0"], undefined, attempt.signal)
+		expect(embedder.createEmbeddings).toHaveBeenNthCalledWith(1, ["block 0"], undefined, expect.any(AbortSignal))
 		const points = store.upsertPoints.mock.calls.flatMap(([batch]: any[]) => batch)
 		expect(points.map((point: any) => point.id)).toEqual([
 			uuidv5("segment-0:17", QDRANT_CODE_BLOCK_NAMESPACE),

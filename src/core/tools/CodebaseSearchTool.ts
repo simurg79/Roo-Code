@@ -1,11 +1,9 @@
 import * as vscode from "vscode"
-import path from "path"
 
 import { Task } from "../task/Task"
 import { CodeIndexManager } from "../../services/code-index/manager"
 import { getWorkspacePath } from "../../utils/path"
 import { formatResponse } from "../prompts/responses"
-import { VectorStoreSearchResult } from "../../services/code-index/interfaces"
 import type { ToolUse } from "../../shared/tools"
 
 import { BaseTool, ToolCallbacks } from "./BaseTool"
@@ -70,18 +68,20 @@ export class CodebaseSearchTool extends BaseTool<"codebase_search"> {
 				throw new Error("Code Indexing is not configured (Missing OpenAI Key or Qdrant URL).")
 			}
 
-			const searchResults: VectorStoreSearchResult[] = await manager.searchIndex(query, directoryPrefix)
-
-			if (!searchResults || searchResults.length === 0) {
-				pushToolResult(`No relevant code snippets found for the query: "${query}"`)
-				return
-			}
+			const { results: searchResults, partial, failedFiles } = await manager.searchIndex(query, directoryPrefix)
+			const partialNotice = partial
+				? `Partial index: results may be incomplete. Failed files:\n${failedFiles.map((file) => `- ${file}`).join("\n")}\n\n`
+				: ""
 
 			const jsonResult = {
 				query,
 				results: [],
+				partial,
+				failedFiles,
 			} as {
 				query: string
+				partial: boolean
+				failedFiles: string[]
 				results: Array<{
 					filePath: string
 					score: number
@@ -109,7 +109,12 @@ export class CodebaseSearchTool extends BaseTool<"codebase_search"> {
 			const payload = { tool: "codebaseSearch", content: jsonResult }
 			await task.say("codebase_search_result", JSON.stringify(payload))
 
-			const output = `Query: ${query}
+			if (jsonResult.results.length === 0) {
+				pushToolResult(`${partialNotice}No relevant code snippets found for the query: "${query}"`)
+				return
+			}
+
+			const output = `${partialNotice}Query: ${query}
 Results:
 
 ${jsonResult.results

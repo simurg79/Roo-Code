@@ -1,3 +1,5 @@
+import "./mock-code-index-log"
+import { codeIndexLog } from "../code-index-log"
 import { EventEmitter } from "node:events"
 import { ParseWorkerClient, type ParseRequest } from "../parse-worker-client"
 
@@ -33,7 +35,7 @@ describe("ParseWorkerClient", () => {
 		"waits for physical exit with a %s termination promise and logs the parent's timeout once",
 		async (termination) => {
 			vi.useFakeTimers()
-			const log = vi.spyOn(console, "log").mockImplementation(() => {})
+			const log = vi.spyOn(codeIndexLog, "info").mockImplementation(() => {})
 			try {
 				const worker = new MockWorker()
 				if (termination === "rejected") worker.terminate.mockRejectedValue(new Error("termination failed"))
@@ -74,6 +76,26 @@ describe("ParseWorkerClient", () => {
 		expect(await pending).toMatchObject({ name: "ParserFatalError" })
 		await client.stopped
 		expect(worker.terminate).not.toHaveBeenCalled()
+	})
+
+	it("forwards diagnostics without completing or interrupting the active parse", async () => {
+		const worker = new MockWorker()
+		const client = new ParseWorkerClient(() => worker)
+		const pending = client.parseFile("active.ts", options)
+		await drain()
+		worker.emit("message", {
+			id: 0,
+			diagnostic: {
+				level: "warn",
+				message: "parser warning",
+				fields: { path: "active.ts" },
+			},
+		})
+		expect(codeIndexLog.warn).toHaveBeenLastCalledWith("parser warning", { path: "active.ts" })
+		expect(worker.terminate).not.toHaveBeenCalled()
+		worker.emit("message", { id: worker.requests[0].id, blocks: [] })
+		await expect(pending).resolves.toEqual([])
+		client.stop()
 	})
 
 	it("dispatches FIFO and starts each deadline at dispatch, not enqueue", async () => {

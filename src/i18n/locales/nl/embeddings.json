@@ -73,6 +73,8 @@
 		"indexingRequiresWorkspace": "Indexering vereist een geopende workspace map",
 		"indexingStopping": "Indexering stoppen...",
 		"indexingStopped": "Indexering gestopt door gebruiker.",
-		"indexingStoppedPartial": "Indexering gestopt. Gedeeltelijke indexgegevens bewaard."
+		"indexingStoppedPartial": "Indexering gestopt. Gedeeltelijke indexgegevens bewaard.",
+		"indexingFilesRetrying": "Mislukte bestanden worden opnieuw geprobeerd. Gedeeltelijke index beschikbaar.",
+		"indexingFilesFailed": "Er zijn nog bestandsfouten. Geen automatische nieuwe pogingen in afwachting. Gedeeltelijke index beschikbaar."
 	}
 }

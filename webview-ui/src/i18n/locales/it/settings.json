@@ -151,6 +151,22 @@
 		},
 		"description": "Configura le impostazioni di indicizzazione del codebase per abilitare la ricerca semantica del tuo progetto. <0>Scopri di più</0>",
 		"statusTitle": "Stato",
+		"indexingFilesRetrying": "File con errori di indicizzazione: {{count}}. Nuovo tentativo per {{path}}: {{reason}}",
+		"indexingFilesFailed": "File con errori di indicizzazione: {{count}}. Tentativi automatici terminati per {{path}}: {{reason}}",
+		"failedFileDetails": "Dettagli dei file non riusciti",
+		"failedFileReason": "Motivo",
+		"failedFileStates": {
+			"retrying": "Nuovo tentativo automatico in attesa",
+			"exhausted": "Tentativi automatici terminati"
+		},
+		"failedFileActivities": {
+			"read": "Leggere il file",
+			"parse": "Analizzare il file",
+			"embed": "Creare gli embedding",
+			"upsert": "Salvare i blocchi indicizzati",
+			"delete": "Rimuovere i blocchi indicizzati",
+			"verify": "Verificare il risultato indicizzato"
+		},
 		"settingsTitle": "Impostazioni di indicizzazione",
 		"disabledMessage": "L'indicizzazione del codebase è attualmente disabilitata. Abilitala nelle impostazioni globali per configurare le opzioni di indicizzazione.",
 		"embedderProviderLabel": "Provider Embedder",

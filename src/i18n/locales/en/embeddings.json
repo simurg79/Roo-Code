@@ -73,6 +73,8 @@
 		"indexingRequiresWorkspace": "Indexing requires an open workspace folder",
 		"indexingStopping": "Stopping indexing...",
 		"indexingStopped": "Indexing stopped by user.",
-		"indexingStoppedPartial": "Indexing stopped. Partial index data preserved."
+		"indexingStoppedPartial": "Indexing stopped. Partial index data preserved.",
+		"indexingFilesRetrying": "Retrying failed files. Partial index available.",
+		"indexingFilesFailed": "File failures remain. No automatic retries pending. Partial index available."
 	}
 }

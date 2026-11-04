@@ -151,6 +151,22 @@
 		},
 		"description": "Configureer codebase-indexeringsinstellingen om semantisch zoeken voor je project in te schakelen. <0>Meer informatie</0>",
 		"statusTitle": "Status",
+		"indexingFilesRetrying": "Bestanden met indexeringsfouten: {{count}}. Nieuwe poging voor {{path}}: {{reason}}",
+		"indexingFilesFailed": "Bestanden met indexeringsfouten: {{count}}. Automatische pogingen beëindigd voor {{path}}: {{reason}}",
+		"failedFileDetails": "Details van mislukte bestanden",
+		"failedFileReason": "Reden",
+		"failedFileStates": {
+			"retrying": "Automatische nieuwe poging in afwachting",
+			"exhausted": "Automatische pogingen beëindigd"
+		},
+		"failedFileActivities": {
+			"read": "Bestand lezen",
+			"parse": "Bestand parseren",
+			"embed": "Embeddings maken",
+			"upsert": "Geïndexeerde blokken opslaan",
+			"delete": "Geïndexeerde blokken verwijderen",
+			"verify": "Geïndexeerd resultaat verifiëren"
+		},
 		"settingsTitle": "Indexeringsinstellingen",
 		"disabledMessage": "Codebase-indexering is momenteel uitgeschakeld. Schakel het in de algemene instellingen in om indexeringsopties te configureren.",
 		"embedderProviderLabel": "Embedder Provider",

@@ -73,6 +73,8 @@
 		"indexingRequiresWorkspace": "L'indicizzazione richiede una cartella di workspace aperta",
 		"indexingStopping": "Interruzione dell'indicizzazione...",
 		"indexingStopped": "Indicizzazione interrotta dall'utente.",
-		"indexingStoppedPartial": "Indicizzazione interrotta. Dati di indice parziali conservati."
+		"indexingStoppedPartial": "Indicizzazione interrotta. Dati di indice parziali conservati.",
+		"indexingFilesRetrying": "Nuovo tentativo per i file non riusciti. Indice parziale disponibile.",
+		"indexingFilesFailed": "Restano errori nei file. Nessun tentativo automatico in attesa. Indice parziale disponibile."
 	}
 }

@@ -151,6 +151,22 @@
 		},
 		"description": "Konfigurasi pengaturan pengindeksan codebase untuk mengaktifkan pencarian semantik proyek kamu. <0>Pelajari lebih lanjut</0>",
 		"statusTitle": "Status",
+		"indexingFilesRetrying": "File dengan kegagalan pengindeksan: {{count}}. Mencoba ulang {{path}}: {{reason}}",
+		"indexingFilesFailed": "File dengan kegagalan pengindeksan: {{count}}. Percobaan ulang otomatis berakhir untuk {{path}}: {{reason}}",
+		"failedFileDetails": "Detail file yang gagal",
+		"failedFileReason": "Alasan",
+		"failedFileStates": {
+			"retrying": "Percobaan ulang otomatis tertunda",
+			"exhausted": "Percobaan ulang otomatis berakhir"
+		},
+		"failedFileActivities": {
+			"read": "Membaca file",
+			"parse": "Mengurai file",
+			"embed": "Membuat embedding",
+			"upsert": "Menyimpan blok yang diindeks",
+			"delete": "Menghapus blok yang diindeks",
+			"verify": "Memverifikasi hasil indeks"
+		},
 		"settingsTitle": "Pengaturan Pengindeksan",
 		"disabledMessage": "Pengindeksan codebase saat ini dinonaktifkan. Aktifkan di pengaturan global untuk mengkonfigurasi opsi pengindeksan.",
 		"embedderProviderLabel": "Provider Embedder",

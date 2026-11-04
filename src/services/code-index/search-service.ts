@@ -1,5 +1,7 @@
+import { codeIndexLog } from "./code-index-log"
 import * as path from "path"
-import { VectorStoreSearchResult } from "./interfaces"
+import type { CodeIndexSearchResponse } from "./interfaces/manager"
+import { FileFailureRegistry } from "./file-failure-registry"
 import { IEmbedder } from "./interfaces/embedder"
 import { IVectorStore } from "./interfaces/vector-store"
 import { CodeIndexConfigManager } from "./config-manager"
@@ -14,17 +16,17 @@ export class CodeIndexSearchService {
 		private readonly stateManager: CodeIndexStateManager,
 		private readonly embedder: IEmbedder,
 		private readonly vectorStore: IVectorStore,
+		private readonly failures: FileFailureRegistry,
 	) {}
 
 	/**
 	 * Searches the code index for relevant content.
 	 * @param query The search query
-	 * @param limit Maximum number of results to return
 	 * @param directoryPrefix Optional directory path to filter results by
-	 * @returns Array of search results
+	 * @returns Search results and partial-index details
 	 * @throws Error if the service is not properly configured or ready
 	 */
-	public async searchIndex(query: string, directoryPrefix?: string): Promise<VectorStoreSearchResult[]> {
+	public async searchIndex(query: string, directoryPrefix?: string): Promise<CodeIndexSearchResponse> {
 		if (!this.configManager.isFeatureEnabled || !this.configManager.isFeatureConfigured) {
 			throw new Error("Code index feature is disabled or not configured.")
 		}
@@ -33,8 +35,9 @@ export class CodeIndexSearchService {
 		const maxResults = this.configManager.currentSearchMaxResults
 
 		const currentState = this.stateManager.getCurrentStatus().systemStatus
-		if (currentState !== "Indexed" && currentState !== "Indexing") {
-			// Allow search during Indexing too
+		const partialStandby =
+			currentState === "Standby" && this.failures.list().length > 0 && (await this.vectorStore.collectionExists())
+		if (currentState !== "Indexed" && currentState !== "Indexing" && !partialStandby) {
 			throw new Error(`Code index is not ready for search. Current state: ${currentState}`)
 		}
 
@@ -54,10 +57,12 @@ export class CodeIndexSearchService {
 
 			// Perform search
 			const results = await this.vectorStore.search(vector, normalizedPrefix, minScore, maxResults)
-			return results
+			const failedFiles = this.failures.list().map((failure) => failure.path)
+			return { results, partial: failedFiles.length > 0, failedFiles }
 		} catch (error) {
-			console.error("[CodeIndexSearchService] Error during search:", error)
-			this.stateManager.setSystemState("Error", `Search failed: ${(error as Error).message}`)
+			codeIndexLog.error("Search failed", { error })
+			const message = error instanceof Error ? error.message : String(error)
+			this.stateManager.setSystemState("Error", `Search failed: ${message}`, "error")
 
 			throw error // Re-throw the error after setting state
 		}

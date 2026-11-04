@@ -1,6 +1,8 @@
+import { codeIndexLog } from "../code-index-log"
 import { BedrockRuntimeClient, InvokeModelCommand, InvokeModelCommandInput } from "@aws-sdk/client-bedrock-runtime"
 import { fromIni, fromNodeProviderChain } from "@aws-sdk/credential-providers"
 import { waitForRetry } from "./cancellation"
+import type { TransientClass } from "../shared/indexing-errors"
 import { IEmbedder, EmbeddingResponse, EmbedderInfo } from "../interfaces"
 import {
 	MAX_BATCH_TOKENS,
@@ -17,6 +19,7 @@ import { withValidationErrorHandling, formatEmbeddingError, HttpError } from "..
  * Amazon Bedrock implementation of the embedder interface with batching and rate limiting
  */
 export class BedrockEmbedder implements IEmbedder {
+	readonly internallyRetriedClasses: ReadonlySet<TransientClass> = new Set(["rate-limit"])
 	private bedrockClient: BedrockRuntimeClient
 	private readonly defaultModelId: string
 
@@ -41,6 +44,7 @@ export class BedrockEmbedder implements IEmbedder {
 
 		this.bedrockClient = new BedrockRuntimeClient({
 			userAgentAppId: `RooCode#${Package.version}`,
+			maxAttempts: 1,
 			region: this.region,
 			credentials,
 		})
@@ -73,7 +77,7 @@ export class BedrockEmbedder implements IEmbedder {
 				const itemTokens = Math.ceil(text.length / 4)
 
 				if (itemTokens > MAX_ITEM_TOKENS) {
-					console.warn(
+					codeIndexLog.warn(
 						t("embeddings:textExceedsTokenLimit", {
 							index: i,
 							itemTokens,
@@ -152,7 +156,7 @@ export class BedrockEmbedder implements IEmbedder {
 				// Check if it's a rate limit error
 				if (error.name === "ThrottlingException" && hasMoreAttempts) {
 					const delayMs = INITIAL_DELAY_MS * Math.pow(2, attempts)
-					console.warn(
+					codeIndexLog.warn(
 						t("embeddings:rateLimitRetry", {
 							delayMs,
 							attempt: attempts + 1,
@@ -164,7 +168,7 @@ export class BedrockEmbedder implements IEmbedder {
 				}
 
 				// Log the error for debugging
-				console.error(`Bedrock embedder error (attempt ${attempts + 1}/${MAX_RETRIES}):`, error)
+				codeIndexLog.error(`Bedrock embedder error (attempt ${attempts + 1}/${MAX_RETRIES}):`, error)
 
 				// Format and throw the error
 				throw formatEmbeddingError(error, MAX_RETRIES)

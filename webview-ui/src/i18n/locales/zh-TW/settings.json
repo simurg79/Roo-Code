@@ -111,6 +111,22 @@
 		"title": "程式碼庫索引",
 		"description": "設定程式碼庫索引設定以啟用專案的語意搜尋。<0>了解更多</0>",
 		"statusTitle": "狀態",
+		"indexingFilesRetrying": "索引失敗的檔案：{{count}}。正在重試 {{path}}：{{reason}}",
+		"indexingFilesFailed": "索引失敗的檔案：{{count}}。{{path}} 的自動重試已結束：{{reason}}",
+		"failedFileDetails": "失敗檔案詳細資訊",
+		"failedFileReason": "原因",
+		"failedFileStates": {
+			"retrying": "等待自動重試",
+			"exhausted": "自動重試已結束"
+		},
+		"failedFileActivities": {
+			"read": "讀取檔案",
+			"parse": "解析檔案",
+			"embed": "建立嵌入向量",
+			"upsert": "儲存索引區塊",
+			"delete": "移除索引區塊",
+			"verify": "驗證索引結果"
+		},
 		"enableLabel": "啟用程式碼庫索引",
 		"enableDescription": "啟用程式碼索引以改進搜尋和上下文理解",
 		"settingsTitle": "索引設定",

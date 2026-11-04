@@ -9,6 +9,7 @@ import { QdrantVectorStore } from "../vector-store/qdrant-client"
 import { DirectoryScanner, FileWatcher } from "../processors"
 import { IndexWriteGate } from "../index-write-gate"
 import { GenerationAllocator } from "../generation-allocator"
+import { FileFailureRegistry } from "../file-failure-registry"
 
 vitest.mock("../generation-allocator", () => ({ GenerationAllocator: vitest.fn() }))
 vitest.mock("../processors")
@@ -57,15 +58,23 @@ describe("CodeIndexServiceFactory", () => {
 	it("injects the same manager-owned allocator and gate into scanner and watcher", () => {
 		const gate = new IndexWriteGate()
 		const allocator = new GenerationAllocator(mockCacheManager)
-		factory = new CodeIndexServiceFactory(mockConfigManager, "/test/workspace", mockCacheManager, gate, allocator)
+		const failures = new FileFailureRegistry()
+		factory = new CodeIndexServiceFactory(
+			mockConfigManager,
+			"/test/workspace",
+			mockCacheManager,
+			gate,
+			allocator,
+			failures,
+		)
 		const parser = {} as any
 		const embedder = {} as any
 		const store = {} as any
 		const ignoreInstance = {} as any
 		factory.createDirectoryScanner(embedder, store, parser, ignoreInstance)
 		factory.createFileWatcher({} as any, embedder, store, mockCacheManager, ignoreInstance, undefined, parser)
-		expect(vitest.mocked(DirectoryScanner).mock.calls[0].slice(-2)).toEqual([gate, allocator])
-		expect(vitest.mocked(FileWatcher).mock.calls[0].slice(-2)).toEqual([gate, allocator])
+		expect(vitest.mocked(DirectoryScanner).mock.calls[0].slice(-3)).toEqual([gate, allocator, failures])
+		expect(vitest.mocked(FileWatcher).mock.calls[0].slice(-3)).toEqual([gate, allocator, failures])
 	})
 
 	describe("createEmbedder", () => {

@@ -2439,19 +2439,7 @@ export const webviewMessageHandler = async (provider: ClineProvider, message: We
 				await manager.setWorkspaceEnabled(true)
 
 				if (manager.isFeatureEnabled && manager.isFeatureConfigured) {
-					await manager.initialize(provider.contextProxy)
-
-					const currentState = manager.state
-					if (currentState === "Standby" || currentState === "Error") {
-						manager.startIndexing()
-
-						if (!manager.isInitialized) {
-							await manager.initialize(provider.contextProxy)
-							if (manager.state === "Standby" || manager.state === "Error") {
-								manager.startIndexing()
-							}
-						}
-					}
+					await manager.startIndexing(provider.contextProxy)
 				}
 			} catch (error) {
 				provider.log(`Error starting indexing: ${error instanceof Error ? error.message : String(error)}`)
@@ -2485,8 +2473,7 @@ export const webviewMessageHandler = async (provider: ClineProvider, message: We
 				const enabled = message.bool ?? false
 				await manager.setWorkspaceEnabled(enabled)
 				if (enabled && manager.isFeatureEnabled && manager.isFeatureConfigured) {
-					await manager.initialize(provider.contextProxy)
-					manager.startIndexing()
+					await manager.startIndexing(provider.contextProxy)
 				} else if (!enabled) {
 					manager.stopIndexing()
 				}
@@ -2519,8 +2506,13 @@ export const webviewMessageHandler = async (provider: ClineProvider, message: We
 					if (wasEnabled && !isNowEnabled) {
 						m.stopIndexing()
 					} else if (!wasEnabled && isNowEnabled && m.isFeatureEnabled && m.isFeatureConfigured) {
-						await m.initialize(provider.contextProxy)
-						m.startIndexing()
+						try {
+							await m.startIndexing(provider.contextProxy)
+						} catch (error) {
+							provider.log(
+								`Error starting auto-enabled indexing: ${error instanceof Error ? error.message : String(error)}`,
+							)
+						}
 					}
 				}
 				provider.postMessageToWebview({

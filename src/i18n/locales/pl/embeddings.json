@@ -73,6 +73,8 @@
 		"indexingRequiresWorkspace": "Indeksowanie wymaga otwartego folderu workspace",
 		"indexingStopping": "Zatrzymywanie indeksowania...",
 		"indexingStopped": "Indeksowanie zatrzymane przez użytkownika.",
-		"indexingStoppedPartial": "Indeksowanie zatrzymane. Częściowe dane indeksu zachowane."
+		"indexingStoppedPartial": "Indeksowanie zatrzymane. Częściowe dane indeksu zachowane.",
+		"indexingFilesRetrying": "Ponawianie przetwarzania plików z błędami. Częściowy indeks jest dostępny.",
+		"indexingFilesFailed": "Pozostały błędy plików. Brak oczekujących automatycznych prób. Częściowy indeks jest dostępny."
 	}
 }

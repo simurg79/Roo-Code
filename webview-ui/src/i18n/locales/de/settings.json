@@ -101,6 +101,22 @@
 		"title": "Codebase-Indexierung",
 		"description": "Konfiguriere Codebase-Indexierungseinstellungen, um semantische Suche in deinem Projekt zu aktivieren. <0>Mehr erfahren</0>",
 		"statusTitle": "Status",
+		"indexingFilesRetrying": "Dateien mit Indexierungsfehlern: {{count}}. Erneuter Versuch für {{path}}: {{reason}}",
+		"indexingFilesFailed": "Dateien mit Indexierungsfehlern: {{count}}. Automatische Wiederholungen für {{path}} beendet: {{reason}}",
+		"failedFileDetails": "Details zu fehlgeschlagenen Dateien",
+		"failedFileReason": "Grund",
+		"failedFileStates": {
+			"retrying": "Automatische Wiederholung ausstehend",
+			"exhausted": "Automatische Wiederholungen beendet"
+		},
+		"failedFileActivities": {
+			"read": "Datei lesen",
+			"parse": "Datei parsen",
+			"embed": "Embeddings erstellen",
+			"upsert": "Indexierte Blöcke speichern",
+			"delete": "Indexierte Blöcke entfernen",
+			"verify": "Indexiertes Ergebnis überprüfen"
+		},
 		"enableLabel": "Codebase-Indexierung aktivieren",
 		"enableDescription": "Aktiviere die Code-Indizierung für eine verbesserte Suche und ein besseres Kontextverständnis",
 		"settingsTitle": "Indexierungseinstellungen",

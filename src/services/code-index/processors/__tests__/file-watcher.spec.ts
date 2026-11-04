@@ -1,3 +1,4 @@
+import "../../__tests__/mock-code-index-log"
 import * as vscode from "vscode"
 import path from "path"
 import { createHash } from "crypto"
@@ -14,6 +15,8 @@ import { CodeParser } from "../parser"
 import { CacheManager } from "../../cache-manager"
 import { safeWriteJson } from "../../../../utils/safeWriteJson"
 import { FileCompletion } from "../../file-completion"
+import { FileFailureRegistry } from "../../file-failure-registry"
+import { codeIndexLog } from "../../code-index-log"
 
 vi.mock("../../../../utils/safeWriteJson", () => ({ safeWriteJson: vi.fn() }))
 
@@ -111,7 +114,10 @@ describe("FileWatcher per-file completion", () => {
 	let state: any
 	let orchestrator: CodeIndexOrchestrator
 
+	let failures: FileFailureRegistry
+
 	function makeWatcher() {
+		failures = new FileFailureRegistry()
 		const created = new FileWatcher(
 			workspace,
 			{} as any,
@@ -124,6 +130,7 @@ describe("FileWatcher per-file completion", () => {
 			parser,
 			gate,
 			generations,
+			failures,
 		)
 		watchers.push(created)
 		return created
@@ -173,6 +180,7 @@ describe("FileWatcher per-file completion", () => {
 			gate,
 			generations,
 			isCurrentAttempt,
+			failures,
 		)
 		await orchestrator.startIndexing()
 		expect(state.state).toBe(Object.keys(cache.getOpenFiles()).length ? "Standby" : "Indexed")
@@ -303,6 +311,88 @@ describe("FileWatcher per-file completion", () => {
 	afterEach(() => {
 		for (const created of watchers) created.dispose()
 		vi.useRealTimers()
+	})
+
+	it("recovers a watcher store request without another event and retains every retry in grouped diagnostics", async () => {
+		store.upsertPoints.mockRejectedValueOnce(Object.assign(new Error("unavailable"), { status: 503 }))
+		store.upsertPoints.mockRejectedValueOnce(Object.assign(new Error("unavailable"), { status: 503 }))
+		await watcher.initialize()
+		await queue()
+		await vi.advanceTimersByTimeAsync(1500 + LATE_WRITE_GRACE_MS)
+		expect(embedder.createEmbeddings).toHaveBeenCalledOnce()
+		expect(store.upsertPoints).toHaveBeenCalledTimes(3)
+		expect(hashes[fileA]).toBe(hash("content a"))
+		expect(failures.list()).toEqual([])
+		const batch = vi.mocked(codeIndexLog.createFailureBatch).mock.results.at(-1)!.value
+		expect(batch.record.mock.calls.map(([failure]: any[]) => failure.attempt)).toEqual([1, 2])
+		expect(batch.flush).toHaveBeenCalledOnce()
+	})
+
+	it.each(["read", "parse", "fatal"])(
+		"records watcher %s failures including fatal before disposal",
+		async (activity) => {
+			if (activity === "read")
+				vi.mocked(vscode.workspace.fs.readFile).mockRejectedValueOnce(new Error("read failed"))
+			else
+				parser.parseFile.mockRejectedValueOnce(
+					activity === "fatal" ? new ParserFatalError("parser-abort", fileA) : new Error("parse failed"),
+				)
+			const pending = watcher.processFile(fileA)
+			if (activity === "fatal") await expect(pending).rejects.toBeInstanceOf(ParserFatalError)
+			else expect((await pending).status).toBe("local_error")
+			expect(failures.list()[0]).toMatchObject({
+				path: "a.ts",
+				activity: activity === "read" ? "read" : "parse",
+				attempt: 1,
+				state: "exhausted",
+			})
+		},
+	)
+
+	it("retains exhausted budgets across batches and renews only the hashed changed path", async () => {
+		embedder.createEmbeddings.mockRejectedValue(Object.assign(new Error("unavailable"), { status: 503 }))
+		await watcher.initialize()
+		await queue()
+		await vi.advanceTimersByTimeAsync(1500)
+		expect(embedder.createEmbeddings).toHaveBeenCalledTimes(3)
+		await queue()
+		expect(embedder.createEmbeddings).toHaveBeenCalledTimes(3)
+		await queue([fileB])
+		await vi.advanceTimersByTimeAsync(1500)
+		expect(embedder.createEmbeddings).toHaveBeenCalledTimes(6)
+		await queue([fileA])
+		expect(embedder.createEmbeddings).toHaveBeenCalledTimes(6)
+		contents.set(fileA, "new content")
+		await queue([fileA])
+		await vi.advanceTimersByTimeAsync(1500)
+		expect(embedder.createEmbeddings).toHaveBeenCalledTimes(9)
+		expect(failures.list()).toHaveLength(2)
+	})
+
+	it("aborts a path retry on a newer event before renewing its hash and leaves another path alone", async () => {
+		embedder.createEmbeddings.mockRejectedValue(Object.assign(new Error("unavailable"), { status: 503 }))
+		await watcher.initialize()
+		await queue([fileA, fileB])
+		const oldSignal = embedder.createEmbeddings.mock.calls.find(([texts]: string[][]) =>
+			texts[0].startsWith("a.ts"),
+		)[2]
+		contents.set(fileA, "new revision")
+		handlers.change({ fsPath: fileA })
+		expect(oldSignal.aborted).toBe(true)
+		expect(failures.getRevision("a.ts")).toBe(hash("content a"))
+		await vi.advanceTimersByTimeAsync(1500)
+		await vi.advanceTimersByTimeAsync(500)
+		expect(failures.getRevision("a.ts")).toBe(hash("new revision"))
+		expect(failures.get("b.ts")).toMatchObject({ revision: hash("content b"), attempt: 3, state: "exhausted" })
+	})
+
+	it("attempts fenced removal for a registry-only deleted source", async () => {
+		failures.renew("a.ts", "unread")
+		failures.record("a.ts", "unread", "read", "read failed", 1, "exhausted")
+		await watcher.initialize()
+		await queue([fileA], "delete")
+		expect(store.deletePointsByFilePath).toHaveBeenCalledWith(fileA, expect.any(Number))
+		expect(failures.list()).toEqual([])
 	})
 
 	it.each(["cancel", "disable", "fatal"])(
@@ -436,7 +526,9 @@ describe("FileWatcher per-file completion", () => {
 			await start()
 			await queue()
 			const signal = embedder.createEmbeddings.mock.calls[0][2]
-			await orchestrator.stopIndexing()
+			const stopped = orchestrator.stopIndexing()
+			await vi.advanceTimersByTimeAsync(INDEX_STOP_LIMIT_MS)
+			await stopped
 			expect(signal.aborted).toBe(true)
 			if (outcome === "success") held.resolve({ embeddings: [[1]] })
 			else held.reject(outcome === "abort" ? new DOMException("cancelled", "AbortError") : new Error("failed"))
@@ -489,7 +581,7 @@ describe("FileWatcher per-file completion", () => {
 			void orchestrator.stopIndexing()
 		})
 		await queue()
-		expect(state.setSystemState).toHaveBeenCalledWith("Stopping", expect.any(String))
+		expect(state.setSystemState).toHaveBeenCalledWith("Stopping", expect.any(String), "stop")
 		expect(embedder.createEmbeddings).not.toHaveBeenCalled()
 	})
 
@@ -578,16 +670,23 @@ describe("FileWatcher per-file completion", () => {
 		await drain()
 	})
 
-	it("T17 save failure issues no mutation and reports an incomplete batch", async () => {
-		cache.invalidateFile.mockRejectedValue(new Error("disk full"))
-		await start()
-		await queue()
-		expect(embedder.createEmbeddings).not.toHaveBeenCalled()
-		expect(store.upsertPoints).not.toHaveBeenCalled()
-		expect(store.deletePointsByFilePath).not.toHaveBeenCalled()
-		expect(finished.mock.calls[0][0].batchError).toBeInstanceOf(Error)
-		expect(state.state).toBe("Standby")
-	})
+	it.each(["invalidation", "allocation"])(
+		"T17 %s failure issues no mutation and reports an incomplete batch",
+		async (failure) => {
+			if (failure === "invalidation") cache.invalidateFile.mockRejectedValue(new Error("disk full"))
+			else vi.spyOn(generations, "allocate").mockRejectedValue(new Error("disk full"))
+			await start()
+			await queue()
+			expect(embedder.createEmbeddings).not.toHaveBeenCalled()
+			expect(store.upsertPoints).not.toHaveBeenCalled()
+			expect(store.deletePointsByFilePath).not.toHaveBeenCalled()
+			expect(finished.mock.calls[0][0].batchError).toBeInstanceOf(Error)
+			expect(failures.list()).toEqual([
+				expect.objectContaining({ path: "a.ts", activity: "upsert", reason: "disk full", state: "exhausted" }),
+			])
+			expect(state.state).toBe("Standby")
+		},
+	)
 
 	it.each(["delete", "ignore", "rooignore", "size"])("T21 cleans tracked open paths on %s", async (exclusion) => {
 		open[fileA] = true
@@ -754,6 +853,7 @@ describe("FileWatcher per-file completion", () => {
 			} else {
 				expect(hashes[fileA]).toBeUndefined()
 				expect(state.state).toBe("Standby")
+				failures.resetAllBudgets()
 				await queue()
 				expect(points.size).toBe(1)
 				expect(hashes[fileA]).toBe(hash("content a"))
@@ -779,6 +879,7 @@ describe("FileWatcher per-file completion", () => {
 			applyDelete(filePath, generation)
 			await cleanup.promise
 		})
+		failures.resetAllBudgets()
 		await queue()
 		expect(store.countPointsForFile).not.toHaveBeenCalled()
 		const current = [...points.values()][0]
@@ -794,6 +895,7 @@ describe("FileWatcher per-file completion", () => {
 		expect(open[fileA]).toBe(true)
 		expect(finished.mock.calls.at(-1)![0].batchError).toBeInstanceOf(Error)
 		expect(progress.mock.calls.every(([value]) => value.processedInBatch === 0)).toBe(true)
+		failures.resetAllBudgets()
 		await queue()
 		await vi.advanceTimersByTimeAsync(deadline - Date.now() - 1)
 		expect(hashes[fileA]).toBeUndefined()
@@ -879,6 +981,7 @@ describe("FileWatcher per-file completion", () => {
 		await start()
 		await queue()
 		expect(hashes[fileA]).toBeUndefined()
+		failures.resetAllBudgets()
 		await queue()
 		const current = [...points.values()][0]
 		remote.resolve()
@@ -887,6 +990,7 @@ describe("FileWatcher per-file completion", () => {
 		await vi.advanceTimersByTimeAsync(LATE_WRITE_GRACE_MS)
 		expect(hashes[fileA]).toBeUndefined()
 		expect(finished.mock.calls.at(-1)![0].batchError).toBeInstanceOf(Error)
+		failures.resetAllBudgets()
 		await queue()
 		expect(points.size).toBe(1)
 		expect(hashes[fileA]).toBe(hash("content a"))
@@ -974,7 +1078,7 @@ describe("FileWatcher per-file completion", () => {
 			await start()
 			await queue()
 			expect(cache.getHash(fileA)).toBeUndefined()
-			await vi.advanceTimersByTimeAsync(LATE_WRITE_GRACE_MS)
+			await vi.advanceTimersByTimeAsync(LATE_WRITE_GRACE_MS + INDEX_STOP_LIMIT_MS)
 			expect(state.state).toBe("Indexed")
 			expect(points.size).toBe(1)
 			expect(cache.getHash(fileA)).toBe(hash("content a"))
@@ -991,6 +1095,7 @@ describe("FileWatcher per-file completion", () => {
 		await start()
 		await queue()
 		expect(gate.needsReconciliation(fileA)).toBe(true)
+		failures.resetAllBudgets()
 		await queue()
 		await vi.advanceTimersByTimeAsync(10_000)
 		gate.recover([fileA], Date.now())
@@ -1063,7 +1168,9 @@ describe("FileWatcher per-file completion", () => {
 		await queue([fileA, fileB])
 		expect(hashes[fileA]).toBe(hash("content a"))
 		expect(hashes[fileB]).toBeUndefined()
-		await orchestrator.stopIndexing()
+		const stopped = orchestrator.stopIndexing()
+		await vi.advanceTimersByTimeAsync(INDEX_STOP_LIMIT_MS)
+		await stopped
 		held.resolve({ embeddings: [[1]] })
 		await drain()
 		expect([...points.values()].every((point) => point.payload.filePath === "a.ts")).toBe(true)
@@ -1081,7 +1188,9 @@ describe("FileWatcher per-file completion", () => {
 		const paths = Array.from({ length: 12 }, (_, fileNumber) => path.join(workspace, `${fileNumber}.ts`))
 		await queue(paths)
 		expect(embedder.createEmbeddings).toHaveBeenCalledTimes(10)
-		await orchestrator.stopIndexing()
+		const stopped = orchestrator.stopIndexing()
+		await vi.advanceTimersByTimeAsync(INDEX_STOP_LIMIT_MS)
+		await stopped
 		for (const call of embedder.createEmbeddings.mock.calls) expect(call[2].aborted).toBe(true)
 		held.resolve({ embeddings: [[1]] })
 		await drain()
@@ -1152,6 +1261,7 @@ describe("FileWatcher per-file completion", () => {
 		expect(state.setSystemState).toHaveBeenLastCalledWith(
 			"Standby",
 			"embeddings:orchestrator.indexingStoppedPartial",
+			"stop",
 		)
 		await queue([fileB])
 		expect(worker.requests).toHaveLength(1)
@@ -1178,7 +1288,11 @@ describe("FileWatcher per-file completion", () => {
 		expect(state.state).toBe("Stopping")
 		exit.resolve()
 		await stopped
-		expect(state.setSystemState).toHaveBeenLastCalledWith("Standby", "embeddings:orchestrator.indexingStopped")
+		expect(state.setSystemState).toHaveBeenLastCalledWith(
+			"Standby",
+			"embeddings:orchestrator.indexingStopped",
+			"stop",
+		)
 	})
 
 	it("T8 idle cancel preserves watcher status and message; disable blocks later events", async () => {
@@ -1253,7 +1367,7 @@ describe("FileWatcher per-file completion", () => {
 							.filter((point) => point.payload.filePath === path.relative(workspace, fileB))
 							.map((point) => point.id),
 					).toEqual(unrelatedIds)
-					expect(state.reportFileQueueProgress).toHaveBeenCalledWith(1, 2, "b.ts")
+					expect(state.reportFileQueueProgress).toHaveBeenCalledWith(1, 2, "b.ts", "changed-file-batch")
 				}
 			}
 			expect(verified).toEqual([{ at: expiryAt - 2, counts: { current: 1, other: 0 } }])
@@ -1280,6 +1394,7 @@ describe("FileWatcher per-file completion", () => {
 				expect(state.setSystemState).toHaveBeenLastCalledWith(
 					"Standby",
 					"embeddings:orchestrator.indexingStoppedPartial",
+					"stop",
 				)
 				expect(hashes[fileA]).toBeUndefined()
 				expect(open[fileA]).toBe(true)
@@ -1325,6 +1440,7 @@ describe("FileWatcher per-file completion", () => {
 				expect(state.setSystemState).toHaveBeenLastCalledWith(
 					"Standby",
 					"embeddings:orchestrator.indexingStoppedPartial",
+					"stop",
 				)
 				expect(hashes[fileA]).toBeUndefined()
 				expect(open[fileA]).toBe(true)
@@ -1348,7 +1464,8 @@ describe("FileWatcher per-file completion", () => {
 				expect(open[fileA]).toBe(true)
 				expect(state.setSystemState).toHaveBeenLastCalledWith(
 					"Standby",
-					"embeddings:orchestrator.indexingStoppedPartial",
+					"embeddings:orchestrator.indexingFilesFailed",
+					"changed-file-batch",
 				)
 				expect(retryFinished.mock.calls[0][0].batchError).toBeInstanceOf(Error)
 				expect(retryProgress.mock.calls.every(([value]) => value.processedInBatch === 0)).toBe(true)

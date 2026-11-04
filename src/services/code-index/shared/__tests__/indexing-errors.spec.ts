@@ -1,0 +1,79 @@
+import { APIConnectionError, APIConnectionTimeoutError, APIUserAbortError } from "openai"
+import { QdrantClientTimeoutError } from "@qdrant/js-client-rest"
+import { classifyIndexingError, getIndexingErrorStatusCode, EmbeddingError, VectorStoreError } from "../indexing-errors"
+import { formatEmbeddingError } from "../validation-helpers"
+
+vi.mock("../../../../i18n", () => ({ t: (key: string) => key }))
+
+describe("indexing error classification", () => {
+	it.each([
+		[{ status: 429 }, "rate-limit"],
+		[{ status: 500 }, "server"],
+		[{ statusCode: 503 }, "server"],
+		[{ response: { status: 502 } }, "server"],
+		[{ $metadata: { httpStatusCode: 503 } }, "server"],
+		[{ status: 408 }, "permanent"],
+		[{ status: 409 }, "permanent"],
+		[{ status: 401 }, "permanent"],
+		[{ status: "500", statusCode: 429 }, "rate-limit"],
+		[{ status: 400, statusCode: 503 }, "permanent"],
+		[{ status: 400, code: "ECONNRESET" }, "permanent"],
+		[new Error("HTTP 503: ECONNREFUSED"), "permanent"],
+		[new TypeError("validation"), "permanent"],
+		[new TypeError("fetch failed", { cause: new Error("network") }), "connection"],
+		[new APIConnectionError({ cause: new Error("network") }), "connection"],
+		[new APIConnectionTimeoutError(), "connection"],
+		[new QdrantClientTimeoutError("timeout"), "connection"],
+		[{ name: "TimeoutError" }, "connection"],
+		[{ name: "AbortError", status: 503 }, "permanent"],
+		[new APIUserAbortError(), "permanent"],
+		[{ name: "ThrottlingException" }, "permanent"],
+		[undefined, "permanent"],
+	] as const)("classifies %o as %s", (error, classification) => {
+		expect(classifyIndexingError(error)).toBe(classification)
+	})
+
+	it.each([
+		"ECONNRESET",
+		"ECONNREFUSED",
+		"ETIMEDOUT",
+		"ENOTFOUND",
+		"EAI_AGAIN",
+		"EPIPE",
+		"UND_ERR_SOCKET",
+		"ERR_HTTP2_STREAM_CANCEL",
+	])("walks causes for %s", (code) => {
+		expect(classifyIndexingError(new Error("outer", { cause: { code } }))).toBe("connection")
+	})
+
+	it("handles cycles and preserves status precedence", () => {
+		const error = { status: 400, cause: {} }
+		error.cause = error
+		expect(classifyIndexingError(error)).toBe("permanent")
+		expect(getIndexingErrorStatusCode({ cause: { statusCode: 503 } })).toBe(503)
+	})
+
+	it("lets caller cancellation override structured transient errors", () => {
+		const error = new EmbeddingError("server", { status: 503 })
+		expect(classifyIndexingError(error, AbortSignal.abort())).toBe("permanent")
+	})
+
+	it.each([EmbeddingError, VectorStoreError])("preserves fields and the raw cause in %s", (ErrorClass) => {
+		const cause = { $metadata: { httpStatusCode: 503 } }
+		const error = new ErrorClass("unchanged", cause)
+		expect(error.message).toBe("unchanged")
+		expect(error.cause).toBe(cause)
+		expect(error.statusCode).toBe(503)
+		expect(error.classification).toBe("server")
+		expect(classifyIndexingError(new Error("outer", { cause: error }))).toBe("server")
+	})
+
+	it("classifies raw errors before translated formatting", () => {
+		const cause = new APIConnectionTimeoutError()
+		const error = formatEmbeddingError(cause, 3)
+		expect(error).toBeInstanceOf(EmbeddingError)
+		expect(error.message).toBe("embeddings:failedWithError")
+		expect(error.cause).toBe(cause)
+		expect(error.classification).toBe("connection")
+	})
+})

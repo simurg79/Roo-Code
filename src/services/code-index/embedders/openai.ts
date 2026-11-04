@@ -1,4 +1,6 @@
+import { codeIndexLog } from "../code-index-log"
 import { OpenAI } from "openai"
+import type { TransientClass } from "../shared/indexing-errors"
 import { waitForRetry } from "./cancellation"
 import { OpenAiNativeHandler } from "../../../api/providers/openai-native"
 import { ApiHandlerOptions } from "../../../shared/api"
@@ -18,6 +20,7 @@ import { handleOpenAIError } from "../../../api/providers/utils/openai-error-han
  * OpenAI implementation of the embedder interface with batching and rate limiting
  */
 export class OpenAiEmbedder extends OpenAiNativeHandler implements IEmbedder {
+	readonly internallyRetriedClasses: ReadonlySet<TransientClass> = new Set(["rate-limit"])
 	private embeddingsClient: OpenAI
 	private readonly defaultModelId: string
 
@@ -31,7 +34,7 @@ export class OpenAiEmbedder extends OpenAiNativeHandler implements IEmbedder {
 
 		// Wrap OpenAI client creation to handle invalid API key characters
 		try {
-			this.embeddingsClient = new OpenAI({ apiKey })
+			this.embeddingsClient = new OpenAI({ apiKey, maxRetries: 0 })
 		} catch (error) {
 			// Use the error handler to transform ByteString conversion errors
 			throw handleOpenAIError(error, "OpenAI")
@@ -61,7 +64,7 @@ export class OpenAiEmbedder extends OpenAiNativeHandler implements IEmbedder {
 					const prefixedText = `${queryPrefix}${text}`
 					const estimatedTokens = Math.ceil(prefixedText.length / 4)
 					if (estimatedTokens > MAX_ITEM_TOKENS) {
-						console.warn(
+						codeIndexLog.warn(
 							t("embeddings:textWithPrefixExceedsTokenLimit", {
 								index,
 								estimatedTokens,
@@ -90,7 +93,7 @@ export class OpenAiEmbedder extends OpenAiNativeHandler implements IEmbedder {
 				const itemTokens = Math.ceil(text.length / 4)
 
 				if (itemTokens > MAX_ITEM_TOKENS) {
-					console.warn(
+					codeIndexLog.warn(
 						t("embeddings:textExceedsTokenLimit", {
 							index: i,
 							itemTokens,
@@ -164,7 +167,7 @@ export class OpenAiEmbedder extends OpenAiNativeHandler implements IEmbedder {
 				const httpError = error as HttpError
 				if (httpError?.status === 429 && hasMoreAttempts) {
 					const delayMs = INITIAL_DELAY_MS * Math.pow(2, attempts)
-					console.warn(
+					codeIndexLog.warn(
 						t("embeddings:rateLimitRetry", {
 							delayMs,
 							attempt: attempts + 1,
@@ -176,7 +179,7 @@ export class OpenAiEmbedder extends OpenAiNativeHandler implements IEmbedder {
 				}
 
 				// Log the error for debugging
-				console.error(`OpenAI embedder error (attempt ${attempts + 1}/${MAX_RETRIES}):`, error)
+				codeIndexLog.error(`OpenAI embedder error (attempt ${attempts + 1}/${MAX_RETRIES}):`, error)
 
 				// Format and throw the error
 				throw formatEmbeddingError(error, MAX_RETRIES)

@@ -662,6 +662,8 @@ export type CheckpointRestorePayload = z.infer<typeof checkoutRestorePayloadSche
 export interface IndexingStatusPayload {
 	state: "Standby" | "Indexing" | "Indexed" | "Error" | "Stopping"
 	message: string
+	failedFiles?: FailedFileStatus[]
+	failedFileSummary?: FailedFileSummary
 }
 
 export interface IndexClearedPayload {
@@ -677,6 +679,17 @@ export type WebViewMessagePayload =
 	| UpdateTodoListPayload
 	| EditQueuedMessagePayload
 
+export interface FailedFileStatus {
+	path: string
+	activity: "read" | "parse" | "embed" | "upsert" | "delete" | "verify"
+	reason: string
+	state: "retrying" | "exhausted"
+}
+
+export interface FailedFileSummary extends FailedFileStatus {
+	count: number
+}
+
 export interface IndexingStatus {
 	systemStatus: string
 	message?: string
@@ -686,6 +699,8 @@ export interface IndexingStatus {
 	workspacePath?: string
 	workspaceEnabled?: boolean
 	autoEnableDefault?: boolean
+	failedFiles?: FailedFileStatus[]
+	failedFileSummary?: FailedFileSummary
 }
 
 export interface IndexingStatusUpdateMessage {

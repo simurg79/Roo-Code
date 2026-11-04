@@ -1,3 +1,5 @@
+import "../../__tests__/mock-code-index-log"
+import { codeIndexLog } from "../../code-index-log"
 import type { MockedClass, MockedFunction } from "vitest"
 import { describe, it, expect, beforeEach, vi } from "vitest"
 import { OpenAI } from "openai"
@@ -33,8 +35,8 @@ describe("OpenRouterEmbedder", () => {
 
 	beforeEach(() => {
 		vi.clearAllMocks()
-		vi.spyOn(console, "warn").mockImplementation(() => {})
-		vi.spyOn(console, "error").mockImplementation(() => {})
+		vi.spyOn(codeIndexLog, "warn").mockImplementation(() => {})
+		vi.spyOn(codeIndexLog, "error").mockImplementation(() => {})
 
 		// Setup mock OpenAI instance
 		mockEmbeddingsCreate = vi.fn()
@@ -79,6 +81,7 @@ describe("OpenRouterEmbedder", () => {
 			expect(MockedOpenAI).toHaveBeenCalledWith({
 				baseURL: "https://openrouter.ai/api/v1",
 				apiKey: mockApiKey,
+				maxRetries: 0,
 				defaultHeaders: {
 					"HTTP-Referer": "https://github.com/RooCodeInc/Roo-Code",
 					"X-Title": "Roo Code",

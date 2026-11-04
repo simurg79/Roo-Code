@@ -1,5 +1,12 @@
 import { VectorStoreSearchResult } from "./vector-store"
+import type { FailedFileStatus, FailedFileSummary } from "@roo-code/types"
 import * as vscode from "vscode"
+
+export interface CodeIndexSearchResponse {
+	results: VectorStoreSearchResult[]
+	partial: boolean
+	failedFiles: string[]
+}
 
 /**
  * Interface for the code index manager
@@ -12,6 +19,8 @@ export interface ICodeIndexManager {
 		systemStatus: IndexingState
 		fileStatuses: Record<string, string>
 		message?: string
+		failedFiles?: FailedFileStatus[]
+		failedFileSummary?: FailedFileSummary
 	}>
 
 	/**
@@ -57,16 +66,22 @@ export interface ICodeIndexManager {
 	/**
 	 * Searches the index
 	 * @param query Query string
-	 * @param limit Maximum number of results to return
-	 * @returns Promise resolving to search results
+	 * @param directoryPrefix Optional directory path to filter results by
+	 * @returns Search results and partial-index details
 	 */
-	searchIndex(query: string, limit: number): Promise<VectorStoreSearchResult[]>
+	searchIndex(query: string, directoryPrefix?: string): Promise<CodeIndexSearchResponse>
 
 	/**
 	 * Gets the current status of the indexing system
 	 * @returns Current status information
 	 */
-	getCurrentStatus(): { systemStatus: IndexingState; fileStatuses: Record<string, string>; message?: string }
+	getCurrentStatus(): {
+		systemStatus: IndexingState
+		fileStatuses: Record<string, string>
+		message?: string
+		failedFiles?: FailedFileStatus[]
+		failedFileSummary?: FailedFileSummary
+	}
 
 	/**
 	 * Disposes of resources used by the manager
@@ -90,4 +105,6 @@ export interface IndexProgressUpdate {
 	message?: string
 	processedBlockCount?: number
 	totalBlockCount?: number
+	failedFiles?: FailedFileStatus[]
+	failedFileSummary?: FailedFileSummary
 }

@@ -28,6 +28,8 @@ import { CodeIndexConfigManager } from "./config-manager"
 import { CacheManager } from "./cache-manager"
 import { BATCH_SEGMENT_THRESHOLD } from "./constants"
 
+import { FileFailureRegistry } from "./file-failure-registry"
+
 /**
  * Factory class responsible for creating and configuring code indexing service dependencies.
  */
@@ -38,6 +40,7 @@ export class CodeIndexServiceFactory {
 		private readonly cacheManager: CacheManager,
 		private readonly writeGate = new IndexWriteGate(),
 		private readonly generationAllocator = new GenerationAllocator(cacheManager),
+		private readonly failures = new FileFailureRegistry(),
 	) {}
 
 	/**
@@ -197,6 +200,7 @@ export class CodeIndexServiceFactory {
 			batchSize,
 			this.writeGate,
 			this.generationAllocator,
+			this.failures,
 		)
 	}
 
@@ -234,6 +238,7 @@ export class CodeIndexServiceFactory {
 			parser,
 			this.writeGate,
 			this.generationAllocator,
+			this.failures,
 		)
 	}
 

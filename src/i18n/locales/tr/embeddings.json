@@ -73,6 +73,8 @@
 		"indexingRequiresWorkspace": "İndeksleme açık bir workspace klasörü gerektirir",
 		"indexingStopping": "İndeksleme durduruluyor...",
 		"indexingStopped": "İndeksleme kullanıcı tarafından durduruldu.",
-		"indexingStoppedPartial": "İndeksleme durduruldu. Kısmi indeks verileri korundu."
+		"indexingStoppedPartial": "İndeksleme durduruldu. Kısmi indeks verileri korundu.",
+		"indexingFilesRetrying": "Başarısız dosyalar yeniden deneniyor. Kısmi indeks kullanılabilir.",
+		"indexingFilesFailed": "Dosya hataları devam ediyor. Bekleyen otomatik yeniden deneme yok. Kısmi indeks kullanılabilir."
 	}
 }

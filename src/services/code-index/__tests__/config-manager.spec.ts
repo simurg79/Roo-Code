@@ -1,3 +1,4 @@
+import "./mock-code-index-log"
 // npx vitest services/code-index/__tests__/config-manager.spec.ts
 
 import { CodeIndexConfigManager } from "../config-manager"

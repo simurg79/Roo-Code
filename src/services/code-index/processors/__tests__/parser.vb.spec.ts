@@ -1,3 +1,4 @@
+import "../../__tests__/mock-code-index-log"
 import { CodeParser } from "../parser"
 
 import { shouldUseFallbackChunking } from "../../shared/supported-extensions"

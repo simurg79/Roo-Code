@@ -11,6 +11,10 @@ import { t } from "../../../i18n"
  * - codestral-embed-2505 (dimension: 1536)
  */
 export class MistralEmbedder implements IEmbedder {
+	get internallyRetriedClasses() {
+		return this.openAICompatibleEmbedder.internallyRetriedClasses
+	}
+
 	private readonly openAICompatibleEmbedder: OpenAICompatibleEmbedder
 	private static readonly MISTRAL_BASE_URL = "https://api.mistral.ai/v1"
 	private static readonly DEFAULT_MODEL = "codestral-embed-2505"

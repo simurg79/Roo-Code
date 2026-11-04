@@ -1,3 +1,4 @@
+import "../../__tests__/mock-code-index-log"
 // npx vitest services/code-index/processors/__tests__/parser.spec.ts
 
 import { CodeParser, codeParser } from "../parser"

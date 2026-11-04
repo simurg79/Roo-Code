@@ -151,6 +151,22 @@
 		},
 		"description": "Configure as configurações de indexação da base de código para habilitar a pesquisa semântica do seu projeto. <0>Saiba mais</0>",
 		"statusTitle": "Status",
+		"indexingFilesRetrying": "Arquivos com falhas de indexação: {{count}}. Tentando novamente {{path}}: {{reason}}",
+		"indexingFilesFailed": "Arquivos com falhas de indexação: {{count}}. Tentativas automáticas encerradas para {{path}}: {{reason}}",
+		"failedFileDetails": "Detalhes dos arquivos com falhas",
+		"failedFileReason": "Motivo",
+		"failedFileStates": {
+			"retrying": "Nova tentativa automática pendente",
+			"exhausted": "Tentativas automáticas encerradas"
+		},
+		"failedFileActivities": {
+			"read": "Ler arquivo",
+			"parse": "Analisar arquivo",
+			"embed": "Criar embeddings",
+			"upsert": "Salvar blocos indexados",
+			"delete": "Remover blocos indexados",
+			"verify": "Verificar o resultado indexado"
+		},
 		"settingsTitle": "Configurações de Indexação",
 		"disabledMessage": "A indexação da base de código está atualmente desativada. Ative-a nas configurações globais para configurar as opções de indexação.",
 		"embedderProviderLabel": "Provedor de Embedder",

@@ -1,3 +1,4 @@
+import { codeIndexLog } from "./code-index-log"
 import { Worker } from "node:worker_threads"
 import * as path from "node:path"
 import { CodeParser } from "./processors/parser"
@@ -17,6 +18,7 @@ export interface ParseReply {
 	blocks?: CodeBlock[]
 	fallback?: boolean
 	error?: { message: string; fatal: boolean }
+	diagnostic?: { level: import("./code-index-log").CodeIndexLogLevel; message: string; fields?: unknown }
 }
 
 export interface ParseWorker {
@@ -117,6 +119,11 @@ export class ParseWorkerClient implements ICodeParser {
 			if (!this.worker) {
 				this.worker = this.workerFactory()
 				this.worker.on("message", (reply) => {
+					if (reply.diagnostic) {
+						const { level, message, fields } = reply.diagnostic
+						codeIndexLog[level](message, fields)
+						return
+					}
 					if (this.isStopped || reply.id !== this.active?.request.id) return
 					if (reply.error?.fatal || (reply.error && isParserAbort(reply.error.message))) {
 						this.fail("parser-abort", reply.error?.message)
@@ -139,7 +146,9 @@ export class ParseWorkerClient implements ICodeParser {
 				this.worker.on("exit", (code) => {
 					this.exitObserved = true
 					this.fail("parser-abort", `Parse worker exited (${code})`)
-					console.log(`parse worker exited after ${Math.round(performance.now() - this.stopStartedAt!)} ms`)
+					codeIndexLog.info(
+						`parse worker exited after ${Math.round(performance.now() - this.stopStartedAt!)} ms`,
+					)
 					this.worker = undefined
 					this.resolveStopped()
 				})
@@ -181,7 +190,7 @@ export class ParseWorkerClient implements ICodeParser {
 	logStopTimeout(): void {
 		if (!this.isStopped || this.exitObserved || this.stopTimeoutLogged) return
 		this.stopTimeoutLogged = true
-		console.log("parse worker exit not observed within stop limit")
+		codeIndexLog.info("parse worker exit not observed within stop limit")
 	}
 
 	dispose(): void {

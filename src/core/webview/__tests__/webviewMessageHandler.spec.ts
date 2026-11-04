@@ -163,6 +163,55 @@ vi.mock("../../mentions/resolveImageMentions", () => ({
 
 import { resolveImageMentions } from "../../mentions/resolveImageMentions"
 
+describe("webviewMessageHandler - indexing startup", () => {
+	it.each(["startIndexing", "toggleWorkspaceIndexing", "setAutoEnableDefault"] as const)(
+		"awaits and handles rejected startup for %s without duplicate initialize",
+		async (type) => {
+			const { CodeIndexManager } = await import("../../../services/code-index/manager")
+			let rejectStartup!: (error: Error) => void
+			const startup = new Promise<void>((_resolve, reject) => {
+				rejectStartup = reject
+			})
+			const manager = {
+				isFeatureEnabled: true,
+				isFeatureConfigured: true,
+				isWorkspaceEnabled: false,
+				initialize: vi.fn(),
+				startIndexing: vi.fn(() => startup),
+				setWorkspaceEnabled: vi.fn(),
+				setAutoEnableDefault: vi.fn(async () => {
+					manager.isWorkspaceEnabled = true
+				}),
+				getCurrentStatus: vi.fn(() => ({
+					systemStatus: "Error",
+					processedItems: 0,
+					totalItems: 0,
+					failedFiles: [],
+				})),
+			}
+			const allInstances = vi.spyOn(CodeIndexManager, "getAllInstances").mockReturnValue([manager as any])
+			const provider = {
+				...mockClineProvider,
+				getCurrentWorkspaceCodeIndexManager: () => manager,
+				log: vi.fn(),
+				postMessageToWebview: vi.fn(),
+			} as unknown as ClineProvider
+			let finished = false
+			const handling = webviewMessageHandler(provider, { type, bool: true }).then(() => {
+				finished = true
+			})
+			for (let iter = 0; iter < 10; iter++) await Promise.resolve()
+			expect(manager.startIndexing).toHaveBeenCalledExactlyOnceWith(provider.contextProxy)
+			expect(manager.initialize).not.toHaveBeenCalled()
+			expect(finished).toBe(false)
+			rejectStartup(new Error("startup rejected"))
+			await handling
+			expect(provider.log).toHaveBeenCalledWith(expect.stringContaining("startup rejected"))
+			allInstances.mockRestore()
+		},
+	)
+})
+
 describe("webviewMessageHandler - requestLmStudioModels", () => {
 	beforeEach(() => {
 		vi.clearAllMocks()

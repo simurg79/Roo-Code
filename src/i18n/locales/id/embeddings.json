@@ -73,6 +73,8 @@
 		"indexingRequiresWorkspace": "Pengindeksan memerlukan folder workspace yang terbuka",
 		"indexingStopping": "Menghentikan pengindeksan...",
 		"indexingStopped": "Pengindeksan dihentikan oleh pengguna.",
-		"indexingStoppedPartial": "Pengindeksan dihentikan. Data indeks parsial dipertahankan."
+		"indexingStoppedPartial": "Pengindeksan dihentikan. Data indeks parsial dipertahankan.",
+		"indexingFilesRetrying": "Mencoba ulang file yang gagal. Indeks parsial tersedia.",
+		"indexingFilesFailed": "Masih ada kegagalan file. Tidak ada percobaan ulang otomatis yang tertunda. Indeks parsial tersedia."
 	}
 }
