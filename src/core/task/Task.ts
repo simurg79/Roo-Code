@@ -134,6 +134,13 @@ const DEFAULT_USAGE_COLLECTION_TIMEOUT_MS = 5000 // 5 seconds
 const FORCED_CONTEXT_REDUCTION_PERCENT = 75 // Keep 75% of context (remove 25%) on context window errors
 const MAX_CONTEXT_WINDOW_RETRIES = 3 // Maximum retries for context window errors
 
+class TaskStoppedError extends Error {
+	constructor() {
+		super("Task stopped")
+		this.name = "TaskStoppedError"
+	}
+}
+
 export interface TaskOptions extends CreateTaskOptions {
 	provider: ClineProvider
 	apiConfiguration: ProviderSettings
@@ -262,6 +269,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	providerRef: WeakRef<ClineProvider>
 	private readonly globalStoragePath: string
 	abort: boolean = false
+	private lifecycleAbortController = new AbortController()
 	currentRequestAbortController?: AbortController
 	skipPrevResponseIdOnce: boolean = false
 
@@ -1225,6 +1233,24 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		return undefined
 	}
 
+	private async waitForTaskCondition(
+		condition: () => boolean,
+		signal: AbortSignal,
+		interval?: number,
+	): Promise<void> {
+		try {
+			await pWaitFor(condition, {
+				interval,
+				timeout: { milliseconds: Number.POSITIVE_INFINITY, signal },
+			})
+		} catch (error) {
+			if (signal.aborted) {
+				throw new TaskStoppedError()
+			}
+			throw error
+		}
+	}
+
 	// Note that `partial` has three valid states true (partial message),
 	// false (completion of partial message), undefined (individual complete
 	// message).
@@ -1247,6 +1273,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			throw new Error(`[RooCode#ask] task ${this.taskId}.${this.instanceId} aborted`)
 		}
 
+		const { signal } = this.lifecycleAbortController
 		let askTs: number
 
 		if (partial !== undefined) {
@@ -1332,6 +1359,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		const state = provider ? await provider.getState() : undefined
 		const approval = await checkAutoApproval({ state, ask: type, text, isProtected })
 
+		if (signal.aborted) {
+			throw new TaskStoppedError()
+		}
+
 		if (approval.decision === "approve") {
 			this.approveAsk()
 		} else if (approval.decision === "deny") {
@@ -1410,33 +1441,46 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			}
 		}
 
-		// Wait for askResponse to be set
-		await pWaitFor(
-			() => {
-				if (this.askResponse !== undefined || this.lastMessageTs !== askTs) {
-					return true
-				}
+		try {
+			await this.waitForTaskCondition(
+				() => {
+					if (signal.aborted) {
+						throw new TaskStoppedError()
+					}
+					if (this.askResponse !== undefined || this.lastMessageTs !== askTs) {
+						return true
+					}
 
-				// If a queued message arrives while we're blocked on an ask (e.g. a follow-up
-				// suggestion click that was incorrectly queued due to UI state), consume it
-				// immediately so the task doesn't hang.
-				if (shouldDrainQueuedMessageForAsk && !this.messageQueueService.isEmpty()) {
-					const message = this.messageQueueService.dequeueMessage()
-					if (message) {
-						// If this is a tool approval ask, we need to approve first (yesButtonClicked)
-						// and include any queued text/images.
-						if (type === "tool" || type === "command" || type === "use_mcp_server") {
-							this.handleWebviewAskResponse("yesButtonClicked", message.text, message.images)
-						} else {
-							this.handleWebviewAskResponse("messageResponse", message.text, message.images)
+					// If a queued message arrives while we're blocked on an ask (e.g. a follow-up
+					// suggestion click that was incorrectly queued due to UI state), consume it
+					// immediately so the task doesn't hang.
+					if (shouldDrainQueuedMessageForAsk && !this.messageQueueService.isEmpty()) {
+						const message = this.messageQueueService.dequeueMessage()
+						if (message) {
+							// If this is a tool approval ask, we need to approve first (yesButtonClicked)
+							// and include any queued text/images.
+							if (type === "tool" || type === "command" || type === "use_mcp_server") {
+								this.handleWebviewAskResponse("yesButtonClicked", message.text, message.images)
+							} else {
+								this.handleWebviewAskResponse("messageResponse", message.text, message.images)
+							}
 						}
 					}
-				}
 
-				return false
-			},
-			{ interval: 100 },
-		)
+					return false
+				},
+				signal,
+				100,
+			)
+			if (signal.aborted) {
+				throw new TaskStoppedError()
+			}
+		} finally {
+			timeouts.forEach((timeout) => clearTimeout(timeout))
+			if (this.autoApprovalTimeoutRef && timeouts.includes(this.autoApprovalTimeoutRef)) {
+				this.autoApprovalTimeoutRef = undefined
+			}
+		}
 
 		if (this.lastMessageTs !== askTs) {
 			// Could happen if we send multiple asks in a row i.e. with
@@ -1449,9 +1493,6 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this.askResponse = undefined
 		this.askResponseText = undefined
 		this.askResponseImages = undefined
-
-		// Cancel the timeouts if they are still running.
-		timeouts.forEach((timeout) => clearTimeout(timeout))
 
 		// Switch back to an active state.
 		if (this.idleAsk || this.resumableAsk || this.interactiveAsk) {
@@ -1962,7 +2003,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			]).catch((error) => {
 				// Swallow loop rejection when the task was intentionally abandoned/aborted
 				// during delegation or user cancellation to prevent unhandled rejections.
-				if (this.abandoned === true || this.abortReason === "user_cancelled") {
+				if (
+					this.abandoned === true ||
+					this.abort === true ||
+					this.abortReason === "user_cancelled" ||
+					error instanceof TaskStoppedError
+				) {
 					return
 				}
 				throw error
@@ -2268,6 +2314,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	}
 
 	public dispose(): void {
+		this.abort = true
+		this.lifecycleAbortController.abort()
 		console.log(`[Task#dispose] disposing task ${this.taskId}.${this.instanceId}`)
 
 		// Cancel any in-progress HTTP request
@@ -2389,6 +2437,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this.interactiveAsk = undefined
 
 		// Reset abort and streaming state to ensure clean continuation
+		this.lifecycleAbortController = new AbortController()
 		this.abort = false
 		this.abandoned = false
 		this.abortReason = undefined
@@ -3498,7 +3547,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					// 	this.userMessageContentReady = true
 					// }
 
-					await pWaitFor(() => this.userMessageContentReady)
+					const { signal } = this.lifecycleAbortController
+					await this.waitForTaskCondition(() => this.userMessageContentReady, signal)
+					if (signal.aborted) {
+						throw new TaskStoppedError()
+					}
 
 					// If the model did not tool use, then we need to tell it to
 					// either use a tool or attempt_completion.
@@ -3661,12 +3714,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				// If we reach here without continuing, return false (will always be false for now)
 				return false
 			} catch (error) {
-				// This should never happen since the only thing that can throw an
-				// error is the attemptApiRequest, which is wrapped in a try catch
-				// that sends an ask where if noButtonClicked, will clear current
-				// task and destroy this instance. However to avoid unhandled
-				// promise rejection, we will end this loop which will end execution
-				// of this instance (see `startTask`).
+				// Stops during content readiness and unexpected errors reach here;
+				// end the loop to prevent an unhandled rejection.
 				return true // Needs to be true so parent loop knows to end task.
 			}
 		}

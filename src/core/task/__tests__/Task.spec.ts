@@ -21,6 +21,11 @@ import { getCondenseAllowance } from "../../context-management"
 import { getModelMaxOutputTokens } from "../../../shared/api"
 import * as buildTools from "../build-tools"
 
+import pWaitFor from "p-wait-for"
+import * as autoApproval from "../../auto-approval"
+import { RooCodeEventName } from "@roo-code/types"
+import * as assistantMessage from "../../assistant-message"
+
 // Mock delay before any imports that might use it
 vi.mock("delay", () => ({
 	__esModule: true,
@@ -361,6 +366,314 @@ describe("Cline", () => {
 				},
 			],
 		}))
+	})
+
+	describe("pending wait lifecycle", () => {
+		let task: Task
+		let realWait: typeof pWaitFor
+
+		beforeEach(async () => {
+			realWait = (await vi.importActual<typeof import("p-wait-for")>("p-wait-for")).default
+			vi.mocked(pWaitFor).mockImplementation(realWait)
+			mockProvider.getState = vi.fn().mockResolvedValue({})
+			task = new Task({
+				provider: mockProvider,
+				apiConfiguration: mockApiConfig,
+				task: "lifecycle",
+				startTask: false,
+			})
+			await task.waitForModeInitialization()
+			vi.spyOn(task as any, "addToClineMessages").mockImplementation(async (message: any) => {
+				task.clineMessages.push(message)
+			})
+			vi.spyOn(task as any, "saveClineMessages").mockResolvedValue(true)
+			vi.spyOn(task, "emitFinalTokenUsageUpdate").mockImplementation(() => {})
+			vi.spyOn(task, "checkpointSave").mockResolvedValue(undefined)
+			vi.spyOn(task.diffViewProvider, "reset").mockResolvedValue(undefined)
+			vi.spyOn(autoApproval, "checkAutoApproval").mockResolvedValue({ decision: "ask" })
+			vi.useFakeTimers()
+		})
+
+		afterEach(() => {
+			task.dispose()
+			vi.useRealTimers()
+			vi.mocked(autoApproval.checkAutoApproval).mockRestore()
+			if (vi.isMockFunction(assistantMessage.presentAssistantMessage)) {
+				vi.mocked(assistantMessage.presentAssistantMessage).mockRestore()
+			}
+			vi.mocked(pWaitFor).mockImplementation(async () => {})
+		})
+
+		const stopKinds = ["cancel", "abandon", "dispose"] as const
+		async function stopTask(stopKind: (typeof stopKinds)[number]) {
+			if (stopKind === "dispose") task.dispose()
+			else await task.abortTask(stopKind === "abandon")
+		}
+
+		it.each(stopKinds)("%s cancels content polling without another tick", async (stopKind) => {
+			const predicate = vi.fn(() => false)
+			const signal = task["lifecycleAbortController"].signal
+			const pending = task["waitForTaskCondition"](predicate, signal)
+			const outcome = expect(pending).rejects.toMatchObject({ name: "TaskStoppedError" })
+			await vi.advanceTimersByTimeAsync(60)
+			await stopTask(stopKind)
+			await outcome
+			const checks = predicate.mock.calls.length
+			await vi.advanceTimersByTimeAsync(1_000)
+			expect(predicate).toHaveBeenCalledTimes(checks)
+			expect(vi.getTimerCount()).toBe(0)
+			expect(task.abort).toBe(true)
+		})
+
+		it.each(stopKinds)("%s ends an answer wait and clears status timers", async (stopKind) => {
+			const emit = vi.spyOn(task, "emit")
+			const dequeue = vi.spyOn(task.messageQueueService, "dequeueMessage")
+			const pending = task.ask("followup", "question")
+			const outcome = expect(pending).rejects.toMatchObject({ name: "TaskStoppedError" })
+			await vi.advanceTimersByTimeAsync(0)
+			expect(vi.getTimerCount()).toBeGreaterThan(0)
+			await stopTask(stopKind)
+			await outcome
+			await vi.advanceTimersByTimeAsync(10_000)
+			expect(dequeue).not.toHaveBeenCalled()
+			expect(emit).not.toHaveBeenCalledWith(RooCodeEventName.TaskAskResponded)
+			expect(emit).not.toHaveBeenCalledWith(RooCodeEventName.TaskInteractive, task.taskId)
+			expect(vi.getTimerCount()).toBe(0)
+		})
+
+		it.each(["approve", "deny", "ask"] as const)(
+			"stop during asynchronous %s setup prevents approval and the pre-wait drain",
+			async (decision) => {
+				let releaseApproval!: (value: { decision: typeof decision }) => void
+				vi.mocked(autoApproval.checkAutoApproval).mockImplementationOnce(
+					() =>
+						new Promise((resolve) => {
+							releaseApproval = resolve
+						}),
+				)
+				const approve = vi.spyOn(task, "approveAsk")
+				const deny = vi.spyOn(task, "denyAsk")
+				const dequeue = vi.spyOn(task.messageQueueService, "dequeueMessage")
+				vi.spyOn(task.messageQueueService, "isEmpty").mockReturnValue(false)
+				const pending = task.ask("followup")
+				const outcome = expect(pending).rejects.toMatchObject({ name: "TaskStoppedError" })
+				await vi.advanceTimersByTimeAsync(0)
+				task.dispose()
+				releaseApproval({ decision })
+				await outcome
+				expect(approve).not.toHaveBeenCalled()
+				expect(deny).not.toHaveBeenCalled()
+				expect(dequeue).not.toHaveBeenCalled()
+			},
+		)
+
+		it("guards the predicate even when the signal was already aborted", async () => {
+			const dequeue = vi.spyOn(task.messageQueueService, "dequeueMessage")
+			vi.mocked(pWaitFor).mockImplementationOnce((condition, options) => {
+				task.dispose()
+				return realWait(condition, options)
+			})
+			await expect(task.ask("followup")).rejects.toMatchObject({ name: "TaskStoppedError" })
+			expect(dequeue).not.toHaveBeenCalled()
+		})
+
+		it("stop wins when an answer resolves in the same turn", async () => {
+			vi.mocked(pWaitFor).mockImplementationOnce(async (condition) => {
+				task["askResponse"] = "yesButtonClicked"
+				expect(await condition()).toBe(true)
+				task.dispose()
+			})
+			await expect(task.ask("followup")).rejects.toMatchObject({ name: "TaskStoppedError" })
+			expect(task["askResponse"]).toBe("yesButtonClicked")
+		})
+
+		it("clears auto-approval timers on stop", async () => {
+			const approval = vi.fn(() => ({ askResponse: "yesButtonClicked" as const }))
+			vi.mocked(autoApproval.checkAutoApproval).mockResolvedValueOnce({
+				decision: "timeout",
+				timeout: 5_000,
+				fn: approval,
+			})
+			const pending = task.ask("followup")
+			const outcome = expect(pending).rejects.toMatchObject({ name: "TaskStoppedError" })
+			await vi.advanceTimersByTimeAsync(0)
+			task.dispose()
+			await outcome
+			await vi.advanceTimersByTimeAsync(10_000)
+			expect(approval).not.toHaveBeenCalled()
+			expect(task["autoApprovalTimeoutRef"]).toBeUndefined()
+			expect(vi.getTimerCount()).toBe(0)
+		})
+
+		it("keeps active questions pending without a deadline and accepts answers", async () => {
+			const pending = task.ask("followup")
+			const responded = vi.fn()
+			void pending.then(responded)
+			await vi.advanceTimersByTimeAsync(60_000)
+			expect(responded).not.toHaveBeenCalled()
+			task.handleWebviewAskResponse("messageResponse", "answer")
+			await vi.advanceTimersByTimeAsync(100)
+			await expect(pending).resolves.toMatchObject({ response: "messageResponse", text: "answer" })
+			expect(vi.getTimerCount()).toBe(0)
+		})
+
+		it("clears timers when an ask is superseded", async () => {
+			const pending = task.ask("followup")
+			const outcome = expect(pending).rejects.toMatchObject({ name: "AskIgnoredError" })
+			await vi.advanceTimersByTimeAsync(1)
+			task.supersedePendingAsk()
+			await vi.advanceTimersByTimeAsync(100)
+			await outcome
+			expect(vi.getTimerCount()).toBe(0)
+		})
+
+		it("allows active content readiness and preserves non-stop failures", async () => {
+			let ready = false
+			const pending = task["waitForTaskCondition"](() => ready, task["lifecycleAbortController"].signal)
+			ready = true
+			await vi.advanceTimersByTimeAsync(20)
+			await expect(pending).resolves.toBeUndefined()
+			const failure = new Error("predicate failure")
+			await expect(
+				task["waitForTaskCondition"](() => {
+					throw failure
+				}, task["lifecycleAbortController"].signal),
+			).rejects.toBe(failure)
+		})
+
+		it("absorbs direct disposal during the history-resume question", async () => {
+			vi.spyOn(task as any, "getSavedClineMessages").mockResolvedValue([
+				{ ts: 1, type: "say", say: "text", text: "history" },
+			])
+			vi.spyOn(task as any, "overwriteClineMessages").mockResolvedValue(undefined)
+			vi.spyOn(task as any, "getSavedApiConversationHistory").mockResolvedValue([
+				{ role: "user", content: "history" },
+			])
+			const loop = vi.spyOn(task as any, "initiateTaskLoop").mockResolvedValue(undefined)
+			const pending = task["resumeTaskFromHistory"]()
+			await vi.advanceTimersByTimeAsync(0)
+			expect(task.clineMessages.at(-1)?.ask).toBe("resume_task")
+			task.dispose()
+			await expect(pending).resolves.toBeUndefined()
+			expect(loop).not.toHaveBeenCalled()
+			expect(vi.getTimerCount()).toBe(0)
+		})
+
+		it.each(stopKinds)("%s stops the real content-readiness request path", async (stopKind) => {
+			vi.spyOn(assistantMessage, "presentAssistantMessage").mockResolvedValue(undefined)
+			vi.spyOn(task, "say").mockImplementation(async (say, text) => {
+				task.clineMessages.push({ ts: Date.now(), type: "say", say, text })
+				return undefined
+			})
+			vi.spyOn(task as any, "addToApiConversationHistory").mockResolvedValue(undefined)
+			const request = vi.spyOn(task, "attemptApiRequest").mockImplementation(async function* () {
+				yield { type: "text", text: "response" }
+			})
+			const pending = task.recursivelyMakeClineRequests([{ type: "text", text: "request" }])
+			await vi.advanceTimersByTimeAsync(0)
+			expect(request).toHaveBeenCalledOnce()
+			expect(vi.mocked(pWaitFor).mock.calls.at(-1)?.[1]).toMatchObject({
+				timeout: { milliseconds: Number.POSITIVE_INFINITY, signal: task["lifecycleAbortController"].signal },
+			})
+			await stopTask(stopKind)
+			await expect(pending).resolves.toBe(true)
+			await vi.advanceTimersByTimeAsync(1_000)
+			expect(request).toHaveBeenCalledOnce()
+			expect(task.userMessageContent).toEqual([])
+			expect(vi.getTimerCount()).toBe(0)
+		})
+
+		it("stop wins over same-turn content readiness", async () => {
+			vi.spyOn(assistantMessage, "presentAssistantMessage").mockResolvedValue(undefined)
+			vi.spyOn(task, "say").mockImplementation(async (say, text) => {
+				task.clineMessages.push({ ts: Date.now(), type: "say", say, text })
+				return undefined
+			})
+			vi.spyOn(task as any, "addToApiConversationHistory").mockResolvedValue(undefined)
+			const request = vi.spyOn(task, "attemptApiRequest").mockImplementation(async function* () {
+				yield { type: "text", text: "response" }
+			})
+			vi.mocked(pWaitFor).mockImplementationOnce(async (condition) => {
+				task.userMessageContentReady = true
+				expect(await condition()).toBe(true)
+				task.dispose()
+			})
+			await expect(task.recursivelyMakeClineRequests([{ type: "text", text: "request" }])).resolves.toBe(true)
+			expect(request).toHaveBeenCalledOnce()
+			expect(task.userMessageContent).toEqual([])
+		})
+
+		it("does not accumulate answer waits across many stopped tasks of every stop kind", async () => {
+			const stoppedTasks: Task[] = []
+			for (let iteration = 0; iteration < 9; iteration++) {
+				const stoppedTask = new Task({
+					provider: mockProvider,
+					apiConfiguration: mockApiConfig,
+					task: `stopped ${iteration}`,
+					startTask: false,
+				})
+				vi.spyOn(stoppedTask as any, "addToClineMessages").mockImplementation(async (message: any) => {
+					stoppedTask.clineMessages.push(message)
+				})
+				vi.spyOn(stoppedTask as any, "saveClineMessages").mockResolvedValue(true)
+				await vi.advanceTimersByTimeAsync(0)
+				const timersBeforeAsk = vi.getTimerCount()
+				const outcome = expect(stoppedTask.ask("followup")).rejects.toMatchObject({
+					name: "TaskStoppedError",
+				})
+				await vi.advanceTimersByTimeAsync(0)
+				const stopKind = stopKinds[iteration % stopKinds.length]
+				if (stopKind === "dispose") stoppedTask.dispose()
+				else await stoppedTask.abortTask(stopKind === "abandon")
+				await outcome
+				await vi.advanceTimersByTimeAsync(10_000)
+				expect(vi.getTimerCount()).toBeLessThanOrEqual(timersBeforeAsk)
+				stoppedTasks.push(stoppedTask)
+			}
+			expect(stoppedTasks.every((stoppedTask) => stoppedTask.abort)).toBe(true)
+		})
+
+		it("absorbs disposal in the new-task loop catch", async () => {
+			vi.spyOn(task, "say").mockResolvedValue(undefined)
+			vi.spyOn(task as any, "getEnabledMcpToolsCount").mockResolvedValue({ enabledToolCount: 0 })
+			vi.spyOn(task as any, "initiateTaskLoop").mockImplementation(async () => {
+				const pending = task["waitForTaskCondition"](() => false, task["lifecycleAbortController"].signal)
+				task.dispose()
+				await pending
+			})
+			await expect(task["startTask"]("new task")).resolves.toBeUndefined()
+		})
+
+		it("renews the signal only on explicit delegation resume", async () => {
+			const stoppedSignal = task["lifecycleAbortController"].signal
+			task.dispose()
+			task.apiConversationHistory = [{ role: "user", content: [{ type: "text", text: "history" }] }]
+			vi.spyOn(task as any, "saveApiConversationHistory").mockResolvedValue(undefined)
+			const loop = vi.spyOn(task as any, "initiateTaskLoop").mockResolvedValue(undefined)
+			await task.resumeAfterDelegation()
+			expect(stoppedSignal.aborted).toBe(true)
+			expect(task["lifecycleAbortController"].signal).not.toBe(stoppedSignal)
+			expect(task["lifecycleAbortController"].signal.aborted).toBe(false)
+			expect(task.abort).toBe(false)
+			expect(loop).toHaveBeenCalledOnce()
+			const pending = task.ask("followup")
+			const outcome = expect(pending).rejects.toMatchObject({ name: "TaskStoppedError" })
+			await vi.advanceTimersByTimeAsync(0)
+			task.dispose()
+			await outcome
+		})
+
+		it("does not accumulate polling timers across repeated stops", async () => {
+			const signal = task["lifecycleAbortController"].signal
+			for (let iteration = 0; iteration < 20; iteration++) {
+				const pending = task["waitForTaskCondition"](() => false, signal)
+				const outcome = expect(pending).rejects.toMatchObject({ name: "TaskStoppedError" })
+				task.dispose()
+				await outcome
+				expect(task["lifecycleAbortController"].signal).toBe(signal)
+				expect(vi.getTimerCount()).toBe(0)
+			}
+		})
 	})
 
 	describe("image capability request integration", () => {
