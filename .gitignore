@@ -62,3 +62,4 @@ myplans
 myscripts
 .roo
 .rooignore
+!.rooInclude
