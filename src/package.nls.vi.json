@@ -46,5 +46,7 @@
 	"settings.debugProxy.tlsInsecure.description": "Chấp nhận chứng chỉ self-signed từ proxy. **Bắt buộc cho việc kiểm tra MITM.** ⚠️ Không an toàn — chỉ dùng cho debug cục bộ.",
 	"settings.workspace.rootResolution.description": "Cách Roo xác định gốc workspace trong workspace nhiều gốc. Gốc được dùng để định vị `.roomodes`, `.roo/mcp.json`, `.roo/rules/` và các cấu hình khác theo phạm vi dự án. Thay đổi cài đặt này chỉ ảnh hưởng đến các lần tra cứu sau; các tác vụ đang chạy vẫn giữ gốc ban đầu của chúng.",
 	"settings.workspace.rootResolution.activeEditor.description": "Dùng thư mục workspace chứa trình soạn thảo đang hoạt động; quay lại thư mục workspace đầu tiên nếu không có. (Mặc định — giữ nguyên hành vi cũ.)",
-	"settings.workspace.rootResolution.firstFolder.description": "Luôn dùng thư mục workspace đầu tiên (workspaceFolders[0]). Có tính xác định — không phụ thuộc vào tệp nào đang được focus."
+	"settings.workspace.rootResolution.firstFolder.description": "Luôn dùng thư mục workspace đầu tiên (workspaceFolders[0]). Có tính xác định — không phụ thuộc vào tệp nào đang được focus.",
+	"settings.discovery.respectGitignore.description": "Tuân theo `.gitignore` khi tìm kiếm văn bản, liệt kê tệp và lập chỉ mục (mặc định: bật). Tắt để bao gồm các đường dẫn bị Git bỏ qua; `.rooignore` vẫn kiểm soát quyền truy cập. Thay đổi đối với việc lập chỉ mục cần **Developer: Reload Window**.",
+	"settings.discovery.followSymlinks.description": "Đi theo liên kết tượng trưng khi tìm kiếm văn bản, liệt kê tệp và lập chỉ mục (mặc định: tắt). Khi tắt, cách xử lý liên kết hiện có trong danh sách tệp không thay đổi. `.rooignore` vẫn kiểm soát quyền truy cập. Thay đổi đối với việc lập chỉ mục cần **Developer: Reload Window**."
 }

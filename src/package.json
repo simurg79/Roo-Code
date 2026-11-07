@@ -400,6 +400,20 @@
 					"description": "%settings.debugProxy.tlsInsecure.description%",
 					"markdownDescription": "%settings.debugProxy.tlsInsecure.description%"
 				},
+				"roo-cline.discovery.respectGitignore": {
+					"type": "boolean",
+					"default": true,
+					"scope": "window",
+					"description": "%settings.discovery.respectGitignore.description%",
+					"markdownDescription": "%settings.discovery.respectGitignore.description%"
+				},
+				"roo-cline.discovery.followSymlinks": {
+					"type": "boolean",
+					"default": false,
+					"scope": "window",
+					"description": "%settings.discovery.followSymlinks.description%",
+					"markdownDescription": "%settings.discovery.followSymlinks.description%"
+				},
 				"roo-cline.workspace.rootResolution": {
 					"type": "string",
 					"enum": [

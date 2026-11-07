@@ -1,3 +1,4 @@
+import "../../__tests__/mock-discovery"
 import "../../__tests__/mock-code-index-log"
 import * as vscode from "vscode"
 import path from "path"
@@ -125,7 +126,6 @@ describe("FileWatcher per-file completion", () => {
 			embedder,
 			store,
 			ignore,
-			access,
 			1,
 			parser,
 			gate,
@@ -692,7 +692,15 @@ describe("FileWatcher per-file completion", () => {
 		open[fileA] = true
 		points.set("legacy", { payload: { filePath: path.relative(workspace, fileA) } })
 		if (exclusion === "ignore") ignore.ignores.mockReturnValue(true)
-		if (exclusion === "rooignore") access.validateAccess.mockReturnValue(false)
+		if (exclusion === "rooignore") {
+			const { createDiscoveryContext } = await import("../../../glob/discovery-options")
+			vi.mocked(createDiscoveryContext).mockResolvedValueOnce({
+				workspaceRoot: workspace,
+				options: { respectGitignore: true, followSymlinks: false },
+				includedRoots: [],
+				rooIgnore: { ignores: () => true },
+			} as any)
+		}
 		if (exclusion === "size")
 			vi.mocked(vscode.workspace.fs.stat).mockResolvedValue({ size: MAX_FILE_SIZE_BYTES + 1 } as any)
 		await start()
@@ -1063,8 +1071,8 @@ describe("FileWatcher per-file completion", () => {
 			})
 			await queue([fileA], eventType === "delete" ? "delete" : "change")
 			expect(points.size).toBe(0)
-			expect(persisted.fileHashes[fileA]).toBeUndefined()
-			expect(persisted.openFiles[fileA]).toBe(true)
+			expect(persisted.fileHashes[path.relative(workspace, fileA)]).toBeUndefined()
+			expect(persisted.openFiles[path.relative(workspace, fileA)]).toBe(true)
 			watcher.dispose()
 			cache = new CacheManager(context, workspace)
 			await cache.initialize()

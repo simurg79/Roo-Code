@@ -7,6 +7,16 @@ import ignore from "ignore"
 import { arePathsEqual } from "../../utils/path"
 import { getBinPath } from "../../services/ripgrep"
 import { DIRS_TO_IGNORE } from "./constants"
+import {
+	createDiscoveryContext,
+	getIncludedRoot,
+	isDiscoveryPathAllowed,
+	isIncludedRootGitEligible,
+	isUnderRoot,
+	type DiscoveryContext,
+	type DiscoveryOptions,
+	type IncludedRoot,
+} from "./discovery-options"
 
 /**
  * Context object for directory scanning operations
@@ -30,11 +40,38 @@ interface ScanContext {
  * @param limit - Maximum number of files to return
  * @returns Tuple of [file paths array, whether the limit was reached]
  */
-export async function listFiles(dirPath: string, recursive: boolean, limit: number): Promise<[string[], boolean]> {
+export async function listFiles(
+	dirPath: string,
+	recursive: boolean,
+	limit: number,
+	discoveryContext?: DiscoveryContext,
+	showRooIgnoredFiles = false,
+): Promise<[string[], boolean, string[]?]> {
 	// Early return for limit of 0 - no need to scan anything
 	if (limit === 0) {
 		return [[], false]
 	}
+
+	const absolutePath = path.resolve(dirPath)
+	const workspaceRoot =
+		discoveryContext?.workspaceRoot ??
+		vscode.workspace.getWorkspaceFolder(vscode.Uri.file(absolutePath))?.uri.fsPath ??
+		vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
+		absolutePath
+	const context = discoveryContext ?? (await createDiscoveryContext(workspaceRoot))
+	const legacyOutsideRequest =
+		!isUnderRoot(absolutePath, context.workspaceRoot) && !getIncludedRoot(absolutePath, context)
+	const blockedPaths = new Set<string>()
+	const allowed = (entry: string) => {
+		if (legacyOutsideRequest) return true
+		const root = getIncludedRoot(path.resolve(entry), context)
+		if (root && !isIncludedRootGitEligible(entry, root, context.options)) return false
+		if (isDiscoveryPathAllowed(entry, context)) return true
+		if (!showRooIgnoredFiles) return false
+		blockedPaths.add(path.resolve(entry))
+		return true
+	}
+	if (!allowed(`${absolutePath}/`)) return [[], false]
 
 	// Handle special directories
 	const specialResult = await handleSpecialDirectories(dirPath)
@@ -46,65 +83,110 @@ export async function listFiles(dirPath: string, recursive: boolean, limit: numb
 	// Get ripgrep path
 	const rgPath = await getRipgrepPath()
 
-	if (!recursive) {
-		// For non-recursive, use the existing approach
-		const files = await listFilesWithRipgrep(rgPath, dirPath, false, limit)
-		const ignoreInstance = await createIgnoreInstance(dirPath)
-		// Calculate remaining limit for directories
-		const remainingLimit = Math.max(0, limit - files.length)
-		const directories = await listFilteredDirectories(dirPath, false, ignoreInstance, remainingLimit)
-		return formatAndCombineResults(files, directories, limit)
+	const requestedRoot = getIncludedRoot(absolutePath, context)
+	const roots = arePathsEqual(absolutePath, context.workspaceRoot) ? context.includedRoots : []
+	const files: string[] = []
+	const directories: string[] = []
+	let firstLevelDirs: string[] = []
+
+	if (requestedRoot) {
+		const included = await listIncludedRoot(rgPath, absolutePath, recursive, limit, requestedRoot, context, allowed)
+		files.push(...included.files)
+		directories.push(...included.directories)
+		firstLevelDirs = included.directories.filter((entry) =>
+			arePathsEqual(path.dirname(path.resolve(entry)), absolutePath),
+		)
+	} else {
+		files.push(...(await listFilesWithRipgrep(rgPath, dirPath, recursive, limit, context.options, allowed)))
+		const ignoreInstance = context.options.respectGitignore ? await createIgnoreInstance(dirPath) : ignore()
+		directories.push(...(await listFilteredDirectories(dirPath, recursive, ignoreInstance, limit, allowed)))
+		firstLevelDirs = directories.filter((entry) => arePathsEqual(path.dirname(path.resolve(entry)), absolutePath))
+		if (recursive && files.length + directories.length >= limit) {
+			firstLevelDirs = await listFilteredDirectories(dirPath, false, ignoreInstance, limit, allowed)
+		}
 	}
 
-	// For recursive mode, use the original approach but ensure first-level directories are included
-	const files = await listFilesWithRipgrep(rgPath, dirPath, true, limit)
-	const ignoreInstance = await createIgnoreInstance(dirPath)
-	// Calculate remaining limit for directories
-	const remainingLimit = Math.max(0, limit - files.length)
-	const directories = await listFilteredDirectories(dirPath, true, ignoreInstance, remainingLimit)
+	for (const root of roots) {
+		const rootEntry = `${root.root}/`
+		if (!allowed(rootEntry) || !isIncludedRootGitEligible(rootEntry, root, context.options)) continue
+		directories.push(rootEntry)
+		if (recursive && root !== requestedRoot) {
+			const included = await listIncludedRoot(rgPath, root.root, true, limit, root, context, allowed)
+			files.push(...included.files)
+			directories.push(...included.directories)
+		}
+	}
 
-	// Combine and check if we hit the limits
 	const [results, limitReached] = formatAndCombineResults(files, directories, limit)
-
-	// If we hit the limit, ensure all first-level directories are included
-	if (limitReached) {
-		const firstLevelDirs = await getFirstLevelDirectories(dirPath, ignoreInstance)
-		return ensureFirstLevelDirectoriesIncluded(results, firstLevelDirs, limit)
-	}
-
-	return [results, limitReached]
+	const [entries, didHitLimit] =
+		recursive && limitReached
+			? ensureFirstLevelDirectoriesIncluded(results, firstLevelDirs, limit)
+			: [results, limitReached]
+	// Without locked display, [] tells the scanner access was checked; unchecked returns must omit it.
+	return [entries, didHitLimit, legacyOutsideRequest ? undefined : [...blockedPaths]]
 }
 
-/**
- * Get only the first-level directories in a path
- */
-async function getFirstLevelDirectories(dirPath: string, ignoreInstance: ReturnType<typeof ignore>): Promise<string[]> {
-	const absolutePath = path.resolve(dirPath)
-	const directories: string[] = []
-
-	try {
-		const entries = await fs.promises.readdir(absolutePath, { withFileTypes: true })
-
-		for (const entry of entries) {
-			if (entry.isDirectory() && !entry.isSymbolicLink()) {
-				const fullDirPath = path.join(absolutePath, entry.name)
-				const context: ScanContext = {
-					isTargetDir: false,
-					insideExplicitHiddenTarget: false,
-					basePath: dirPath,
-					ignoreInstance,
-				}
-				if (shouldIncludeDirectory(entry.name, fullDirPath, context)) {
-					const formattedPath = fullDirPath.endsWith("/") ? fullDirPath : `${fullDirPath}/`
-					directories.push(formattedPath)
-				}
-			}
-		}
-	} catch (err) {
-		console.warn(`Could not read directory ${absolutePath}: ${err}`)
+export function buildIncludedRootArgs(relativeTarget: string, options: DiscoveryOptions): string[] {
+	const args = ["--hidden", "-g", "!**/.*/**"]
+	for (const directory of DIRS_TO_IGNORE) {
+		if (directory !== ".*") args.push("-g", `!**/${directory}/**`)
 	}
+	if (options.followSymlinks) args.push("--follow")
+	return [...args, "--no-ignore-vcs", relativeTarget]
+}
 
-	return directories
+async function listIncludedRoot(
+	rgPath: string,
+	directoryPath: string,
+	recursive: boolean,
+	limit: number,
+	root: IncludedRoot,
+	context: DiscoveryContext,
+	allowed: (entry: string) => boolean,
+): Promise<{ files: string[]; directories: string[] }> {
+	const relativeTarget = path.relative(root.root, directoryPath) || "."
+	const args = [
+		"--files",
+		...(recursive ? [] : ["--maxdepth", "1"]),
+		...buildIncludedRootArgs(relativeTarget, context.options),
+	]
+	const paths = await execRipgrep(rgPath, args, limit, root.root, (entry) => allowed(path.resolve(root.root, entry)))
+	const files = paths.map((entry) => path.resolve(root.root, entry))
+	const directories: string[] = []
+	const pending = [directoryPath]
+	const visited = new Set<string>()
+	while (pending.length && directories.length < limit) {
+		const currentPath = pending.pop()!
+		try {
+			const realPath = await fs.promises.realpath(currentPath)
+			if (visited.has(realPath)) continue
+			visited.add(realPath)
+			for (const entry of await fs.promises.readdir(currentPath, { withFileTypes: true })) {
+				const fullPath = path.join(currentPath, entry.name)
+				const relativePath = path.relative(root.root, fullPath).split(path.sep).join("/")
+				if (relativePath.split("/").some((part) => part.startsWith("."))) continue
+				if (
+					DIRS_TO_IGNORE.some(
+						(directory) => directory !== ".*" && `/${relativePath}/`.includes(`/${directory}/`),
+					)
+				)
+					continue
+				if (!allowed(`${fullPath}/`)) continue
+				const directory =
+					entry.isDirectory() ||
+					(entry.isSymbolicLink() &&
+						context.options.followSymlinks &&
+						(await fs.promises.stat(fullPath)).isDirectory())
+				if (!directory) continue
+				directories.push(`${fullPath}/`)
+				if (recursive) pending.push(fullPath)
+				if (directories.length >= limit) break
+			}
+		} catch (error) {
+			console.warn(`Could not read directory ${currentPath}: ${error}`)
+		}
+	}
+	return { files, directories }
 }
 
 /**
@@ -202,10 +284,15 @@ async function listFilesWithRipgrep(
 	dirPath: string,
 	recursive: boolean,
 	limit: number,
+	options: DiscoveryOptions,
+	allowed: (entry: string) => boolean,
 ): Promise<string[]> {
 	const rgArgs = buildRipgrepArgs(dirPath, recursive)
+	if (!options.respectGitignore && !rgArgs.includes("--no-ignore-vcs")) rgArgs.unshift("--no-ignore-vcs")
 
-	const relativePaths = await execRipgrep(rgPath, rgArgs, limit)
+	const relativePaths = await execRipgrep(rgPath, rgArgs, limit, undefined, (entry) =>
+		allowed(path.resolve(dirPath, entry)),
+	)
 
 	// Convert relative paths from ripgrep to absolute paths
 	// Resolve dirPath once here for the mapping operation
@@ -389,6 +476,7 @@ async function listFilteredDirectories(
 	recursive: boolean,
 	ignoreInstance: ReturnType<typeof ignore>,
 	limit?: number,
+	allowed: (entry: string) => boolean = () => true,
 ): Promise<string[]> {
 	const absolutePath = path.resolve(dirPath)
 	const directories: string[] = []
@@ -428,6 +516,11 @@ async function listFilteredDirectories(
 				if (entry.isDirectory() && !entry.isSymbolicLink()) {
 					const dirName = entry.name
 					const fullDirPath = path.join(currentPath, dirName)
+					if (
+						!allowed(`${fullDirPath}/`) ||
+						isIgnoredByGitignore(fullDirPath, context.basePath, ignoreInstance)
+					)
+						continue
 
 					// Create context for subdirectory checks
 					// Subdirectories found during scanning are never target directories themselves
@@ -646,12 +739,15 @@ function formatAndCombineResults(files: string[], directories: string[], limit: 
 /**
  * Execute ripgrep command and return list of files
  */
-async function execRipgrep(rgPath: string, args: string[], limit: number): Promise<string[]> {
+async function execRipgrep(
+	rgPath: string,
+	args: string[],
+	limit: number,
+	cwd?: string,
+	allowed: (entry: string) => boolean = () => true,
+): Promise<string[]> {
 	return new Promise((resolve, reject) => {
-		// Extract the directory path from args (it's the last argument)
-		const searchDir = args[args.length - 1]
-
-		const rgProcess = childProcess.spawn(rgPath, args)
+		const rgProcess = cwd ? childProcess.spawn(rgPath, args, { cwd }) : childProcess.spawn(rgPath, args)
 		let output = ""
 		let results: string[] = []
 
@@ -659,7 +755,6 @@ async function execRipgrep(rgPath: string, args: string[], limit: number): Promi
 		const timeoutId = setTimeout(() => {
 			rgProcess.kill()
 			console.warn("ripgrep timed out, returning partial results")
-			resolve(results.slice(0, limit))
 		}, 10_000)
 
 		// Process stdout data as it comes in
@@ -715,9 +810,9 @@ async function execRipgrep(rgPath: string, args: string[], limit: number): Promi
 
 			// Process each complete line
 			for (const line of lines) {
-				if (line.trim() && results.length < limit) {
-					// Keep the relative path as returned by ripgrep
-					results.push(line)
+				const entry = line.endsWith("\r") ? line.slice(0, -1) : line
+				if (entry.trim() && results.length < limit && allowed(entry)) {
+					results.push(entry)
 				} else if (results.length >= limit) {
 					break
 				}

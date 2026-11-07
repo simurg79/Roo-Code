@@ -5,6 +5,12 @@ import { listFiles } from "../list-files"
 vi.mock("child_process")
 vi.mock("fs")
 vi.mock("vscode", () => ({
+	workspace: {
+		getWorkspaceFolder: () => undefined,
+		workspaceFolders: [],
+		getConfiguration: () => ({ get: (_key: string, fallback: boolean) => fallback }),
+	},
+	Uri: { file: (filePath: string) => ({ fsPath: filePath }) },
 	env: {
 		appRoot: "/mock/vscode/app/root",
 	},
@@ -37,6 +43,12 @@ vi.mock("../../ripgrep", () => ({
 
 // Mock vscode
 vi.mock("vscode", () => ({
+	workspace: {
+		getWorkspaceFolder: () => undefined,
+		workspaceFolders: [],
+		getConfiguration: () => ({ get: (_key: string, fallback: boolean) => fallback }),
+	},
+	Uri: { file: (filePath: string) => ({ fsPath: filePath }) },
 	env: {
 		appRoot: "/mock/app/root",
 	},

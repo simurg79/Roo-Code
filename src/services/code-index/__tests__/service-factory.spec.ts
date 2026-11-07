@@ -73,8 +73,11 @@ describe("CodeIndexServiceFactory", () => {
 		const ignoreInstance = {} as any
 		factory.createDirectoryScanner(embedder, store, parser, ignoreInstance)
 		factory.createFileWatcher({} as any, embedder, store, mockCacheManager, ignoreInstance, undefined, parser)
-		expect(vitest.mocked(DirectoryScanner).mock.calls[0].slice(-3)).toEqual([gate, allocator, failures])
-		expect(vitest.mocked(FileWatcher).mock.calls[0].slice(-3)).toEqual([gate, allocator, failures])
+		expect(vitest.mocked(DirectoryScanner).mock.calls[0].slice(-4, -1)).toEqual([gate, allocator, failures])
+		expect(vitest.mocked(FileWatcher).mock.calls[0].slice(-4, -1)).toEqual([gate, allocator, failures])
+		expect(vitest.mocked(DirectoryScanner).mock.calls[0].at(-1)).toBe(
+			vitest.mocked(FileWatcher).mock.calls[0].at(-1),
+		)
 	})
 
 	describe("createEmbedder", () => {

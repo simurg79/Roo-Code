@@ -121,7 +121,9 @@ Otherwise, if you have not completed the task and do not need additional informa
 		rooIgnoreController: RooIgnoreController | undefined,
 		showRooIgnoredFiles: boolean,
 		rooProtectedController?: RooProtectedController,
+		blockedDiscoveryPaths?: string[],
 	): string => {
+		const blockedPaths = blockedDiscoveryPaths && new Set(blockedDiscoveryPaths.map((entry) => path.resolve(entry)))
 		const sorted = files
 			.map((file) => {
 				// convert absolute path to relative path
@@ -152,14 +154,16 @@ Otherwise, if you have not completed the task and do not need additional informa
 
 		let rooIgnoreParsed: string[] = sorted
 
-		if (rooIgnoreController) {
+		if (rooIgnoreController || blockedPaths) {
 			rooIgnoreParsed = []
 			for (const filePath of sorted) {
 				// path is relative to absolute path, not cwd
 				// validateAccess expects either path relative to cwd or absolute path
 				// otherwise, for validating against ignore patterns like "assets/icons", we would end up with just "icons", which would result in the path not being ignored.
 				const absoluteFilePath = path.resolve(absolutePath, filePath)
-				const isIgnored = !rooIgnoreController.validateAccess(absoluteFilePath)
+				const isIgnored = blockedPaths
+					? blockedPaths.has(absoluteFilePath)
+					: !rooIgnoreController!.validateAccess(absoluteFilePath)
 
 				if (isIgnored) {
 					// If file is ignored and we're not showing ignored files, skip it

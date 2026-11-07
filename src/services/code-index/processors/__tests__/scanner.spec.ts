@@ -1,3 +1,5 @@
+vi.mock("../../../../utils/path", () => ({ getWorkspacePathForContext: () => process.cwd() }))
+import "../../__tests__/mock-discovery"
 // npx vitest services/code-index/processors/__tests__/scanner.spec.ts
 
 import "../../__tests__/mock-code-index-log"

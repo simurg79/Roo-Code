@@ -46,5 +46,7 @@
 	"settings.debugProxy.tlsInsecure.description": "프록시의 self-signed 인증서를 허용합니다. **MITM 검사에 필요합니다.** ⚠️ 안전하지 않으므로 로컬 디버깅에만 사용하세요.",
 	"settings.workspace.rootResolution.description": "다중 루트 워크스페이스에서 Roo가 워크스페이스 루트를 확인하는 방식입니다. 루트는 `.roomodes`, `.roo/mcp.json`, `.roo/rules/` 및 기타 프로젝트 범위 구성을 찾는 데 사용됩니다. 이 설정을 변경해도 이후 조회에만 영향을 미치며, 실행 중인 작업은 원래 루트를 유지합니다.",
 	"settings.workspace.rootResolution.activeEditor.description": "활성 편집기가 포함된 워크스페이스 폴더를 사용하고, 없으면 첫 번째 워크스페이스 폴더로 대체합니다. (기본값 — 기존 동작을 유지합니다.)",
-	"settings.workspace.rootResolution.firstFolder.description": "항상 첫 번째 워크스페이스 폴더(workspaceFolders[0])를 사용합니다. 결정적이며 현재 포커스된 파일과 무관합니다."
+	"settings.workspace.rootResolution.firstFolder.description": "항상 첫 번째 워크스페이스 폴더(workspaceFolders[0])를 사용합니다. 결정적이며 현재 포커스된 파일과 무관합니다.",
+	"settings.discovery.respectGitignore.description": "텍스트 검색, 파일 목록 및 인덱싱에서 `.gitignore`를 적용합니다(기본값: 활성화). 비활성화하면 Git이 무시하는 경로도 포함하지만, `.rooignore`는 계속 액세스를 제어합니다. 인덱싱에 변경 사항을 적용하려면 **Developer: Reload Window**가 필요합니다.",
+	"settings.discovery.followSymlinks.description": "텍스트 검색, 파일 목록 및 인덱싱에서 심볼릭 링크를 따라갑니다(기본값: 비활성화). 비활성화해도 파일 목록의 기존 링크 동작은 바뀌지 않습니다. `.rooignore`는 계속 액세스를 제어합니다. 인덱싱에 변경 사항을 적용하려면 **Developer: Reload Window**가 필요합니다."
 }
