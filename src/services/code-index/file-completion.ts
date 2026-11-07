@@ -12,7 +12,7 @@ import {
 import { FileFailureRegistry, REMOVAL_REVISION, type FileFailureActivity } from "./file-failure-registry"
 import { classifyIndexingError, type TransientClass } from "./shared/indexing-errors"
 import { waitForRetry } from "./embedders/cancellation"
-import { generateRelativeFilePath } from "./shared/get-relative-path"
+import { toIndexPath } from "../glob/discovery-options"
 import { throwIfAborted } from "./parser-errors"
 
 export class FileCompletion {
@@ -96,7 +96,7 @@ export class FileIndexWriter {
 		},
 	): Promise<T> {
 		const { signal, activity, file, revision, ownedClasses } = options
-		const relativePath = generateRelativeFilePath(file, this.workspacePath)
+		const relativePath = toIndexPath(file, this.workspacePath)
 		const previous = this.failures.getFailure(relativePath, revision, activity)
 		if (previous?.state === "exhausted") throw Object.assign(new Error(previous.reason), previous)
 		let attempt = previous?.attempt ?? 0
@@ -141,7 +141,7 @@ export class FileIndexWriter {
 		owner = parent,
 	): Promise<T> {
 		throwIfAborted(parent)
-		const relativePath = generateRelativeFilePath(filePath, this.workspacePath)
+		const relativePath = toIndexPath(filePath, this.workspacePath)
 		const revisionSignal = this.failures.renew(relativePath, revision)
 		const signal = AbortSignal.any([parent, revisionSignal])
 		this.owners.set(signal, owner)
@@ -197,7 +197,7 @@ export class FileIndexWriter {
 		})
 		throwIfAborted(signal)
 		this.cache.completeRemoval(filePath)
-		this.failures.clear(generateRelativeFilePath(filePath, this.workspacePath), REMOVAL_REVISION)
+		this.failures.clear(toIndexPath(filePath, this.workspacePath), REMOVAL_REVISION)
 	}
 
 	async replace(
@@ -241,14 +241,7 @@ export class FileIndexWriter {
 			throwIfAborted(signal)
 			if (counts.current !== selected.length || counts.other !== 0) {
 				const reason = `Index verification failed for ${filePath}: expected ${selected.length}, current ${counts.current}, other ${counts.other}`
-				this.failures.record(
-					generateRelativeFilePath(filePath, this.workspacePath),
-					hash,
-					"verify",
-					reason,
-					1,
-					"exhausted",
-				)
+				this.failures.record(toIndexPath(filePath, this.workspacePath), hash, "verify", reason, 1, "exhausted")
 				throw new Error(reason)
 			}
 		}
@@ -270,7 +263,7 @@ export class FileIndexWriter {
 			throwIfAborted(signal)
 			this.cache.completeFile(filePath, hash)
 			this.gate.reconciled(filePath)
-			this.failures.clear(generateRelativeFilePath(filePath, this.workspacePath), hash)
+			this.failures.clear(toIndexPath(filePath, this.workspacePath), hash)
 			onComplete?.(selected.length)
 		})
 		const batches: CodeBlock[][] = []
@@ -300,7 +293,7 @@ export class FileIndexWriter {
 					id: uuidv5(`${block.segmentHash}:${generation}`, QDRANT_CODE_BLOCK_NAMESPACE),
 					vector: embeddings[index],
 					payload: {
-						filePath: generateRelativeFilePath(filePath, this.workspacePath),
+						filePath: toIndexPath(filePath, this.workspacePath),
 						codeChunk: block.content,
 						startLine: block.start_line,
 						endLine: block.end_line,

@@ -30,10 +30,15 @@ import { BATCH_SEGMENT_THRESHOLD } from "./constants"
 
 import { FileFailureRegistry } from "./file-failure-registry"
 
+import { createDiscoveryContext, type DiscoveryContext } from "../glob/discovery-options"
+
 /**
  * Factory class responsible for creating and configuring code indexing service dependencies.
  */
 export class CodeIndexServiceFactory {
+	private discoveryContext?: Promise<DiscoveryContext>
+	private readonly getDiscoveryContext = () => (this.discoveryContext ??= createDiscoveryContext(this.workspacePath))
+
 	constructor(
 		private readonly configManager: CodeIndexConfigManager,
 		private readonly workspacePath: string,
@@ -201,6 +206,7 @@ export class CodeIndexServiceFactory {
 			this.writeGate,
 			this.generationAllocator,
 			this.failures,
+			this.getDiscoveryContext,
 		)
 	}
 
@@ -233,12 +239,12 @@ export class CodeIndexServiceFactory {
 			embedder,
 			vectorStore,
 			ignoreInstance,
-			rooIgnoreController,
 			batchSize,
 			parser,
 			this.writeGate,
 			this.generationAllocator,
 			this.failures,
+			this.getDiscoveryContext,
 		)
 	}
 

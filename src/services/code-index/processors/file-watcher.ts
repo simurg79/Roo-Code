@@ -1,7 +1,6 @@
 import * as vscode from "vscode"
 import { MAX_FILE_SIZE_BYTES, BATCH_SEGMENT_THRESHOLD } from "../constants"
 import { createHash } from "crypto"
-import { RooIgnoreController } from "../../../core/ignore/RooIgnoreController"
 import { Ignore } from "ignore"
 import { scannerExtensions } from "../shared/supported-extensions"
 import { IFileWatcher, FileProcessingResult, IEmbedder, IVectorStore, BatchProcessingSummary } from "../interfaces"
@@ -12,8 +11,9 @@ import { GenerationAllocator } from "../generation-allocator"
 import { FileIndexWriter } from "../file-completion"
 import { ParserFatalError, throwIfAborted } from "../parser-errors"
 import { CacheManager } from "../cache-manager"
-import { generateRelativeFilePath } from "../shared/get-relative-path"
-import { isPathInIgnoredDirectory } from "../../glob/ignore-utils"
+import { createDiscoveryContext, toIndexPath, type DiscoveryContext } from "../../glob/discovery-options"
+import { findStartupDirectoryLinks, isIndexDiscoveryPathEligible } from "../discovery"
+import * as path from "path"
 import { Package } from "../../../shared/package"
 import { FileFailureRegistry, UNKNOWN_REVISION, type FileFailureActivity } from "../file-failure-registry"
 import { codeIndexLog } from "../code-index-log"
@@ -21,8 +21,8 @@ import { codeIndexLog } from "../code-index-log"
 type FileEvent = { uri: vscode.Uri; type: "create" | "change" | "delete" }
 
 export class FileWatcher implements IFileWatcher {
-	private fileWatcher?: vscode.FileSystemWatcher
-	private readonly ignoreController: RooIgnoreController
+	private readonly fileWatchers: vscode.FileSystemWatcher[] = []
+	private discoveryContext?: Promise<DiscoveryContext>
 	private readonly accumulatedEvents = new Map<string, FileEvent>()
 	private batchProcessDebounceTimer?: NodeJS.Timeout
 	private readonly BATCH_DEBOUNCE_DELAY_MS = 500
@@ -57,14 +57,13 @@ export class FileWatcher implements IFileWatcher {
 		private readonly embedder?: IEmbedder,
 		private readonly vectorStore?: IVectorStore,
 		private readonly ignoreInstance?: Ignore,
-		ignoreController?: RooIgnoreController,
 		batchSegmentThreshold?: number,
 		private readonly parser: ICodeParser = new ParseWorkerClient(),
 		private readonly writeGate = new IndexWriteGate(),
 		private readonly generations = new GenerationAllocator(cacheManager),
 		private readonly failures = new FileFailureRegistry(),
+		private readonly getDiscoveryContext?: () => Promise<DiscoveryContext>,
 	) {
-		this.ignoreController = ignoreController || new RooIgnoreController(workspacePath)
 		if (vectorStore) {
 			this.writer = new FileIndexWriter(
 				cacheManager,
@@ -100,14 +99,24 @@ export class FileWatcher implements IFileWatcher {
 			: this.localAbortController.signal
 		if (signal) this.writeGate.own(this.signal, signal)
 		throwIfAborted(this.signal)
-		const filePattern = new vscode.RelativePattern(
-			this.workspacePath,
-			`**/*{${scannerExtensions.map((extension) => extension.substring(1)).join(",")}}`,
-		)
-		this.fileWatcher = vscode.workspace.createFileSystemWatcher(filePattern)
-		this.fileWatcher.onDidCreate((uri) => this.handleFileEvent(uri, "create"))
-		this.fileWatcher.onDidChange((uri) => this.handleFileEvent(uri, "change"))
-		this.fileWatcher.onDidDelete((uri) => this.handleFileEvent(uri, "delete"))
+		const discoveryContext = await this.getContext()
+		const links = await findStartupDirectoryLinks(discoveryContext, this.ignoreInstance, this.signal)
+		throwIfAborted(this.signal)
+		for (const root of [this.workspacePath, ...discoveryContext.includedRoots.map((root) => root.root), ...links]) {
+			const filePattern = new vscode.RelativePattern(
+				root,
+				`**/*{${scannerExtensions.map((extension) => extension.substring(1)).join(",")}}`,
+			)
+			const watcher = vscode.workspace.createFileSystemWatcher(filePattern)
+			this.fileWatchers.push(watcher)
+			watcher.onDidCreate((uri) => this.handleFileEvent(uri, "create"))
+			watcher.onDidChange((uri) => this.handleFileEvent(uri, "change"))
+			watcher.onDidDelete((uri) => this.handleFileEvent(uri, "delete"))
+		}
+	}
+
+	private getContext(): Promise<DiscoveryContext> {
+		return (this.discoveryContext ??= this.getDiscoveryContext?.() ?? createDiscoveryContext(this.workspacePath))
 	}
 
 	dispose(): void {
@@ -115,7 +124,7 @@ export class FileWatcher implements IFileWatcher {
 		this.disposed = true
 		this.localAbortController.abort()
 		this.parserFatal.dispose()
-		this.fileWatcher?.dispose()
+		for (const watcher of this.fileWatchers) watcher.dispose()
 		clearTimeout(this.batchProcessDebounceTimer)
 		this._onDidStartBatchProcessing.dispose()
 		this._onBatchProgressUpdate.dispose()
@@ -224,7 +233,7 @@ export class FileWatcher implements IFileWatcher {
 			throwIfAborted(signal)
 			if (
 				!this.cacheManager.isTracked(filePath) &&
-				!this.failures.has(generateRelativeFilePath(filePath, this.workspacePath))
+				!this.failures.has(toIndexPath(filePath, this.workspacePath))
 			) {
 				return { path: filePath, status: "skipped", reason: "File is not tracked" }
 			}
@@ -247,16 +256,17 @@ export class FileWatcher implements IFileWatcher {
 		const controller = new AbortController()
 		this.pathControllers.set(filePath, controller)
 		let signal = AbortSignal.any([this.signal, controller.signal])
-		const relativeFilePath = generateRelativeFilePath(filePath, this.workspacePath)
+		const relativeFilePath = toIndexPath(filePath, this.workspacePath)
 		let revision = this.failures.getRevision(relativeFilePath) ?? UNKNOWN_REVISION
 		this.failures.renew(relativeFilePath, revision)
 		let activity: FileFailureActivity = "read"
 		try {
 			throwIfAborted(signal)
+			const discoveryContext = await this.getContext()
+			throwIfAborted(signal)
 			if (
-				isPathInIgnoredDirectory(relativeFilePath) ||
-				!this.ignoreController.validateAccess(filePath) ||
-				this.ignoreInstance?.ignores(relativeFilePath)
+				!scannerExtensions.includes(path.extname(filePath).toLowerCase()) ||
+				!isIndexDiscoveryPathEligible(filePath, discoveryContext, this.ignoreInstance)
 			) {
 				return await this.removeFile(filePath, signal)
 			}

@@ -1,3 +1,4 @@
+import "../../__tests__/mock-discovery"
 import "../../__tests__/mock-code-index-log"
 import * as path from "path"
 import * as vscode from "vscode"
@@ -414,12 +415,12 @@ describe("DirectoryScanner durable per-file recovery", () => {
 			const save = storage.save.getMockImplementation()!
 			storage.save.mockImplementation(async (filePath: string, data: any) => {
 				await save(filePath, data)
-				if (data.openFiles[fileA]) await held.promise
+				if (data.openFiles[generateRelativeFilePath(fileA, workspacePath)]) await held.promise
 			})
 			const pending = scanner.scanDirectory(workspacePath, vi.fn())
 			await drain()
-			expect(storage.snapshot.fileHashes[fileA]).toBeUndefined()
-			expect(storage.snapshot.openFiles[fileA]).toBe(true)
+			expect(storage.snapshot.fileHashes[generateRelativeFilePath(fileA, workspacePath)]).toBeUndefined()
+			expect(storage.snapshot.openFiles[generateRelativeFilePath(fileA, workspacePath)]).toBe(true)
 			expect(store.upsertPoints).not.toHaveBeenCalled()
 			expect(store.deletePointsByFilePath).not.toHaveBeenCalled()
 			held.reject(new Error("disk full"))
@@ -495,8 +496,8 @@ describe("DirectoryScanner durable per-file recovery", () => {
 				.catch((error) => error)
 			await drain()
 			expect(filePoints(fileA)).toEqual([])
-			expect(storage.snapshot.fileHashes[fileA]).toBeUndefined()
-			expect(storage.snapshot.openFiles[fileA]).toBe(true)
+			expect(storage.snapshot.fileHashes[generateRelativeFilePath(fileA, workspacePath)]).toBeUndefined()
+			expect(storage.snapshot.openFiles[generateRelativeFilePath(fileA, workspacePath)]).toBe(true)
 			controller.abort()
 			await reload()
 			listedPaths = [fileA]

@@ -4,6 +4,8 @@ import { createHash } from "crypto"
 import { ICacheManager } from "./interfaces/cache"
 import debounce from "lodash.debounce"
 import { safeWriteJson } from "../../utils/safeWriteJson"
+import * as path from "path"
+import { toIndexPath } from "../glob/discovery-options"
 
 export class CacheManager implements ICacheManager {
 	private readonly cachePath: vscode.Uri
@@ -15,7 +17,10 @@ export class CacheManager implements ICacheManager {
 	public loadSucceeded = false
 	public loadedAt = 0
 
-	constructor(context: vscode.ExtensionContext, workspacePath: string) {
+	constructor(
+		context: vscode.ExtensionContext,
+		private readonly workspacePath: string,
+	) {
 		this.cachePath = vscode.Uri.joinPath(
 			context.globalStorageUri,
 			`roo-index-cache-${createHash("sha256").update(workspacePath).digest("hex")}.json`,
@@ -38,12 +43,12 @@ export class CacheManager implements ICacheManager {
 				if (!data.fileHashes || !data.openFiles) throw new Error("Invalid indexing cache records")
 				for (const [filePath, hash] of Object.entries(data.fileHashes)) {
 					if (typeof hash !== "string") throw new Error("Invalid indexing hash")
-					this.fileHashes[filePath] = hash
+					this.fileHashes[this.key(filePath)] = hash
 				}
 				for (const [filePath, open] of Object.entries(data.openFiles)) {
 					if (open !== true) throw new Error("Invalid open-file record")
-					this.openFiles[filePath] = true
-					delete this.fileHashes[filePath]
+					this.openFiles[this.key(filePath)] = true
+					delete this.fileHashes[this.key(filePath)]
 				}
 				if (Number.isSafeInteger(data.generationWatermark) && data.generationWatermark >= 0) {
 					this.watermark = data.generationWatermark
@@ -51,7 +56,7 @@ export class CacheManager implements ICacheManager {
 			} else {
 				for (const [filePath, hash] of Object.entries(data)) {
 					if (typeof hash !== "string") throw new Error("Invalid legacy indexing cache")
-					this.fileHashes[filePath] = hash
+					this.fileHashes[this.key(filePath)] = hash
 				}
 			}
 			this.loadSucceeded = true
@@ -92,38 +97,51 @@ export class CacheManager implements ICacheManager {
 		await this.saveNow()
 	}
 
+	private key(filePath: string): string {
+		return toIndexPath(path.resolve(this.workspacePath, filePath), path.resolve(this.workspacePath))
+	}
+
 	async invalidateFile(filePath: string): Promise<void> {
+		filePath = this.key(filePath)
 		delete this.fileHashes[filePath]
 		this.openFiles[filePath] = true
 		await this.saveNow()
 	}
 
 	completeFile(filePath: string, hash: string): void {
+		filePath = this.key(filePath)
 		this.fileHashes[filePath] = hash
 		delete this.openFiles[filePath]
 		this.debouncedSave()
 	}
 
 	completeRemoval(filePath: string): void {
+		filePath = this.key(filePath)
 		delete this.fileHashes[filePath]
 		delete this.openFiles[filePath]
 		this.debouncedSave()
 	}
 
+	// Recovery and reconciliation operate on physical paths, not persisted index keys.
 	getOpenFiles(): Record<string, true> {
-		return { ...this.openFiles }
+		return Object.fromEntries(
+			Object.keys(this.openFiles).map((filePath) => [path.resolve(this.workspacePath, filePath), true as const]),
+		)
 	}
 
 	getTrackedPaths(): string[] {
-		return [...new Set([...Object.keys(this.fileHashes), ...Object.keys(this.openFiles)])]
+		return [...new Set([...Object.keys(this.fileHashes), ...Object.keys(this.openFiles)])].map((filePath) =>
+			path.resolve(this.workspacePath, filePath),
+		)
 	}
 
 	isTracked(filePath: string): boolean {
-		return Object.hasOwn(this.fileHashes, filePath) || Object.hasOwn(this.openFiles, filePath)
+		const key = this.key(filePath)
+		return Object.hasOwn(this.fileHashes, key) || Object.hasOwn(this.openFiles, key)
 	}
 
 	getHash(filePath: string): string | undefined {
-		return this.fileHashes[filePath]
+		return this.fileHashes[this.key(filePath)]
 	}
 
 	async flush(): Promise<void> {

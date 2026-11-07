@@ -168,7 +168,7 @@ describe("getEnvironmentDetails", () => {
 		expect(result).toContain("# Current Workspace Directory")
 		expect(result).toContain("Files")
 
-		expect(listFiles).toHaveBeenCalledWith(mockCwd, true, 50)
+		expect(listFiles).toHaveBeenCalledWith(mockCwd, true, 50, undefined, false)
 
 		expect(formatResponse.formatFilesList).toHaveBeenCalledWith(
 			mockCwd,
@@ -176,8 +176,30 @@ describe("getEnvironmentDetails", () => {
 			false,
 			mockCline.rooIgnoreController,
 			false,
+			undefined,
+			undefined,
 		)
 	})
+
+	it.each([false, true])(
+		"passes locked-name display metadata to formatting, showIgnored=%s",
+		async (showRooIgnoredFiles) => {
+			mockState.showRooIgnoredFiles = showRooIgnoredFiles
+			const blockedPaths = showRooIgnoredFiles ? ["blocked.ts"] : []
+			vi.mocked(listFiles).mockResolvedValue([["visible.ts", ...blockedPaths], false, blockedPaths])
+			await getEnvironmentDetails(mockCline as Task, true)
+			expect(listFiles).toHaveBeenCalledWith(mockCwd, true, 50, undefined, showRooIgnoredFiles)
+			expect(formatResponse.formatFilesList).toHaveBeenCalledWith(
+				mockCwd,
+				["visible.ts", ...blockedPaths],
+				false,
+				mockCline.rooIgnoreController,
+				showRooIgnoredFiles,
+				undefined,
+				blockedPaths,
+			)
+		},
+	)
 
 	it("should not include file details when includeFileDetails is false", async () => {
 		await getEnvironmentDetails(mockCline as Task, false)

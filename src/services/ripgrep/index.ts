@@ -6,6 +6,15 @@ import * as vscode from "vscode"
 
 import { RooIgnoreController } from "../../core/ignore/RooIgnoreController"
 import { fileExistsAtPath } from "../../utils/fs"
+import { buildIncludedRootArgs } from "../glob/list-files"
+import {
+	createDiscoveryContext,
+	getIncludedRoot,
+	isDiscoveryPathAllowed,
+	isIncludedRootGitEligible,
+	isUnderRoot,
+	type IncludedRoot,
+} from "../glob/discovery-options"
 /*
 This file provides functionality to perform regex searches on files using ripgrep.
 Inspired by: https://github.com/DiscreteTom/vscode-ripgrep-utils
@@ -109,9 +118,14 @@ export async function getBinPath(vscodeAppRoot: string): Promise<string | undefi
 	)
 }
 
-async function execRipgrep(bin: string, args: string[]): Promise<string> {
+async function execRipgrep(
+	bin: string,
+	args: string[],
+	allowed: (file: string) => boolean,
+	cwd?: string,
+): Promise<string> {
 	return new Promise((resolve, reject) => {
-		const rgProcess = childProcess.spawn(bin, args)
+		const rgProcess = cwd ? childProcess.spawn(bin, args, { cwd }) : childProcess.spawn(bin, args)
 		// cross-platform alternative to head, which is ripgrep author's recommendation for limiting output.
 		const rl = readline.createInterface({
 			input: rgProcess.stdout,
@@ -120,9 +134,19 @@ async function execRipgrep(bin: string, args: string[]): Promise<string> {
 
 		let output = ""
 		let lineCount = 0
-		const maxLines = MAX_RESULTS * 5 // limiting ripgrep output with max lines since there's no other way to limit results. it's okay that we're outputting as json, since we're parsing it line by line and ignore anything that's not part of a match. This assumes each result is at most 5 lines.
+		const maxLines = MAX_RESULTS * 5
+		let fileAllowed = false
+		const timeout = setTimeout(() => rgProcess.kill(), 10_000)
 
 		rl.on("line", (line) => {
+			try {
+				const event = JSON.parse(line)
+				if (event.type === "begin") fileAllowed = allowed(event.data.path.text)
+			} catch {
+				return
+			}
+			// Blocked files must not consume the bounded output budget.
+			if (!fileAllowed) return
 			if (lineCount < maxLines) {
 				output += line + "\n"
 				lineCount++
@@ -136,7 +160,8 @@ async function execRipgrep(bin: string, args: string[]): Promise<string> {
 		rgProcess.stderr.on("data", (data) => {
 			errorOutput += data.toString()
 		})
-		rl.on("close", () => {
+		rgProcess.on("close", () => {
+			clearTimeout(timeout)
 			if (errorOutput) {
 				reject(new Error(`ripgrep process error: ${errorOutput}`))
 			} else {
@@ -144,6 +169,7 @@ async function execRipgrep(bin: string, args: string[]): Promise<string> {
 			}
 		})
 		rgProcess.on("error", (error) => {
+			clearTimeout(timeout)
 			reject(new Error(`ripgrep process error: ${error.message}`))
 		})
 	})
@@ -163,6 +189,13 @@ export async function regexSearchFiles(
 		throw new Error("Could not find ripgrep binary")
 	}
 
+	const workspaceRoot = path.resolve(cwd)
+	const absoluteTarget = path.resolve(directoryPath)
+	const context = await createDiscoveryContext(workspaceRoot, undefined, rooIgnoreController?.rooIgnoreContent)
+	const legacyOutsideRequest =
+		!isUnderRoot(absoluteTarget, workspaceRoot) && !getIncludedRoot(absoluteTarget, context)
+	if (!legacyOutsideRequest && !isDiscoveryPathAllowed(`${absoluteTarget}/`, context)) return formatResults([], cwd)
+
 	const args = ["--json", "-e", regex]
 
 	// Only add --glob if a specific file pattern is provided
@@ -171,16 +204,51 @@ export async function regexSearchFiles(
 		args.push("--glob", filePattern)
 	}
 
-	args.push("--context", "1", "--no-messages", directoryPath)
-
-	let output: string
-	try {
-		output = await execRipgrep(rgPath, args)
-	} catch (error) {
-		console.error("Error executing ripgrep:", error)
-		return "No results found"
+	args.push("--context", "1", "--no-messages")
+	const requestedRoot = getIncludedRoot(absoluteTarget, context)
+	const searches: { target: string; root?: IncludedRoot }[] = [{ target: absoluteTarget, root: requestedRoot }]
+	if (path.relative(workspaceRoot, absoluteTarget) === "") {
+		for (const root of context.includedRoots) {
+			if (root !== requestedRoot) searches.push({ target: root.root, root })
+		}
 	}
 
+	const merged = new Map<string, SearchFileResult>()
+	for (const search of searches) {
+		const resolveFile = (file: string) => path.resolve(search.root?.root ?? workspaceRoot, file)
+		const allowed = (file: string) => {
+			const absolutePath = resolveFile(file)
+			const root = search.root ?? getIncludedRoot(absolutePath, context)
+			if (legacyOutsideRequest) return rooIgnoreController?.validateAccess(absolutePath) ?? true
+			return (
+				isDiscoveryPathAllowed(absolutePath, context) &&
+				(!root || isIncludedRootGitEligible(absolutePath, root, context.options))
+			)
+		}
+		const traversalArgs = search.root
+			? buildIncludedRootArgs(path.relative(search.root.root, search.target) || ".", context.options)
+			: [
+					...(context.options.followSymlinks ? ["--follow"] : []),
+					...(!context.options.respectGitignore ? ["--no-ignore-vcs"] : []),
+					directoryPath,
+				]
+		try {
+			const output = await execRipgrep(rgPath, [...args, ...traversalArgs], allowed, search.root?.root)
+			for (const result of parseRipgrepOutput(output)) {
+				const absolutePath = resolveFile(result.file)
+				if (allowed(result.file) && !merged.has(absolutePath)) {
+					merged.set(absolutePath, { ...result, file: absolutePath })
+				}
+			}
+		} catch (error) {
+			console.error("Error executing ripgrep:", error)
+			if (searches.length === 1) return "No results found"
+		}
+	}
+	return formatResults([...merged.values()], cwd)
+}
+
+function parseRipgrepOutput(output: string): SearchFileResult[] {
 	const results: SearchFileResult[] = []
 	let currentFile: SearchFileResult | null = null
 
@@ -231,14 +299,8 @@ export async function regexSearchFiles(
 		}
 	})
 
-	// console.log(results)
-
-	// Filter results using RooIgnoreController if provided
-	const filteredResults = rooIgnoreController
-		? results.filter((result) => rooIgnoreController.validateAccess(result.file))
-		: results
-
-	return formatResults(filteredResults, cwd)
+	if (currentFile) results.push(currentFile)
+	return results
 }
 
 function formatResults(fileResults: SearchFileResult[], cwd: string): string {
@@ -253,12 +315,16 @@ function formatResults(fileResults: SearchFileResult[], cwd: string): string {
 	}
 
 	// Group results by file name
+	let remainingResults = MAX_RESULTS
 	fileResults.slice(0, MAX_RESULTS).forEach((file) => {
+		if (remainingResults === 0) return
 		const relativeFilePath = path.relative(cwd, file.file)
 		if (!groupedResults[relativeFilePath]) {
 			groupedResults[relativeFilePath] = []
 
-			groupedResults[relativeFilePath].push(...file.searchResults)
+			const selected = file.searchResults.slice(0, remainingResults)
+			groupedResults[relativeFilePath].push(...selected)
+			remainingResults -= selected.length
 		}
 	})
 

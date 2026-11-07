@@ -8,6 +8,7 @@ import { IVectorStore } from "../interfaces/vector-store"
 import { Payload, VectorStoreSearchResult } from "../interfaces"
 import { DEFAULT_MAX_SEARCH_RESULTS, DEFAULT_SEARCH_MIN_SCORE, QDRANT_CODE_BLOCK_NAMESPACE } from "../constants"
 import { t } from "../../../i18n"
+import { toIndexPath } from "../../glob/discovery-options"
 
 function normalizeVectorStoreError(error: unknown): VectorStoreError {
 	return new VectorStoreError(
@@ -494,7 +495,7 @@ export class QdrantVectorStore implements IVectorStore {
 	}
 
 	private relativeFilePath(filePath: string): string {
-		return path.normalize(path.isAbsolute(filePath) ? path.relative(this.workspacePath, filePath) : filePath)
+		return toIndexPath(path.resolve(this.workspacePath, filePath), this.workspacePath)
 	}
 
 	async deletePointsByFilePath(filePath: string, beforeGeneration: number): Promise<void> {

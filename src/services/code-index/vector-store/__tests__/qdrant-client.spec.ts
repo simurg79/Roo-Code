@@ -2,6 +2,7 @@ import "../../__tests__/mock-code-index-log"
 import { codeIndexLog } from "../../code-index-log"
 import { QdrantClient } from "@qdrant/js-client-rest"
 import { createHash } from "crypto"
+import * as path from "path"
 
 import { QdrantVectorStore } from "../qdrant-client"
 import { getWorkspacePath } from "../../../../utils/path"
@@ -24,10 +25,10 @@ vitest.mock("../../../../i18n", () => ({
 	},
 }))
 vitest.mock("path", async () => {
-	const actual = await vitest.importActual("path")
+	const actual = await vitest.importActual<typeof import("path")>("path")
 	return {
 		...actual,
-		sep: "/",
+		...actual.posix,
 		posix: actual.posix,
 	}
 })
@@ -86,6 +87,32 @@ describe("QdrantVectorStore", () => {
 	})
 
 	describe("generation fencing and exact counts", () => {
+		it("retains outside absolute keys for payloads, exact counts, search and deletion", async () => {
+			const outsidePath = path.resolve("/outside/sample.ts")
+			mockQdrantClientInstance.upsert.mockResolvedValue({})
+			mockQdrantClientInstance.count.mockResolvedValue({ count: 1 })
+			mockQdrantClientInstance.delete.mockResolvedValue({})
+			const point = {
+				id: "outside-point",
+				vector: [1],
+				payload: { filePath: outsidePath, codeChunk: "sample", startLine: 1, endLine: 1, generation: 7 },
+			}
+			await vectorStore.upsertPoints([point])
+			expect(mockQdrantClientInstance.upsert.mock.calls[0][1].points[0].payload.filePath).toBe(outsidePath)
+			await vectorStore.countPointsForFile(outsidePath, 7)
+			expect(mockQdrantClientInstance.count.mock.calls[0][1].filter.must[0]).toEqual({
+				key: "filePath",
+				match: { value: outsidePath },
+			})
+			mockQdrantClientInstance.query.mockResolvedValue({ points: [{ ...point, score: 1 }] })
+			expect((await vectorStore.search([1]))[0]?.payload?.filePath).toBe(outsidePath)
+			await vectorStore.deletePointsByFilePath(outsidePath, 8)
+			expect(mockQdrantClientInstance.delete.mock.calls[0][1].filter.must[0]).toEqual({
+				key: "filePath",
+				match: { any: [outsidePath] },
+			})
+		})
+
 		it("matches exact relative paths and only lower or legacy generations", async () => {
 			mockQdrantClientInstance.delete.mockResolvedValue({})
 			await vectorStore.deletePointsByMultipleFilePaths(["/test/workspace/file.ts", "other.ts"], 17)

@@ -1,9 +1,9 @@
 import { listFiles } from "../../glob/list-files"
 import { Ignore } from "ignore"
-import { RooIgnoreController } from "../../../core/ignore/RooIgnoreController"
+import { createDiscoveryContext, toIndexPath, type DiscoveryContext } from "../../glob/discovery-options"
+import { isIndexDiscoveryPathEligible } from "../discovery"
 import { stat } from "fs/promises"
 import * as path from "path"
-import { generateRelativeFilePath } from "../shared/get-relative-path"
 import { getWorkspacePathForContext } from "../../../utils/path"
 import { scannerExtensions } from "../shared/supported-extensions"
 import * as vscode from "vscode"
@@ -17,7 +17,6 @@ import {
 	PARSING_CONCURRENCY,
 	BATCH_PROCESSING_CONCURRENCY,
 } from "../constants"
-import { isPathInIgnoredDirectory } from "../../glob/ignore-utils"
 import { Package } from "../../../shared/package"
 import { IndexWriteGate } from "../index-write-gate"
 import { ParserFatalError, throwIfAborted } from "../parser-errors"
@@ -30,6 +29,8 @@ export class DirectoryScanner implements IDirectoryScanner {
 	private readonly batchSegmentThreshold: number
 	private incompleteFiles = new Set<string>()
 
+	private discoveryContext?: Promise<DiscoveryContext>
+
 	constructor(
 		private readonly embedder: IEmbedder,
 		private readonly qdrantClient: IVectorStore,
@@ -40,6 +41,7 @@ export class DirectoryScanner implements IDirectoryScanner {
 		private readonly writeGate = new IndexWriteGate(),
 		private readonly generations = new GenerationAllocator(cacheManager),
 		private readonly failures = new FileFailureRegistry(),
+		private readonly getDiscoveryContext?: () => Promise<DiscoveryContext>,
 	) {
 		if (batchSegmentThreshold !== undefined) {
 			this.batchSegmentThreshold = batchSegmentThreshold
@@ -84,21 +86,28 @@ export class DirectoryScanner implements IDirectoryScanner {
 			const incompleteFiles = new Set<string>()
 			this.incompleteFiles = incompleteFiles
 			const scanWorkspace = getWorkspacePathForContext(directory)
-			const [allPaths] = await listFiles(directory, true, MAX_LIST_FILES_LIMIT_CODE_INDEX)
+			this.discoveryContext ??= this.getDiscoveryContext?.() ?? createDiscoveryContext(scanWorkspace)
+			const discoveryContext = await this.discoveryContext
 			throwIfAborted(signal)
-			const ignoreController = new RooIgnoreController(directory)
-			await ignoreController.initialize()
+			const [allPaths, , blockedPaths] = await listFiles(
+				directory,
+				true,
+				MAX_LIST_FILES_LIMIT_CODE_INDEX,
+				discoveryContext,
+			)
 			throwIfAborted(signal)
-			const allowedPaths = ignoreController.filterPaths(allPaths.filter((filePath) => !filePath.endsWith("/")))
 			const selectedPaths = new Set(
-				allowedPaths.filter((filePath) => {
-					const relativePath = generateRelativeFilePath(filePath, scanWorkspace)
-					return (
-						!isPathInIgnoredDirectory(relativePath) &&
+				allPaths.filter(
+					(filePath) =>
+						!filePath.endsWith("/") &&
 						scannerExtensions.includes(path.extname(filePath).toLowerCase()) &&
-						!this.ignoreInstance.ignores(relativePath)
-					)
-				}),
+						isIndexDiscoveryPathEligible(
+							filePath,
+							discoveryContext,
+							this.ignoreInstance,
+							blockedPaths?.length === 0,
+						),
+				),
 			)
 			// Discovery precedes dispatch so stopping during a read or parse still reports partial work.
 			for (const filePath of selectedPaths) incompleteFiles.add(filePath)
@@ -134,7 +143,7 @@ export class DirectoryScanner implements IDirectoryScanner {
 				onError?.(new Error(`${message} (Workspace: ${scanWorkspace}, File: ${filePath})`))
 			}
 			const processFile = async (filePath: string) => {
-				const relativePath = generateRelativeFilePath(filePath, scanWorkspace)
+				const relativePath = toIndexPath(filePath, scanWorkspace)
 				let revision = this.failures.getRevision(relativePath) ?? UNKNOWN_REVISION
 				this.failures.renew(relativePath, revision)
 				let activity: FileFailureActivity = "read"

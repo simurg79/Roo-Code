@@ -207,13 +207,14 @@ describe("GenerationAllocator", () => {
 			openFiles: { "file.ts": true },
 			generationWatermark: 1024,
 		})
-		gate.recover(Object.keys(cache.getOpenFiles()), cache.loadedAt)
+		const [openPath] = Object.keys(cache.getOpenFiles())
+		gate.recover([openPath], cache.loadedAt)
 		const recover = vi.spyOn(gate, "recover")
 		await vi.advanceTimersByTimeAsync(10_000)
 		await new GenerationAllocator(cache).initialize(store, attempt.signal, gate)
 		expect(recover).not.toHaveBeenCalled()
 		const done = vi.fn()
-		const waiting = gate.waitForGrace("file.ts", attempt.signal).then(done)
+		const waiting = gate.waitForGrace(openPath, attempt.signal).then(done)
 		await vi.advanceTimersByTimeAsync(LATE_WRITE_GRACE_MS - 10_001)
 		expect(done).not.toHaveBeenCalled()
 		await vi.advanceTimersByTimeAsync(1)

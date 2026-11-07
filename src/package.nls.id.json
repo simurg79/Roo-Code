@@ -46,5 +46,7 @@
 	"settings.debugProxy.tlsInsecure.description": "Terima sertifikat self-signed dari proxy. **Diperlukan untuk inspeksi MITM.** ⚠️ Tidak aman — gunakan hanya untuk debugging lokal.",
 	"settings.workspace.rootResolution.description": "Bagaimana Roo menyelesaikan root workspace di workspace multi-root. Root digunakan untuk menemukan `.roomodes`, `.roo/mcp.json`, `.roo/rules/`, dan konfigurasi lain yang berlingkup proyek. Mengubah pengaturan ini hanya memengaruhi pencarian berikutnya; tugas yang sedang berjalan tetap menggunakan root aslinya.",
 	"settings.workspace.rootResolution.activeEditor.description": "Gunakan folder workspace yang berisi editor aktif; kembali ke folder workspace pertama. (Default — mempertahankan perilaku lama.)",
-	"settings.workspace.rootResolution.firstFolder.description": "Selalu gunakan folder workspace pertama (workspaceFolders[0]). Deterministik — tidak bergantung pada file yang sedang difokuskan."
+	"settings.workspace.rootResolution.firstFolder.description": "Selalu gunakan folder workspace pertama (workspaceFolders[0]). Deterministik — tidak bergantung pada file yang sedang difokuskan.",
+	"settings.discovery.respectGitignore.description": "Patuhi `.gitignore` dalam pencarian teks, daftar file, dan pengindeksan (default: aktif). Nonaktifkan untuk menyertakan jalur yang diabaikan Git; `.rooignore` tetap mengontrol akses. Perubahan pengindeksan memerlukan **Developer: Reload Window**.",
+	"settings.discovery.followSymlinks.description": "Ikuti tautan simbolis dalam pencarian teks, daftar file, dan pengindeksan (default: nonaktif). Saat nonaktif, perilaku tautan yang sudah ada dalam daftar file tidak berubah. `.rooignore` tetap mengontrol akses. Perubahan pengindeksan memerlukan **Developer: Reload Window**."
 }

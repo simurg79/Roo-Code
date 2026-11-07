@@ -1,3 +1,4 @@
+import * as path from "path"
 import "./mock-code-index-log"
 import { codeIndexLog } from "../code-index-log"
 import * as vscode from "vscode"
@@ -79,12 +80,17 @@ describe("CacheManager", () => {
 		expect(cache.loadSucceeded).toBe(true)
 		expect(cache.generationWatermark).toBe(2048)
 		expect(cache.getHash("open.ts")).toBeUndefined()
-		expect(cache.getTrackedPaths().sort()).toEqual(["complete.ts", "deleted.ts", "open.ts"])
+		expect(cache.getTrackedPaths().sort()).toEqual(
+			["complete.ts", "deleted.ts", "open.ts"].map((filePath) => path.resolve("/workspace", filePath)),
+		)
 		const openFiles = cache.getOpenFiles()
 		delete openFiles["deleted.ts"]
 		const hashes = cache.getAllHashes()
 		hashes["complete.ts"] = "changed"
-		expect(cache.getOpenFiles()).toEqual({ "open.ts": true, "deleted.ts": true })
+		expect(cache.getOpenFiles()).toEqual({
+			[path.resolve("/workspace", "open.ts")]: true,
+			[path.resolve("/workspace", "deleted.ts")]: true,
+		})
 		expect(cache.getHash("complete.ts")).toBe("hash")
 	})
 
@@ -122,7 +128,7 @@ describe("CacheManager", () => {
 		const reloaded = freshCache()
 		await reloaded.initialize()
 		expect(reloaded.getHash("file.ts")).toBeUndefined()
-		expect(reloaded.getOpenFiles()).toEqual({ "file.ts": true })
+		expect(reloaded.getOpenFiles()).toEqual({ [path.resolve("/workspace", "file.ts")]: true })
 	})
 
 	it("serializes an already-issued older snapshot before durable invalidation", async () => {
@@ -149,7 +155,7 @@ describe("CacheManager", () => {
 		vi.mocked(safeWriteJson).mockRejectedValueOnce(new Error("Disk full"))
 		await expect(cache.invalidateFile("file.ts")).rejects.toThrow("Disk full")
 		expect(cache.getHash("file.ts")).toBeUndefined()
-		expect(cache.getOpenFiles()).toEqual({ "file.ts": true })
+		expect(cache.getOpenFiles()).toEqual({ [path.resolve("/workspace", "file.ts")]: true })
 		await cache.flush()
 		expect(persisted).toMatchObject({ fileHashes: {}, openFiles: { "file.ts": true } })
 	})
@@ -180,7 +186,7 @@ describe("CacheManager", () => {
 		expect(cache.isTracked("file.ts")).toBe(true)
 		expect(cache.getHash("file.ts")).toBeUndefined()
 		expect(enumerate).not.toHaveBeenCalled()
-		expect(cache.getTrackedPaths()).toEqual(["file.ts"])
+		expect(cache.getTrackedPaths()).toEqual([path.resolve("/workspace", "file.ts")])
 		cache.completeRemoval("file.ts")
 		await cache.flush()
 		expect(cache.isTracked("file.ts")).toBe(false)
@@ -203,6 +209,26 @@ describe("CacheManager", () => {
 	it("propagates hash-clear errors instead of claiming durable success", async () => {
 		vi.mocked(safeWriteJson).mockRejectedValueOnce(new Error("Write denied"))
 		await expect(cache.clearCacheFile()).rejects.toThrow("Write denied")
+	})
+
+	it("loads a pre-change cache file so relative and absolute workspace lookups hit the same entry", async () => {
+		persisted = {
+			version: 2,
+			fileHashes: { "src/kept.ts": "kept-hash", [path.resolve("/workspace", "abs.ts")]: "abs-hash" },
+			openFiles: { "src/open.ts": true },
+		}
+		await cache.initialize()
+		expect(cache.loadSucceeded).toBe(true)
+		expect(cache.getHash("src/kept.ts")).toBe("kept-hash")
+		expect(cache.getHash(path.resolve("/workspace", "src/kept.ts"))).toBe("kept-hash")
+		expect(cache.getHash("abs.ts")).toBe("abs-hash")
+		expect(cache.isTracked(path.resolve("/workspace", "src/open.ts"))).toBe(true)
+		expect(cache.getTrackedPaths().sort()).toEqual(
+			["src/kept.ts", "abs.ts", "src/open.ts"].map((file) => path.resolve("/workspace", file)).sort(),
+		)
+		cache.completeRemoval(path.resolve("/workspace", "src/kept.ts"))
+		await cache.flush()
+		expect(cache.isTracked("src/kept.ts")).toBe(false)
 	})
 
 	it("logs debounced-save errors without an unhandled rejection", async () => {

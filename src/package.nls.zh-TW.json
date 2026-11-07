@@ -46,5 +46,7 @@
 	"settings.debugProxy.tlsInsecure.description": "接受來自代理的 self-signed 憑證。**MITM 檢查所必需。** ⚠️ 不安全——只在本機偵錯時使用。",
 	"settings.workspace.rootResolution.description": "Roo 在多根工作區中如何解析工作區根目錄。根目錄用於定位 `.roomodes`、`.roo/mcp.json`、`.roo/rules/` 以及其他專案範圍的設定。變更此設定僅影響後續的查找；正在執行的工作會保留其原始根目錄。",
 	"settings.workspace.rootResolution.activeEditor.description": "使用包含使用中編輯器的工作區資料夾；否則回退到第一個工作區資料夾。（預設 — 保留既有行為。）",
-	"settings.workspace.rootResolution.firstFolder.description": "一律使用第一個工作區資料夾（workspaceFolders[0]）。具決定性 — 與目前聚焦的檔案無關。"
+	"settings.workspace.rootResolution.firstFolder.description": "一律使用第一個工作區資料夾（workspaceFolders[0]）。具決定性 — 與目前聚焦的檔案無關。",
+	"settings.discovery.respectGitignore.description": "在文字搜尋、檔案清單和索引中遵循 `.gitignore`（預設：啟用）。停用後會納入被 Git 忽略的路徑；`.rooignore` 仍會控制存取權限。索引相關變更需要執行 **Developer: Reload Window**。",
+	"settings.discovery.followSymlinks.description": "在文字搜尋、檔案清單和索引中跟隨符號連結（預設：停用）。停用時，檔案清單現有的連結處理行為維持不變。`.rooignore` 仍會控制存取權限。索引相關變更需要執行 **Developer: Reload Window**。"
 }
