@@ -5,11 +5,19 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { ExtensionStateContextProvider } from "@src/context/ExtensionStateContext"
 import { ChatRowContent } from "../ChatRow"
 
+// Share the renderer's React instance across Vite and native dependencies.
+vi.mock("react", async () => {
+	const { createRequire } = await import("node:module")
+	return createRequire(import.meta.url)("react")
+})
+
 // Mock i18n
 vi.mock("react-i18next", () => ({
 	useTranslation: () => ({
 		t: (key: string) => {
 			const map: Record<string, string> = {
+				"chat:instructionRefresh.warningHeader": "Some instructions could not be reloaded",
+				"chat:instructionRefresh.description": "Continuing with available instructions.",
 				"chat:apiRequest.rateLimitWait": "Rate limiting",
 				"chat:apiRequest.failed": "API Request Failed",
 				"chat:apiRequest.errorTitle": "Provider Error",
@@ -49,6 +57,19 @@ function renderChatRow(message: any) {
 }
 
 describe("ChatRow - rate limit wait", () => {
+	it("renders instruction refresh failures without condensation errors or confirmation", () => {
+		renderChatRow({
+			type: "say",
+			say: "instruction_refresh_warning",
+			ts: Date.now(),
+			text: "/workspace/.roorules (EACCES)\n/workspace/AGENTS.md (UNKNOWN)",
+		})
+		expect(screen.getByText("Some instructions could not be reloaded")).toBeInTheDocument()
+		expect(screen.getByText(/\.roorules \(EACCES\)/)).toHaveTextContent("AGENTS.md (UNKNOWN)")
+		expect(screen.queryByText(/Failed to condense/)).toBeNull()
+		expect(screen.queryByRole("button")).toBeNull()
+	})
+
 	it("renders a non-error progress row for api_req_rate_limit_wait", () => {
 		const message: any = {
 			type: "say",

@@ -90,6 +90,7 @@ import { getTaskDirectoryPath } from "../../utils/storage"
 // prompts
 import { formatResponse } from "../prompts/responses"
 import { SYSTEM_PROMPT } from "../prompts/system"
+import type { InstructionFailureCollector } from "../prompts/sections/custom-instructions"
 import { buildNativeToolsArrayWithRestrictions } from "./build-tools"
 
 // core modules
@@ -272,6 +273,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	private lifecycleAbortController = new AbortController()
 	currentRequestAbortController?: AbortController
 	skipPrevResponseIdOnce: boolean = false
+	private pendingInstructionRefresh = false
 
 	// TaskStatus
 	idleAsk?: ClineMessage
@@ -1735,6 +1737,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				{ isNonInteractive: true } /* options */,
 			)
 			return
+		}
+		if (summary) {
+			this.pendingInstructionRefresh = true
 		}
 		await this.overwriteApiConversationHistory(messages)
 
@@ -3724,7 +3729,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		return false
 	}
 
-	private async getSystemPrompt(): Promise<string> {
+	private async getSystemPrompt(failures?: InstructionFailureCollector): Promise<string> {
 		const { mcpEnabled } = (await this.providerRef.deref()?.getState()) ?? {}
 		let mcpHub: McpHub | undefined
 		if (mcpEnabled ?? true) {
@@ -3797,6 +3802,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				undefined, // todoList
 				this.api.getModel().id,
 				provider.getSkillsManager(),
+				failures,
 			)
 		})()
 	}
@@ -3894,6 +3900,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				useAvailableInputForContextPercent,
 			})
 
+			if (truncateResult.summary) {
+				this.pendingInstructionRefresh = true
+			}
 			if (truncateResult.messages !== this.apiConversationHistory) {
 				await this.overwriteApiConversationHistory(truncateResult.messages)
 			}
@@ -4006,7 +4015,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// in the caller.
 		Task.lastGlobalApiRequestTime = performance.now()
 
-		const systemPrompt = await this.getSystemPrompt()
+		let instructionFailures: InstructionFailureCollector = []
+		let systemPrompt = await this.getSystemPrompt(this.pendingInstructionRefresh ? instructionFailures : undefined)
 		const { contextTokens } = this.getTokenUsage()
 
 		if (contextTokens) {
@@ -4129,6 +4139,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					rooIgnoreController: this.rooIgnoreController,
 					useAvailableInputForContextPercent,
 				})
+				if (truncateResult.summary) {
+					this.pendingInstructionRefresh = true
+				}
 				if (truncateResult.messages !== this.apiConversationHistory) {
 					await this.overwriteApiConversationHistory(truncateResult.messages)
 				}
@@ -4136,6 +4149,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					await this.say("condense_context_error", truncateResult.error)
 				}
 				if (truncateResult.summary) {
+					instructionFailures = []
+					systemPrompt = await this.getSystemPrompt(instructionFailures)
 					const { summary, cost, prevContextTokens, newContextTokens = 0, condenseId } = truncateResult
 					const contextCondense: ContextCondense = {
 						summary,
@@ -4285,6 +4300,21 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		const abortSignal = this.currentRequestAbortController.signal
 		// Reset the flag after using it
 		this.skipPrevResponseIdOnce = false
+
+		if (this.pendingInstructionRefresh) {
+			if (instructionFailures.length > 0) {
+				await this.say(
+					"instruction_refresh_warning",
+					instructionFailures.map(({ sourcePath, code }) => `${sourcePath} (${code})`).join("\n"),
+					undefined,
+					false,
+					undefined,
+					undefined,
+					{ isNonInteractive: true },
+				)
+			}
+			this.pendingInstructionRefresh = false
+		}
 
 		// The provider accepts reasoning items alongside standard messages; cast to the expected parameter type.
 		const stream = this.api.createMessage(
