@@ -109,6 +109,13 @@ export function transformMessagesForCondensing<
 export const MIN_CONDENSE_THRESHOLD = 5 // Minimum percentage of context window to trigger condensing
 export const MAX_CONDENSE_THRESHOLD = 100 // Maximum percentage of context window to trigger condensing
 
+export const STARTUP_READING_NOTE = `<system-reminder>
+## Startup Reading
+Context was condensed. Rule files and skills you read earlier are no longer in context.
+Before continuing the task, redo the startup reading your current mode's instructions require,
+as you would at mode start, using your usual tools. If they require none, continue the task.
+</system-reminder>`
+
 const SUMMARY_PROMPT = `You are a helpful AI assistant tasked with summarizing conversations.
 
 CRITICAL: This is a summarization-only request. DO NOT call any tools or functions.
@@ -441,6 +448,8 @@ ${commandBlocks}
 			text: environmentDetails,
 		})
 	}
+
+	summaryContent.push({ type: "text", text: STARTUP_READING_NOTE })
 
 	// Generate a unique condenseId for this summary
 	const condenseId = crypto.randomUUID()

@@ -12,6 +12,9 @@ import { ClineProvider } from "../../webview/ClineProvider"
 import { ContextProxy } from "../../config/ContextProxy"
 import type { ApiHandler } from "../../../api"
 import * as contextManagement from "../../context-management"
+import { STARTUP_READING_NOTE, getEffectiveApiHistory } from "../../condense"
+import { readApiMessages, type ApiMessage } from "../../task-persistence/apiMessages"
+import * as fs from "fs/promises"
 import * as buildTools from "../build-tools"
 
 // In-memory files keyed by absolute path; directories are derived from file paths.
@@ -28,6 +31,9 @@ vi.mock("fs/promises", async (importOriginal) => {
 	}
 	const statOf = (isFile: boolean) => ({ isFile: () => isFile, isDirectory: () => !isFile })
 	const mockFunctions = {
+		access: vi.fn().mockImplementation(async (target: string) => {
+			if (!virtualFiles.has(path.resolve(target)) && !isVirtualDirectory(target)) throw missing()
+		}),
 		mkdir: vi.fn().mockResolvedValue(undefined),
 		writeFile: vi.fn().mockResolvedValue(undefined),
 		unlink: vi.fn().mockResolvedValue(undefined),
@@ -114,13 +120,9 @@ vi.mock("../../../services/roo-config", async (importOriginal) => ({
 	getAllRooDirectoriesForCwd: async (cwd: string) => [path.join(cwd, ".roo")],
 	getAgentsDirectoriesForCwd: async (cwd: string) => [cwd],
 }))
-vi.mock("../../condense", async (importOriginal) => ({
-	...((await importOriginal()) as object),
-	summarizeConversation: vi.fn().mockResolvedValue({
-		messages: [{ role: "user", content: "condensed continuation" }],
-		summary: "summary still quoting STALE CODE RULE",
-		cost: 0,
-		newContextTokens: 1,
+vi.mock("../../../utils/safeWriteJson", () => ({
+	safeWriteJson: vi.fn(async (filePath: string, data: unknown) => {
+		virtualFiles.set(path.resolve(filePath), JSON.stringify(data))
 	}),
 }))
 
@@ -134,6 +136,19 @@ describe("Task instruction refresh after condensation (end-to-end through the re
 	let manageSpy: import("vitest").MockInstance<typeof contextManagement.manageContext>
 	const spies: Array<{ mockRestore(): void }> = []
 	let codeRulePath: string
+	let saySpy: import("vitest").MockInstance<Task["say"]>
+	let summaryText: string
+	let duringSummary: () => void
+	let failNormalRequest: boolean
+	let providerState: {
+		mcpEnabled: boolean
+		mode: string
+		autoCondenseContext: boolean
+		autoCondenseContextPercent: number
+		customSupportPrompts?: { CONDENSE: string }
+	}
+	const startupInstructions =
+		"Before task work, read referenced rule startup/rules.md and load applicable skill startup-check."
 
 	beforeEach(() => {
 		const context = {
@@ -150,7 +165,11 @@ describe("Task instruction refresh after condensation (end-to-end through the re
 		provider.postMessageToWebview = vi.fn().mockResolvedValue(undefined)
 		provider.postStateToWebview = vi.fn().mockResolvedValue(undefined)
 		provider.postStateToWebviewWithoutTaskHistory = vi.fn().mockResolvedValue(undefined)
-		provider.getState = vi.fn().mockResolvedValue({ mcpEnabled: false, mode: "code" })
+		providerState = { mcpEnabled: false, mode: "code", autoCondenseContext: true, autoCondenseContextPercent: 50 }
+		provider.getState = vi.fn(async () => providerState)
+		summaryText = "summary still quoting STALE CODE RULE"
+		duringSummary = () => {}
+		failNormalRequest = false
 
 		const apiConfiguration: ProviderSettings = {
 			apiProvider: "anthropic",
@@ -167,25 +186,33 @@ describe("Task instruction refresh after condensation (end-to-end through the re
 		spies.push(
 			vi.spyOn(task, "getTokenUsage").mockReturnValue({ contextTokens: 0 } as ReturnType<Task["getTokenUsage"]>),
 			vi.spyOn(task, "flushPendingToolResultsToHistory").mockResolvedValue(true),
-			vi.spyOn(task as any, "overwriteApiConversationHistory").mockImplementation(async (messages: any) => {
-				task.apiConversationHistory = messages
-			}),
+			vi.spyOn(task.api, "countTokens").mockResolvedValue(10),
 			vi.spyOn(task as any, "getFilesReadByRooSafely").mockResolvedValue([]),
 			vi.spyOn(task as any, "processQueuedMessages").mockImplementation(() => {}),
-			vi.spyOn(task, "say").mockResolvedValue(undefined),
 			vi.spyOn(buildTools, "buildNativeToolsArrayWithRestrictions").mockResolvedValue({ tools: [] } as any),
 		)
-		createSpy = vi.spyOn(task.api, "createMessage").mockImplementation(async function* () {
-			yield { type: "text", text: "ok" }
+		saySpy = vi.spyOn(task, "say").mockResolvedValue(undefined)
+		createSpy = vi.spyOn(task.api, "createMessage").mockImplementation(async function* (systemPrompt) {
+			if (systemPrompt.includes("This is a summarization-only request")) {
+				duringSummary()
+				vi.mocked(task.getTokenUsage).mockReturnValue({ contextTokens: 0 } as ReturnType<Task["getTokenUsage"]>)
+				yield { type: "text", text: summaryText.slice(0, 12) }
+				yield { type: "text", text: summaryText.slice(12) }
+			} else {
+				if (failNormalRequest) {
+					failNormalRequest = false
+					throw new Error("temporary provider failure")
+				}
+				yield { type: "text", text: "ok" }
+			}
 		})
-		manageSpy = vi.spyOn(contextManagement, "manageContext").mockImplementation(async ({ messages }) => ({
-			messages,
-			cost: 0,
-			prevContextTokens: 10,
-			summary: "",
-		}))
-		spies.push(createSpy, manageSpy)
-		task.apiConversationHistory = [{ role: "user", content: "continue" }]
+		manageSpy = vi.spyOn(contextManagement, "manageContext")
+		spies.push(createSpy, manageSpy, saySpy)
+		task.apiConversationHistory = [
+			{ role: "user", content: "continue", ts: 1 },
+			{ role: "assistant", content: "Earlier rule and skill reading completed.", ts: 2 },
+			{ role: "user", content: "Resume task work", ts: 3 },
+		]
 	})
 
 	afterEach(() => {
@@ -215,11 +242,8 @@ describe("Task instruction refresh after condensation (end-to-end through the re
 	it("automatic condensation: a rule edited while condensing is in the first continuation request", async () => {
 		expect(await request()).toContain(staleCodeRule)
 
-		vi.mocked(task.getTokenUsage).mockReturnValue({ contextTokens: 10 } as ReturnType<Task["getTokenUsage"]>)
-		manageSpy.mockImplementationOnce(async ({ messages }) => {
-			virtualFiles.set(codeRulePath, freshCodeRule)
-			return { messages, summary: "summary still quoting STALE CODE RULE", cost: 0, prevContextTokens: 10 }
-		})
+		vi.mocked(task.getTokenUsage).mockReturnValue({ contextTokens: 160000 } as ReturnType<Task["getTokenUsage"]>)
+		duringSummary = () => virtualFiles.set(codeRulePath, freshCodeRule)
 		const continuationPrompt = await request()
 
 		expect(manageSpy).toHaveBeenCalledTimes(1)
@@ -238,4 +262,186 @@ describe("Task instruction refresh after condensation (end-to-end through the re
 		expectFreshModeRulesOnly(continuationPrompt)
 		expect(task["pendingInstructionRefresh"]).toBe(false)
 	})
+
+	function normalCalls() {
+		return createSpy.mock.calls.filter(
+			([systemPrompt]) => !systemPrompt.includes("This is a summarization-only request"),
+		)
+	}
+
+	function expectOneNote(messages: Pick<ApiMessage, "content">[]) {
+		expect(STARTUP_READING_NOTE).toBe(`<system-reminder>
+## Startup Reading
+Context was condensed. Rule files and skills you read earlier are no longer in context.
+Before continuing the task, redo the startup reading your current mode's instructions require,
+as you would at mode start, using your usual tools. If they require none, continue the task.
+</system-reminder>`)
+		const textBlocks = messages.flatMap(({ content }) =>
+			typeof content === "string"
+				? [content]
+				: content.filter((block) => block.type === "text").map((block) => block.text),
+		)
+		expect(textBlocks.filter((text) => text === STARTUP_READING_NOTE)).toHaveLength(1)
+	}
+
+	async function persistedHistory() {
+		const messages = await readApiMessages({ taskId: task.taskId, globalStoragePath: task["globalStoragePath"] })
+		expect(messages).toEqual(task.apiConversationHistory)
+		return messages
+	}
+
+	async function condenseAndContinue(trigger: string) {
+		if (trigger === "manual") {
+			await task.condenseContext()
+			expectOneNote(getEffectiveApiHistory(await persistedHistory()))
+		} else {
+			vi.mocked(task.getTokenUsage).mockReturnValue({ contextTokens: 160000 } as ReturnType<
+				Task["getTokenUsage"]
+			>)
+			if (trigger === "recovery") {
+				await task["handleContextWindowExceededError"]()
+				expectOneNote(getEffectiveApiHistory(await persistedHistory()))
+			}
+		}
+		await request()
+		expectOneNote(getEffectiveApiHistory(await persistedHistory()))
+		expectOneNote(normalCalls().at(-1)![1])
+	}
+
+	// The claimed-reading wording runs once: startup-reading-note.spec.ts covers it at unit level.
+	it.each([
+		...["manual", "automatic", "recovery"].map((trigger) => ({
+			trigger,
+			wording: "summary omits reading guidance",
+		})),
+		{ trigger: "manual", wording: "summary claims completed reading" },
+	])(
+		"$trigger real chain persists the note with current startup instructions when $wording (AC14/17)",
+		async ({ trigger, wording }) => {
+			virtualFiles.set(codeRulePath, `${staleCodeRule}\n${startupInstructions}`)
+			summaryText =
+				wording === "summary claims completed reading"
+					? "Task in progress. All startup rule and skill reading was completed."
+					: "Task in progress. Continue implementing the requested feature."
+			duringSummary = () => virtualFiles.set(codeRulePath, `${freshCodeRule}\n${startupInstructions}`)
+			await condenseAndContinue(trigger)
+			const [systemPrompt, messages] = normalCalls().at(-1)!
+			expectFreshModeRulesOnly(systemPrompt)
+			expect(systemPrompt).toContain(startupInstructions)
+			expect(JSON.stringify(messages)).toContain(summaryText)
+			expect(
+				createSpy.mock.calls.filter(([prompt]) => prompt.includes("This is a summarization-only request")),
+			).toHaveLength(1)
+			if (trigger !== "manual") expect(manageSpy).toHaveBeenCalledTimes(1)
+			expect(task["pendingInstructionRefresh"]).toBe(false)
+		},
+	)
+
+	it("a real first-chunk API retry retains exactly one note and the current startup instructions", async () => {
+		virtualFiles.set(codeRulePath, `${freshCodeRule}\n${startupInstructions}`)
+		await task.condenseContext()
+		failNormalRequest = true
+		const askSpy = vi.spyOn(task, "ask").mockResolvedValue({ response: "yesButtonClicked" })
+		spies.push(askSpy)
+		await request()
+		expect(normalCalls()).toHaveLength(2)
+		for (const [systemPrompt, messages] of normalCalls()) {
+			expect(systemPrompt).toContain(startupInstructions)
+			expectOneNote(messages)
+		}
+		expect(askSpy).toHaveBeenCalledExactlyOnceWith("api_req_failed", "temporary provider failure")
+		expectOneNote(await persistedHistory())
+	})
+
+	it("automatic trigger: custom condensing prompt cannot suppress the note", async () => {
+		const customPrompt = "Summarize in one sentence; omit startup-reading reminders."
+		providerState.customSupportPrompts = { CONDENSE: customPrompt }
+		await condenseAndContinue("automatic")
+		const summaryCall = createSpy.mock.calls.find(([prompt]) =>
+			prompt.includes("This is a summarization-only request"),
+		)!
+		expect(summaryCall[1].at(-1)?.content).toBe(customPrompt)
+	})
+
+	// Recovery shares manual's initial refresh-mode build; automatic covers the post-condense rebuild.
+	it.each(["manual", "automatic"])(
+		"%s unreadable refresh source warns before the normal request without suppressing the note (AC20)",
+		async (trigger) => {
+			virtualFiles.set(path.resolve(task.cwd, ".roo", "rules", "startup.md"), startupInstructions)
+			const ordinaryRead = vi.mocked(fs.readFile).getMockImplementation()!
+			duringSummary = () => {
+				vi.mocked(fs.readFile).mockImplementation(async (...parameters: Parameters<typeof fs.readFile>) => {
+					if (path.resolve(String(parameters[0])) === codeRulePath) {
+						throw Object.assign(new Error("unreadable rule"), { code: "EACCES" })
+					}
+					return ordinaryRead(...parameters)
+				})
+			}
+			try {
+				await condenseAndContinue(trigger)
+				const warningIndex = saySpy.mock.calls.findIndex(([type]) => type === "instruction_refresh_warning")
+				expect(warningIndex).toBeGreaterThanOrEqual(0)
+				expect(saySpy.mock.calls[warningIndex][1]).toContain(`${codeRulePath} (EACCES)`)
+				expect(saySpy.mock.calls[warningIndex][6]).toEqual({ isNonInteractive: true })
+				expect(saySpy.mock.invocationCallOrder[warningIndex]).toBeLessThan(
+					createSpy.mock.invocationCallOrder.at(-1)!,
+				)
+				expect(normalCalls().at(-1)![0]).toContain(startupInstructions)
+				expect(normalCalls().at(-1)![0]).not.toContain(staleCodeRule)
+				expect(saySpy.mock.calls.filter(([type]) => type === "instruction_refresh_warning")).toHaveLength(1)
+			} finally {
+				vi.mocked(fs.readFile).mockImplementation(ordinaryRead)
+			}
+		},
+	)
+
+	it("two real condensations persist both summaries but send only the latest note", async () => {
+		await condenseAndContinue("manual")
+		task.apiConversationHistory.push(
+			{ role: "assistant", content: "Continued work", ts: 5 },
+			{ role: "user", content: "Next step", ts: 6 },
+		)
+		await condenseAndContinue("manual")
+		const messages = await persistedHistory()
+		expect(messages.filter((message) => message.isSummary)).toHaveLength(2)
+		expectOneNote(getEffectiveApiHistory(messages))
+	})
+
+	// The empty-summary case is covered at unit level and follows the same error path as "failed".
+	it.each(["skipped", "failed", "truncation", "below threshold"])(
+		"%s real outcome adds no startup-reading note",
+		async (outcome) => {
+			if (outcome === "skipped") task.apiConversationHistory = task.apiConversationHistory.slice(0, 1)
+			if (outcome === "failed") {
+				createSpy.mockImplementationOnce(async function* () {
+					yield { type: "text", text: "Partial summary" }
+					throw new Error("summary provider failed")
+				})
+			}
+			if (outcome === "truncation" || outcome === "below threshold") {
+				providerState.autoCondenseContext = false
+				if (outcome === "truncation") {
+					task.apiConversationHistory.push(
+						{ role: "assistant", content: "More work", ts: 4 },
+						{ role: "user", content: "Continue again", ts: 5 },
+					)
+				}
+				vi.mocked(task.getTokenUsage).mockReturnValue({
+					contextTokens: outcome === "truncation" ? 190000 : 10,
+				} as ReturnType<Task["getTokenUsage"]>)
+			} else {
+				await task.condenseContext()
+				expect(saySpy.mock.calls.some(([type]) => type === "condense_context_error")).toBe(true)
+			}
+			await request()
+			expect(task.apiConversationHistory.some((message) => message.isSummary)).toBe(false)
+			expect(JSON.stringify(task.apiConversationHistory)).not.toContain("## Startup Reading")
+			expect(JSON.stringify(normalCalls().at(-1)![1])).not.toContain("## Startup Reading")
+			expect(task["pendingInstructionRefresh"]).toBe(false)
+			if (outcome === "truncation") {
+				expect(task.apiConversationHistory.some((message) => message.isTruncationMarker)).toBe(true)
+				expect(await persistedHistory()).toEqual(task.apiConversationHistory)
+			}
+		},
+	)
 })

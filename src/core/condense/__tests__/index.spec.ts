@@ -18,6 +18,7 @@ import {
 	toolResultToText,
 	convertToolBlocksToText,
 	transformMessagesForCondensing,
+	STARTUP_READING_NOTE,
 } from "../index"
 
 vi.mock("../../../api/transform/image-cleaning", () => ({
@@ -757,7 +758,8 @@ describe("summarizeConversation", () => {
 		expect(summaryMessage!.role).toBe("user")
 		expect(Array.isArray(summaryMessage!.content)).toBe(true)
 		const content = summaryMessage!.content as any[]
-		expect(content).toHaveLength(1)
+		expect(content).toHaveLength(2)
+		expect(content[1]).toEqual({ type: "text", text: STARTUP_READING_NOTE })
 		expect(content[0].type).toBe("text")
 		expect(content[0].text).toContain("## Conversation Summary")
 		expect(content[0].text).toContain("This is a summary")
@@ -800,8 +802,8 @@ describe("summarizeConversation", () => {
 		expect(summaryMessage).toBeDefined()
 
 		const content = summaryMessage!.content as any[]
-		// Summary content is now split into separate text blocks
-		expect(content).toHaveLength(2)
+		expect(content).toHaveLength(3)
+		expect(content[2]).toEqual({ type: "text", text: STARTUP_READING_NOTE })
 		expect(content[0].text).toContain("## Conversation Summary")
 		expect(content[1].text).toContain("<system-reminder>")
 		expect(content[1].text).toContain("Active Workflows")
