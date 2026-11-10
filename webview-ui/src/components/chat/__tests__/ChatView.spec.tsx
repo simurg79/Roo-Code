@@ -243,6 +243,9 @@ vi.mock("../ChatTextArea", () => {
 					}}
 					data-sending-disabled={props.sendingDisabled}
 				/>
+				<button data-testid="send-message" disabled={props.sendingDisabled} onClick={props.onSend}>
+					Send
+				</button>
 			</div>
 		)
 	})
@@ -333,7 +336,12 @@ const renderChatView = (props: Partial<ChatViewProps> = {}) => {
 
 describe("ChatView - manual condensation", () => {
 	const taskMessage: ClineMessage = { type: "say", say: "task", ts: 100, text: "Initial task" }
-	const hydrateTask = async (lastMessage?: ClineMessage, taskId = "selected-task", taskTs = 100) => {
+	const hydrateTask = async (
+		lastMessage?: ClineMessage,
+		taskId: string | null = "selected-task",
+		taskTs = 100,
+		taskDetails = {},
+	) => {
 		await act(async () => {
 			window.dispatchEvent(
 				new MessageEvent("message", {
@@ -341,7 +349,7 @@ describe("ChatView - manual condensation", () => {
 						type: "state",
 						state: {
 							version: "1.0.0",
-							currentTaskItem: { id: taskId },
+							currentTaskItem: taskId ? { id: taskId, ...taskDetails } : undefined,
 							clineMessages: [{ ...taskMessage, ts: taskTs }, ...(lastMessage ? [lastMessage] : [])],
 						},
 					},
@@ -418,18 +426,108 @@ describe("ChatView - manual condensation", () => {
 		expect(input).toHaveAttribute("data-sending-disabled", "false")
 	})
 
-	it("resets manual waiting on task change and ignores the old task response", async () => {
+	it.each(["success", "failure"])("keeps waiting through same-task detail updates until %s", async (outcome) => {
+		const view = renderChatView()
+		await hydrateTask()
+		const input = view.getByTestId("chat-textarea").querySelector("input")!
+		const sendButton = view.getByTestId("send-message")
+		const expectWaiting = () => {
+			expect(input).toHaveAttribute("data-sending-disabled", "true")
+			expect(sendButton).toBeDisabled()
+		}
+		fireEvent.click(view.getByTestId("condense-context"))
+		expectWaiting()
+
+		await hydrateTask(undefined, null)
+		expectWaiting()
+		await hydrateTask(undefined, "selected-task", 100, { task: "Populated details" })
+		expectWaiting()
+		await hydrateTask(undefined, "selected-task", 101, { task: "Updated details" })
+		expectWaiting()
+		if (outcome === "failure") {
+			await hydrateTask(
+				{ type: "say", say: "condense_context_error", ts: 200, text: "Condensation failed" },
+				"selected-task",
+				101,
+			)
+			expectWaiting()
+		}
+
+		sendCondenseEvent("condenseTaskContextResponse", "other-task")
+		expectWaiting()
+		sendCondenseEvent("condenseTaskContextResponse")
+		expect(input).toHaveAttribute("data-sending-disabled", "false")
+		expect(sendButton).toBeEnabled()
+		fireEvent.change(input, { target: { value: "Continue after condensation" } })
+		fireEvent.click(sendButton)
+		expect(vscode.postMessage).toHaveBeenCalledWith(
+			expect.objectContaining({ type: "askResponse", text: "Continue after condensation" }),
+		)
+	})
+
+	it.each([100, 400])(
+		"clears A's wait on switching to B at timestamp %s and ignores A's late response",
+		async (taskTs) => {
+			const view = renderChatView()
+			await hydrateTask()
+			const input = view.getByTestId("chat-textarea").querySelector("input")!
+			const sendButton = view.getByTestId("send-message")
+			fireEvent.click(view.getByTestId("condense-context"))
+			expect(input).toHaveAttribute("data-sending-disabled", "true")
+			expect(sendButton).toBeDisabled()
+
+			await hydrateTask(undefined, "next-task", taskTs)
+			expect(input).toHaveAttribute("data-sending-disabled", "false")
+			expect(sendButton).toBeEnabled()
+			fireEvent.change(input, { target: { value: "Continue B" } })
+			expect(input).toHaveValue("Continue B")
+			fireEvent.click(sendButton)
+			expect(vscode.postMessage).toHaveBeenCalledWith(
+				expect.objectContaining({ type: "askResponse", text: "Continue B" }),
+			)
+			await hydrateTask({ type: "ask", ask: "followup", ts: 500, text: "Continue B?" }, "next-task", taskTs)
+
+			fireEvent.click(view.getByTestId("condense-context"))
+			expect(vscode.postMessage).toHaveBeenCalledWith({ type: "condenseTaskContextRequest", text: "next-task" })
+			expect(input).toHaveAttribute("data-sending-disabled", "true")
+			expect(sendButton).toBeDisabled()
+			sendCondenseEvent("condenseTaskContextResponse")
+			expect(input).toHaveAttribute("data-sending-disabled", "true")
+			expect(sendButton).toBeDisabled()
+			sendCondenseEvent("condenseTaskContextResponse", "next-task")
+			expect(input).toHaveAttribute("data-sending-disabled", "false")
+			expect(sendButton).toBeEnabled()
+		},
+	)
+
+	it("clears the wait when switching to a task whose details have not arrived", async () => {
 		const view = renderChatView()
 		await hydrateTask()
 		fireEvent.click(view.getByTestId("condense-context"))
-		await hydrateTask(undefined, "next-task", 400)
-		const input = view.getByTestId("chat-textarea").querySelector("input")!
-		expect(input).toHaveAttribute("data-sending-disabled", "false")
+		await hydrateTask(undefined, null, 400)
+		expect(view.getByTestId("chat-textarea").querySelector("input")).toHaveAttribute(
+			"data-sending-disabled",
+			"false",
+		)
+		expect(view.getByTestId("send-message")).toBeEnabled()
+	})
+
+	it("clears the wait when no task is selected", async () => {
+		const view = renderChatView()
+		await hydrateTask()
 		fireEvent.click(view.getByTestId("condense-context"))
-		sendCondenseEvent("condenseTaskContextResponse")
-		expect(input).toHaveAttribute("data-sending-disabled", "true")
-		sendCondenseEvent("condenseTaskContextResponse", "next-task")
-		expect(input).toHaveAttribute("data-sending-disabled", "false")
+		await act(async () => {
+			window.dispatchEvent(
+				new MessageEvent("message", {
+					data: { type: "state", state: { currentTaskItem: undefined, clineMessages: [] } },
+				}),
+			)
+		})
+		expect(view.getByTestId("chat-textarea").querySelector("input")).toHaveAttribute(
+			"data-sending-disabled",
+			"false",
+		)
+		expect(view.getByTestId("send-message")).toBeEnabled()
 	})
 })
 

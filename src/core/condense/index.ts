@@ -36,8 +36,7 @@ function trimMiddle(text: string, maxChars: number): string {
 }
 
 /**
- * Providers cannot trim flattened tool results, so remove about `overageChars` here,
- * largest first. Keep heads and tails; leave other blocks untouched.
+ * Flattening prevents provider-side trimming; trim only tool-result blocks here.
  */
 export function trimToolResultTextForCondensing<
 	T extends { role: string; content: string | Anthropic.Messages.ContentBlockParam[] },
@@ -71,6 +70,7 @@ export function trimToolResultTextForCondensing<
 			}
 			const content = trimmed[messageIndex].content as Anthropic.Messages.ContentBlockParam[]
 			const current = content[blockIndex] as Anthropic.Messages.TextBlockParam
+			// Reuse original text to avoid nested truncation markers or miscounted removals on a second pass.
 			const shortened = trimMiddle(text, Math.max(minimumChars, current.text.length - remaining))
 			if (shortened.length < current.text.length) {
 				remaining -= current.text.length - shortened.length

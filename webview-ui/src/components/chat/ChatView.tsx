@@ -470,8 +470,6 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 		everVisibleMessagesTsRef.current.clear()
 		setCurrentFollowUpTs(null)
 		setIsCondensing(false)
-		setManualCondenseTaskId(undefined)
-
 		if (autoApproveTimeoutRef.current) {
 			clearTimeout(autoApproveTimeoutRef.current)
 			autoApproveTimeoutRef.current = null
@@ -480,6 +478,19 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 	}, [task?.ts, currentTaskItem?.id])
 
 	const taskTs = task?.ts
+	const previousCondenseTaskTsRef = useRef(taskTs)
+
+	useEffect(() => {
+		const selectedTaskId = currentTaskItem?.id
+		// Late task details must not end same-task waits; compare timestamps only without an ID.
+		const taskChanged = selectedTaskId
+			? selectedTaskId !== manualCondenseTaskId
+			: taskTs !== previousCondenseTaskTsRef.current
+		if (manualCondenseTaskId && (taskTs === undefined || taskChanged)) {
+			setManualCondenseTaskId(undefined)
+		}
+		previousCondenseTaskTsRef.current = taskTs
+	}, [currentTaskItem?.id, taskTs, manualCondenseTaskId])
 
 	// Request aggregated costs when task changes and has childIds
 	useEffect(() => {

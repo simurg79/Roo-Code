@@ -112,9 +112,7 @@ export interface ApiHandler {
 	getCondenseContextWindow?(): number
 
 	/**
-	 * Characters `messages` exceed the input budget for this system prompt and metadata (≤ 0 if they fit).
-	 * Condensing uses this to trim flattened tool results that providers can no longer trim.
-	 * Optional; only VS Code LM implements it.
+	 * Providers cannot trim flattened tool results; returns excess input characters for condensing (≤ 0 if they fit).
 	 */
 	measureInputOverageChars?(
 		systemPrompt: string,
