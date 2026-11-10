@@ -163,6 +163,44 @@ vi.mock("../../mentions/resolveImageMentions", () => ({
 
 import { resolveImageMentions } from "../../mentions/resolveImageMentions"
 
+describe("webviewMessageHandler - manual condensation", () => {
+	it("waits for condensation completion", async () => {
+		let finishCondensation!: () => void
+		const condenseTaskContext = vi.fn(() => new Promise<void>((resolve) => (finishCondensation = resolve)))
+		const provider = { ...mockClineProvider, condenseTaskContext } as unknown as ClineProvider
+		let handlerFinished = false
+		const request = webviewMessageHandler(provider, {
+			type: "condenseTaskContextRequest",
+			text: "selected-task",
+		}).then(() => {
+			handlerFinished = true
+		})
+
+		await Promise.resolve()
+		expect(condenseTaskContext).toHaveBeenCalledWith("selected-task")
+		expect(handlerFinished).toBe(false)
+		finishCondensation()
+		await request
+		expect(handlerFinished).toBe(true)
+	})
+
+	it("catches and logs provider rejection", async () => {
+		const log = vi.fn()
+		const provider = {
+			...mockClineProvider,
+			log,
+			condenseTaskContext: vi.fn().mockRejectedValue(new Error("webview transport failed")),
+		} as unknown as ClineProvider
+
+		await expect(
+			webviewMessageHandler(provider, { type: "condenseTaskContextRequest", text: "selected-task" }),
+		).resolves.toBeUndefined()
+		expect(log).toHaveBeenCalledExactlyOnceWith(
+			"Failed to complete context condensation request: Error: webview transport failed",
+		)
+	})
+})
+
 describe("webviewMessageHandler - indexing startup", () => {
 	it.each(["startIndexing", "toggleWorkspaceIndexing", "setAutoEnableDefault"] as const)(
 		"awaits and handles rejected startup for %s without duplicate initialize",

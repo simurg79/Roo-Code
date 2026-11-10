@@ -112,6 +112,17 @@ export interface ApiHandler {
 	getCondenseContextWindow?(): number
 
 	/**
+	 * Characters `messages` exceed the input budget for this system prompt and metadata (≤ 0 if they fit).
+	 * Condensing uses this to trim flattened tool results that providers can no longer trim.
+	 * Optional; only VS Code LM implements it.
+	 */
+	measureInputOverageChars?(
+		systemPrompt: string,
+		messages: Anthropic.Messages.MessageParam[],
+		metadata?: ApiHandlerCreateMessageMetadata,
+	): number
+
+	/**
 	 * Counts tokens for content blocks
 	 * All providers extend BaseProvider which provides a default tiktoken implementation,
 	 * but they can override this to use their native token counting endpoints

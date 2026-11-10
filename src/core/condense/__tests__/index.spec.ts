@@ -18,6 +18,7 @@ import {
 	toolResultToText,
 	convertToolBlocksToText,
 	transformMessagesForCondensing,
+	trimToolResultTextForCondensing,
 	STARTUP_READING_NOTE,
 } from "../index"
 
@@ -1535,5 +1536,147 @@ describe("transformMessagesForCondensing", () => {
 
 		// Original should still have tool_use type
 		expect(messages[0].content[0].type).toBe("tool_use")
+	})
+})
+
+describe("trimToolResultTextForCondensing", () => {
+	const toolResultText = (body: string) => ({ type: "text" as const, text: `[Tool Result]\n${body}` })
+	const textSize = (messages: Anthropic.Messages.MessageParam[]) =>
+		messages.reduce(
+			(sum, message) =>
+				sum +
+				(typeof message.content === "string"
+					? message.content.length
+					: message.content.reduce(
+							(blockSum, block) => blockSum + (block.type === "text" ? block.text.length : 0),
+							0,
+						)),
+			0,
+		)
+
+	it("returns the same messages when nothing is over budget", () => {
+		const messages = [{ role: "user" as const, content: [toolResultText("X".repeat(10_000))] }]
+
+		expect(trimToolResultTextForCondensing(messages, 0)).toBe(messages)
+	})
+
+	it("removes the overage from the largest tool results only, without mutating the input", () => {
+		const conversation = "C".repeat(50_000)
+		const smallResult = toolResultText("A".repeat(10_000))
+		const largeResult = toolResultText("B".repeat(40_000))
+		const messages: Anthropic.Messages.MessageParam[] = [
+			{ role: "user", content: [{ type: "text", text: conversation }] },
+			{ role: "user", content: [smallResult] },
+			{ role: "user", content: [largeResult] },
+		]
+		const original = structuredClone(messages)
+
+		const result = trimToolResultTextForCondensing(messages, 30_000)
+
+		expect(textSize(messages) - textSize(result)).toBeGreaterThanOrEqual(30_000)
+		expect(result[0].content).toEqual([{ type: "text", text: conversation }])
+		expect(result[1].content).toEqual([smallResult])
+		const trimmed = (result[2].content as Anthropic.Messages.TextBlockParam[])[0].text
+		expect(trimmed.startsWith("[Tool Result]\nBBB")).toBe(true)
+		expect(trimmed.endsWith("BBB")).toBe(true)
+		expect(trimmed).toContain("characters truncated to fit the model context window")
+		expect(messages).toEqual(original)
+	})
+
+	it("reduces every tool result to its marker when non-tool content cannot fit", () => {
+		const messages: Anthropic.Messages.MessageParam[] = [
+			{ role: "user", content: [toolResultText("A".repeat(30_000)), toolResultText("B".repeat(30_000))] },
+		]
+
+		const result = trimToolResultTextForCondensing(messages, 1_000_000)
+
+		for (const block of result[0].content as Anthropic.Messages.TextBlockParam[]) {
+			expect(block.text).toBe("\n\n[... 30,014 characters truncated to fit the model context window ...]\n\n")
+		}
+	})
+
+	it("trims results below the preferred minimum, including results already smaller than it", () => {
+		const messages: Anthropic.Messages.MessageParam[] = [
+			{ role: "user", content: [toolResultText("A".repeat(1_500)), toolResultText("B".repeat(3_000))] },
+		]
+		const original = structuredClone(messages)
+		const result = trimToolResultTextForCondensing(messages, textSize(messages) - 500)
+		expect(textSize(result)).toBeLessThanOrEqual(500)
+		expect(messages).toEqual(original)
+	})
+
+	it("scales across a 1x/2x/4x/8x ladder without quadratic rescanning", () => {
+		const measure = (scale: number) => {
+			const messages: Anthropic.Messages.MessageParam[] = Array.from({ length: 64 * scale }, () => ({
+				role: "user",
+				content: [toolResultText("X".repeat(4_000))],
+			}))
+			const durations = Array.from({ length: 5 }, () => {
+				const started = performance.now()
+				for (let iteration = 0; iteration < 40; iteration++) {
+					trimToolResultTextForCondensing(messages, Number.MAX_SAFE_INTEGER)
+				}
+				return performance.now() - started
+			})
+			return durations.sort((left, right) => left - right)[2]
+		}
+		measure(1)
+		const timings = [1, 2, 4, 8].map(measure)
+		console.log("condense trim scaling (1x/2x/4x/8x ms):", timings)
+		expect(timings[2] / timings[0]).toBeLessThan(12)
+		expect(timings[3] / timings[0]).toBeLessThan(24)
+	})
+
+	it.each([1, 20])("fits flattened tool results with %i retained results (AC24)", async (resultCount) => {
+		const budgetChars = 20_000
+		const createMessage = vi.fn().mockImplementation(async function* (
+			_systemPrompt: string,
+			sentMessages: Anthropic.Messages.MessageParam[],
+		) {
+			if (textSize(sentMessages) > budgetChars) throw new Error("summary request exceeds input budget")
+			yield { type: "text", text: "summary" }
+		})
+		const apiHandler = {
+			createMessage,
+			getModel: () => ({ id: "model", info: { contextWindow: 100_000, supportsPromptCache: false } }),
+			countTokens: vi.fn().mockResolvedValue(10),
+			measureInputOverageChars: vi.fn(
+				(_systemPrompt: string, messages: Anthropic.Messages.MessageParam[]) =>
+					textSize(messages) - budgetChars,
+			),
+		} as unknown as ApiHandler
+		const messages: ApiMessage[] = [
+			{ role: "user", content: "start", ts: 1 },
+			...Array.from({ length: resultCount }, (_, resultIndex): ApiMessage[] => [
+				{
+					role: "assistant",
+					content: [
+						{ type: "tool_use", id: `tool-${resultIndex}`, name: "read_file", input: { path: "a.ts" } },
+					],
+					ts: 2 + resultIndex * 2,
+				},
+				{
+					role: "user",
+					content: [{ type: "tool_result", tool_use_id: `tool-${resultIndex}`, content: "X".repeat(60_000) }],
+					ts: 3 + resultIndex * 2,
+				},
+			]).flat(),
+			{ role: "assistant", content: "done", ts: 4 },
+		]
+		const original = structuredClone(messages)
+
+		const result = await summarizeConversation({
+			messages,
+			apiHandler,
+			systemPrompt: "system",
+			taskId,
+			isAutomaticTrigger: true,
+		})
+
+		expect(result.error).toBeUndefined()
+		expect(result.summary).toBe("summary")
+		const sentMessages = createMessage.mock.calls[0][1] as Anthropic.Messages.MessageParam[]
+		expect(textSize(sentMessages)).toBeLessThanOrEqual(budgetChars)
+		expect(messages).toEqual(original)
 	})
 })

@@ -621,6 +621,9 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 	 * @returns A promise resolving to the token count
 	 */
 	override async countTokens(content: Array<Anthropic.Messages.ContentBlockParam>): Promise<number> {
+		// Copilot undercounts tool results; use their length as a floor for condense decisions.
+		const toolResultChars = content.reduce((sum, block) => sum + (readToolResultText(block)?.length ?? 0), 0)
+		const lengthEstimate = Math.ceil(toolResultChars / VSCODE_LM_BUDGET_CHARS_PER_TOKEN)
 		const containsImages = content.some(
 			(block) =>
 				block.type === "image" ||
@@ -629,9 +632,10 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 					block.content.some((part) => part.type === "image")),
 		)
 		if (this.getModel().info.supportsImages === true && containsImages) {
-			return this.calculateTotalInputTokens(
+			const counted = await this.calculateTotalInputTokens(
 				convertToVsCodeLmMessages([{ role: "user", content }], { supportsImages: true }),
 			)
+			return Math.max(counted, lengthEstimate)
 		}
 		// Preserve text-only counting when native images cannot be sent.
 		let textContent = ""
@@ -644,7 +648,7 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 			}
 		}
 
-		return this.internalCountTokens(textContent)
+		return Math.max(await this.internalCountTokens(textContent), lengthEstimate)
 	}
 
 	/**
@@ -846,16 +850,16 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 			content: this.cleanMessageContent(msg.content),
 		}))
 
-		const contextWindowTokens = this.getCondenseContextWindow()
-		if (Number.isFinite(contextWindowTokens) && contextWindowTokens > 0) {
-			const toolSchemaChars = metadata?.tools ? JSON.stringify(metadata.tools).length : 0
-			const rawBudgetChars =
-				contextWindowTokens * VSCODE_LM_INPUT_BUDGET_FRACTION * VSCODE_LM_BUDGET_CHARS_PER_TOKEN -
-				systemPrompt.length -
-				toolSchemaChars
-
+		let lengthEstimatedInputTokens = 0
+		const budget = this.getMessagesBudget(systemPrompt, metadata)
+		if (budget) {
+			const { rawBudgetChars, toolSchemaChars } = budget
 			const messagesBudgetChars = Math.max(MIN_TOOL_RESULT_CHARS, rawBudgetChars)
 			const { remainingChars } = truncateToolResultsToFitWindow(cleanedMessages, messagesBudgetChars)
+			// Copilot undercounts tool results ~10x; report at least the length estimate.
+			lengthEstimatedInputTokens = Math.ceil(
+				(remainingChars + systemPrompt.length + toolSchemaChars) / VSCODE_LM_BUDGET_CHARS_PER_TOKEN,
+			)
 
 			if (remainingChars > rawBudgetChars) {
 				throw Object.assign(
@@ -1105,7 +1109,7 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 			// Report final usage after stream completion
 			yield {
 				type: "usage",
-				inputTokens: totalInputTokens,
+				inputTokens: Math.max(totalInputTokens, lengthEstimatedInputTokens),
 				outputTokens: totalOutputTokens,
 			}
 		} catch (error: unknown) {
@@ -1220,6 +1224,31 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 		}
 
 		return this.getModel().info.contextWindow
+	}
+
+	measureInputOverageChars(
+		systemPrompt: string,
+		messages: Anthropic.Messages.MessageParam[],
+		metadata?: ApiHandlerCreateMessageMetadata,
+	): number {
+		const budget = this.getMessagesBudget(systemPrompt, metadata)
+		return budget ? estimateMessagesChars(messages) - budget.rawBudgetChars : 0
+	}
+
+	private getMessagesBudget(
+		systemPrompt: string,
+		metadata?: ApiHandlerCreateMessageMetadata,
+	): { rawBudgetChars: number; toolSchemaChars: number } | undefined {
+		const contextWindowTokens = this.getCondenseContextWindow()
+		if (!Number.isFinite(contextWindowTokens) || contextWindowTokens <= 0) {
+			return undefined
+		}
+		const toolSchemaChars = metadata?.tools ? JSON.stringify(metadata.tools).length : 0
+		const rawBudgetChars =
+			contextWindowTokens * VSCODE_LM_INPUT_BUDGET_FRACTION * VSCODE_LM_BUDGET_CHARS_PER_TOKEN -
+			systemPrompt.length -
+			toolSchemaChars
+		return { rawBudgetChars, toolSchemaChars }
 	}
 
 	async completePrompt(prompt: string): Promise<string> {

@@ -3,7 +3,7 @@
 import * as os from "os"
 import * as path from "path"
 
-import type * as vscode from "vscode"
+import * as vscode from "vscode"
 
 import type { ProviderSettings } from "@roo-code/types"
 
@@ -12,6 +12,9 @@ import { ClineProvider } from "../../webview/ClineProvider"
 import { ContextProxy } from "../../config/ContextProxy"
 import type { ApiHandler } from "../../../api"
 import * as contextManagement from "../../context-management"
+import * as condensation from "../../condense"
+import { VsCodeLmHandler } from "../../../api/providers/vscode-lm"
+import type { ApiStreamChunk } from "../../../api/transform/stream"
 import { STARTUP_READING_NOTE, getEffectiveApiHistory } from "../../condense"
 import { readApiMessages, type ApiMessage } from "../../task-persistence/apiMessages"
 import * as fs from "fs/promises"
@@ -76,7 +79,53 @@ vi.mock("execa", () => ({ execa: vi.fn() }))
 
 vi.mock("vscode", () => {
 	const disposable = { dispose: vi.fn() }
+	class LanguageModelTextPart {
+		constructor(public value: string) {}
+	}
+	class LanguageModelToolCallPart {
+		constructor(
+			public callId: string,
+			public name: string,
+			public input: object,
+		) {}
+	}
+	class LanguageModelToolResultPart {
+		constructor(
+			public callId: string,
+			public content: LanguageModelTextPart[],
+		) {}
+	}
+	class LanguageModelChatMessage {
+		constructor(
+			public role: string,
+			public content: unknown[],
+		) {}
+		static Assistant(content: string | unknown[]) {
+			return new LanguageModelChatMessage(
+				"assistant",
+				typeof content === "string" ? [new LanguageModelTextPart(content)] : content,
+			)
+		}
+		static User(content: string | unknown[]) {
+			return new LanguageModelChatMessage(
+				"user",
+				typeof content === "string" ? [new LanguageModelTextPart(content)] : content,
+			)
+		}
+	}
 	return {
+		LanguageModelTextPart,
+		LanguageModelDataPart: undefined,
+		LanguageModelToolCallPart,
+		LanguageModelToolResultPart,
+		LanguageModelChatMessage,
+		CancellationError: class CancellationError extends Error {},
+		lm: { selectChatModels: vi.fn() },
+		CancellationTokenSource: vi.fn(() => ({
+			token: { isCancellationRequested: false, onCancellationRequested: vi.fn() },
+			cancel: vi.fn(),
+			dispose: vi.fn(),
+		})),
 		window: {
 			createTextEditorDecorationType: vi.fn().mockReturnValue({ dispose: vi.fn() }),
 			visibleTextEditors: [],
@@ -250,6 +299,120 @@ describe("Task instruction refresh after condensation (end-to-end through the re
 		expectFreshModeRulesOnly(continuationPrompt)
 		expect(task["pendingInstructionRefresh"]).toBe(false)
 	})
+
+	it.each([
+		{ usagePercent: 60, shouldCondense: true },
+		{ usagePercent: 20, shouldCondense: false },
+	])(
+		"AC23: real VS Code LM understated usage at $usagePercent% condenses=$shouldCondense through Task",
+		async ({ usagePercent, shouldCondense }) => {
+			const rawTokensPerMessage = 10
+			const client = {
+				id: "ac23-model",
+				name: "AC23 model",
+				vendor: "ac23",
+				family: "claude-sonnet-4.5",
+				version: "1",
+				maxInputTokens: 200000,
+				countTokens: vi.fn().mockResolvedValue(rawTokensPerMessage),
+				sendRequest: vi.fn(async (_messages: vscode.LanguageModelChatMessage[]) => ({
+					stream: (async function* () {
+						yield new vscode.LanguageModelTextPart(summaryText)
+					})(),
+				})),
+			}
+			vi.mocked(vscode.lm.selectChatModels).mockResolvedValue([client as unknown as vscode.LanguageModelChat])
+			const handler = new VsCodeLmHandler({
+				vsCodeLmModelSelector: { vendor: client.vendor, family: client.family },
+			})
+			try {
+				await handler.resolveModelCapabilities()
+				task.api = handler
+				vi.mocked(task.getTokenUsage).mockRestore()
+				const summarizeSpy = vi.spyOn(condensation, "summarizeConversation")
+				const handlerCreateSpy = vi.spyOn(handler, "createMessage")
+				spies.push(summarizeSpy, handlerCreateSpy)
+				const contextWindow = handler.getCondenseContextWindow()
+				const thresholdTokens = (contextWindow * providerState.autoCondenseContextPercent) / 100
+				const toolOutput = "x".repeat(Math.ceil((contextWindow * usagePercent * 3) / 100))
+				task.apiConversationHistory = [
+					{ role: "user", content: "Inspect the tool output", ts: 1 },
+					{
+						role: "assistant",
+						content: [
+							{ type: "tool_use", id: "ac23-read", name: "read_file", input: { path: "data.txt" } },
+						],
+						ts: 2,
+					},
+					{
+						role: "user",
+						content: [{ type: "tool_result", tool_use_id: "ac23-read", content: toolOutput }],
+						ts: 3,
+					},
+				]
+				const chunks: ApiStreamChunk[] = []
+				for await (const chunk of task.attemptApiRequest(0, { skipProviderRateLimit: true })) {
+					chunks.push(chunk)
+				}
+				expect(manageSpy).not.toHaveBeenCalled()
+				const usage = chunks.find((chunk) => chunk.type === "usage")!
+				expect(usage.type).toBe("usage")
+				if (usage.type !== "usage") throw new Error("Missing VS Code LM usage")
+				const sentMessages = client.sendRequest.mock.calls[0][0] as vscode.LanguageModelChatMessage[]
+				const rawInputTokens = sentMessages.length * rawTokensPerMessage
+				expect(rawInputTokens + rawTokensPerMessage * 2).toBeLessThan(thresholdTokens)
+				expect(usage.inputTokens).toBeGreaterThanOrEqual(Math.ceil(toolOutput.length / 3))
+				if (shouldCondense) expect(usage.inputTokens).toBeGreaterThanOrEqual(thresholdTokens)
+				else expect(usage.inputTokens + usage.outputTokens + rawTokensPerMessage).toBeLessThan(thresholdTokens)
+
+				// attemptApiRequest yields usage; its outer request loop normally records this UI metric.
+				task.clineMessages = [
+					{ type: "say", say: "text", text: "Task started", ts: 1 },
+					{
+						type: "say",
+						say: "api_req_started",
+						text: JSON.stringify({ tokensIn: usage.inputTokens, tokensOut: usage.outputTokens }),
+						ts: 4,
+					},
+				]
+				task.apiConversationHistory.push(
+					{ role: "assistant", content: summaryText, ts: 4 },
+					{ role: "user", content: "Continue", ts: 5 },
+				)
+				const contextTokens = task.getTokenUsage().contextTokens
+				expect(contextTokens).toBe(usage.inputTokens + usage.outputTokens)
+				for await (const _chunk of task.attemptApiRequest(0, { skipProviderRateLimit: true })) {
+				}
+				expect(manageSpy).toHaveBeenCalledTimes(1)
+				expect(manageSpy.mock.calls[0][0]).toMatchObject({
+					apiHandler: handler,
+					totalTokens: contextTokens,
+					contextWindow,
+					autoCondenseContext: true,
+					autoCondenseContextPercent: 50,
+					useAvailableInputForContextPercent: true,
+				})
+				expect(summarizeSpy).toHaveBeenCalledTimes(shouldCondense ? 1 : 0)
+				if (shouldCondense) {
+					expect(summarizeSpy.mock.calls[0][0]).toMatchObject({
+						apiHandler: handler,
+						isAutomaticTrigger: true,
+					})
+					expectOneNote(getEffectiveApiHistory(await persistedHistory()))
+					expectOneNote(handlerCreateSpy.mock.calls.at(-1)![1])
+				} else {
+					expect(task.apiConversationHistory.some((message) => message.isSummary)).toBe(false)
+					expect(JSON.stringify(handlerCreateSpy.mock.calls.at(-1)![1])).not.toContain(STARTUP_READING_NOTE)
+				}
+				expect(saySpy.mock.calls.some(([type]) => type === "condense_context")).toBe(shouldCondense)
+				expect(saySpy.mock.calls.some(([type]) => type === "condense_context_error")).toBe(false)
+				expect(task.apiConversationHistory.some((message) => message.isTruncationMarker)).toBe(false)
+			} finally {
+				handler.dispose()
+				vi.mocked(vscode.lm.selectChatModels).mockReset()
+			}
+		},
+	)
 
 	it("manual condensation: a rule edited while continuation waits is in the next request", async () => {
 		expect(await request()).toContain(staleCodeRule)

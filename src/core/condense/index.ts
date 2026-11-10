@@ -12,6 +12,75 @@ import { generateFoldedFileContext } from "./foldedFileContext"
 
 export type { FoldedFileContextResult, FoldedFileContextOptions } from "./foldedFileContext"
 
+const TOOL_RESULT_TEXT_PREFIX = "[Tool Result"
+
+const MIN_TRIMMED_TOOL_RESULT_CHARS = 2000
+
+function trimMiddle(text: string, maxChars: number): string {
+	if (text.length <= maxChars) {
+		return text
+	}
+	const buildMarker = (removed: number) =>
+		`\n\n[... ${removed.toLocaleString("en-US")} characters truncated to fit the model context window ...]\n\n`
+	const keep = Math.max(0, maxChars - buildMarker(text.length).length)
+	let head = text.slice(0, Math.ceil(keep / 2))
+	let tail = text.slice(text.length - Math.floor(keep / 2))
+	// Never split a surrogate pair at either cut.
+	if (head.length > 0 && (head.charCodeAt(head.length - 1) & 0xfc00) === 0xd800) {
+		head = head.slice(0, -1)
+	}
+	if (tail.length > 0 && (tail.charCodeAt(0) & 0xfc00) === 0xdc00) {
+		tail = tail.slice(1)
+	}
+	return `${head}${buildMarker(text.length - head.length - tail.length)}${tail}`
+}
+
+/**
+ * Providers cannot trim flattened tool results, so remove about `overageChars` here,
+ * largest first. Keep heads and tails; leave other blocks untouched.
+ */
+export function trimToolResultTextForCondensing<
+	T extends { role: string; content: string | Anthropic.Messages.ContentBlockParam[] },
+>(messages: T[], overageChars: number): T[] {
+	if (!(overageChars > 0)) {
+		return messages
+	}
+
+	const candidates: { messageIndex: number; blockIndex: number; text: string }[] = []
+	messages.forEach((message, messageIndex) => {
+		if (!Array.isArray(message.content)) {
+			return
+		}
+		message.content.forEach((block, blockIndex) => {
+			if (block.type === "text" && block.text.startsWith(TOOL_RESULT_TEXT_PREFIX)) {
+				candidates.push({ messageIndex, blockIndex, text: block.text })
+			}
+		})
+	})
+	candidates.sort((a, b) => b.text.length - a.text.length)
+
+	const trimmed = messages.map((message) =>
+		Array.isArray(message.content) ? { ...message, content: [...message.content] } : message,
+	)
+	let remaining = overageChars
+	// Prefer detail, but a per-result minimum must not prevent the summary request from fitting.
+	for (const minimumChars of [MIN_TRIMMED_TOOL_RESULT_CHARS, 0]) {
+		for (const { messageIndex, blockIndex, text } of candidates) {
+			if (remaining <= 0) {
+				break
+			}
+			const content = trimmed[messageIndex].content as Anthropic.Messages.ContentBlockParam[]
+			const current = content[blockIndex] as Anthropic.Messages.TextBlockParam
+			const shortened = trimMiddle(text, Math.max(minimumChars, current.text.length - remaining))
+			if (shortened.length < current.text.length) {
+				remaining -= current.text.length - shortened.length
+				content[blockIndex] = { type: "text", text: shortened }
+			}
+		}
+	}
+	return trimmed
+}
+
 /**
  * Converts a tool_use block to a text representation.
  * This allows the conversation to be summarized without requiring the tools parameter.
@@ -38,8 +107,9 @@ export function toolUseToText(block: Anthropic.Messages.ToolUseBlockParam): stri
  */
 export function toolResultToText(block: Anthropic.Messages.ToolResultBlockParam): string {
 	const errorSuffix = block.is_error ? " (Error)" : ""
+	const header = `${TOOL_RESULT_TEXT_PREFIX}${errorSuffix}]`
 	if (typeof block.content === "string") {
-		return `[Tool Result${errorSuffix}]\n${block.content}`
+		return `${header}\n${block.content}`
 	} else if (Array.isArray(block.content)) {
 		const contentText = block.content
 			.map((contentBlock) => {
@@ -53,9 +123,9 @@ export function toolResultToText(block: Anthropic.Messages.ToolResultBlockParam)
 				return `[${(contentBlock as { type: string }).type}]`
 			})
 			.join("\n")
-		return `[Tool Result${errorSuffix}]\n${contentText}`
+		return `${header}\n${contentText}`
 	}
-	return `[Tool Result${errorSuffix}]`
+	return header
 }
 
 /**
@@ -316,10 +386,13 @@ export async function summarizeConversation(options: SummarizeConversationOption
 		maybeRemoveImageBlocks([...messagesWithToolResults, finalRequestMessage], apiHandler),
 	)
 
-	const requestMessages = messagesWithTextToolBlocks.map(({ role, content }) => ({ role, content }))
-
 	// Note: this doesn't need to be a stream, consider using something like apiHandler.completePrompt
 	const promptToUse = SUMMARY_PROMPT
+
+	const overageChars = apiHandler.measureInputOverageChars?.(promptToUse, messagesWithTextToolBlocks, metadata) ?? 0
+	const requestMessages = trimToolResultTextForCondensing(messagesWithTextToolBlocks, overageChars).map(
+		({ role, content }) => ({ role, content }),
+	)
 
 	// Validate that the API handler supports message creation
 	if (!apiHandler || typeof apiHandler.createMessage !== "function") {

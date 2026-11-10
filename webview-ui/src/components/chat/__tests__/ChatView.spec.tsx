@@ -9,6 +9,13 @@ import { vscode } from "@src/utils/vscode"
 
 import ChatView, { ChatViewProps } from "../ChatView"
 
+// Share the renderer's React instance across Vite and native dependencies.
+vi.mock("react", async () => {
+	const { createRequire } = await import("node:module")
+	const react = createRequire(import.meta.url)("react")
+	return { ...react, default: react }
+})
+
 // Define minimal types needed for testing
 interface ClineMessage {
 	type: "say" | "ask"
@@ -50,6 +57,29 @@ vi.mock("../ChatRow", () => ({
 		return <div data-testid="chat-row">{JSON.stringify(message)}</div>
 	},
 }))
+
+vi.mock("../TaskHeader", async () => {
+	const { useExtensionState } = await import("@src/context/ExtensionStateContext")
+	return {
+		default: function MockTaskHeader({
+			handleCondenseContext,
+			buttonsDisabled,
+		}: {
+			handleCondenseContext: (taskId: string) => void
+			buttonsDisabled: boolean
+		}) {
+			const { currentTaskItem } = useExtensionState()
+			return (
+				<button
+					data-testid="condense-context"
+					disabled={buttonsDisabled}
+					onClick={() => currentTaskItem && handleCondenseContext(currentTaskItem.id)}>
+					Condense context
+				</button>
+			)
+		},
+	}
+})
 
 vi.mock("../AutoApproveMenu", () => ({
 	default: () => null,
@@ -300,6 +330,108 @@ const renderChatView = (props: Partial<ChatViewProps> = {}) => {
 		</ExtensionStateContextProvider>,
 	)
 }
+
+describe("ChatView - manual condensation", () => {
+	const taskMessage: ClineMessage = { type: "say", say: "task", ts: 100, text: "Initial task" }
+	const hydrateTask = async (lastMessage?: ClineMessage, taskId = "selected-task", taskTs = 100) => {
+		await act(async () => {
+			window.dispatchEvent(
+				new MessageEvent("message", {
+					data: {
+						type: "state",
+						state: {
+							version: "1.0.0",
+							currentTaskItem: { id: taskId },
+							clineMessages: [{ ...taskMessage, ts: taskTs }, ...(lastMessage ? [lastMessage] : [])],
+						},
+					},
+				}),
+			)
+		})
+	}
+	const sendCondenseEvent = (
+		type: "condenseTaskContextStarted" | "condenseTaskContextResponse",
+		taskId = "selected-task",
+	) => {
+		act(() => window.dispatchEvent(new MessageEvent("message", { data: { type, text: taskId } })))
+	}
+
+	beforeEach(() => vi.clearAllMocks())
+
+	it("disables sending for a manual request and restores it only for the matching response", async () => {
+		const view = renderChatView()
+		await hydrateTask()
+		const input = view.getByTestId("chat-textarea").querySelector("input")!
+		expect(input).toHaveAttribute("data-sending-disabled", "false")
+		fireEvent.click(view.getByTestId("condense-context"))
+		expect(vscode.postMessage).toHaveBeenCalledWith({ type: "condenseTaskContextRequest", text: "selected-task" })
+		expect(input).toHaveAttribute("data-sending-disabled", "true")
+		expect(view.getAllByTestId("chat-row").some((row) => row.textContent?.includes('"partial":true'))).toBe(true)
+
+		sendCondenseEvent("condenseTaskContextResponse", "other-task")
+		expect(input).toHaveAttribute("data-sending-disabled", "true")
+		sendCondenseEvent("condenseTaskContextResponse")
+		expect(input).toHaveAttribute("data-sending-disabled", "false")
+		expect(view.queryAllByTestId("chat-row").some((row) => row.textContent?.includes('"partial":true'))).toBe(false)
+		fireEvent.change(input, { target: { value: "Continue" } })
+		fireEvent.keyDown(input, { key: "Enter" })
+		expect(vscode.postMessage).toHaveBeenCalledWith(
+			expect.objectContaining({ type: "askResponse", text: "Continue" }),
+		)
+	})
+
+	it.each(["api_req_started", "api_req_rate_limit_wait"])(
+		"preserves a %s disable that arrives during manual condensation",
+		async (say) => {
+			const view = renderChatView()
+			await hydrateTask()
+			fireEvent.click(view.getByTestId("condense-context"))
+			await hydrateTask({ type: "say", say, ts: 200 })
+			sendCondenseEvent("condenseTaskContextResponse")
+			expect(view.getByTestId("chat-textarea").querySelector("input")).toHaveAttribute(
+				"data-sending-disabled",
+				"true",
+			)
+		},
+	)
+
+	it("does not release an unrelated disable after automatic condensation", async () => {
+		const view = renderChatView()
+		await hydrateTask({ type: "say", say: "api_req_started", ts: 200 })
+		sendCondenseEvent("condenseTaskContextStarted")
+		sendCondenseEvent("condenseTaskContextResponse")
+		expect(view.getByTestId("chat-textarea").querySelector("input")).toHaveAttribute(
+			"data-sending-disabled",
+			"true",
+		)
+	})
+
+	it("keeps sending disabled until manual completion even if another reason clears", async () => {
+		const view = renderChatView()
+		await hydrateTask()
+		fireEvent.click(view.getByTestId("condense-context"))
+		await hydrateTask({ type: "say", say: "api_req_started", ts: 200 })
+		await hydrateTask({ type: "ask", ask: "followup", ts: 300, text: "Continue?" })
+		const input = view.getByTestId("chat-textarea").querySelector("input")!
+		expect(input).toHaveAttribute("data-sending-disabled", "true")
+		sendCondenseEvent("condenseTaskContextResponse")
+		expect(input).toHaveAttribute("data-sending-disabled", "false")
+	})
+
+	it("resets manual waiting on task change and ignores the old task response", async () => {
+		const view = renderChatView()
+		await hydrateTask()
+		fireEvent.click(view.getByTestId("condense-context"))
+		await hydrateTask(undefined, "next-task", 400)
+		const input = view.getByTestId("chat-textarea").querySelector("input")!
+		expect(input).toHaveAttribute("data-sending-disabled", "false")
+		fireEvent.click(view.getByTestId("condense-context"))
+		sendCondenseEvent("condenseTaskContextResponse")
+		expect(input).toHaveAttribute("data-sending-disabled", "true")
+		sendCondenseEvent("condenseTaskContextResponse", "next-task")
+		expect(input).toHaveAttribute("data-sending-disabled", "false")
+	})
+})
 
 describe("ChatView - Sound Playing Tests", () => {
 	beforeEach(() => vi.clearAllMocks())
@@ -1180,5 +1312,22 @@ describe("ChatView - Context Condensing Indicator Tests", () => {
 			},
 			{ timeout: 2000 },
 		)
+		act(() => {
+			window.dispatchEvent(
+				new MessageEvent("message", {
+					data: { type: "condenseTaskContextResponse", text: "test-task-id" },
+				}),
+			)
+		})
+		await waitFor(() => {
+			const rows = container.querySelectorAll('[data-testid="chat-row"]')
+			expect(
+				Array.from(rows).some(
+					(row) =>
+						row.textContent?.includes('"say":"condense_context"') &&
+						row.textContent.includes('"partial":true'),
+				),
+			).toBe(false)
+		})
 	})
 })
