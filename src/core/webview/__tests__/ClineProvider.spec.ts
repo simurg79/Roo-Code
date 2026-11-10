@@ -22,6 +22,7 @@ import { Task, TaskOptions } from "../../task/Task"
 import { safeWriteJson } from "../../../utils/safeWriteJson"
 
 import { ClineProvider } from "../ClineProvider"
+import { t } from "../../../i18n"
 import { MessageManager } from "../../message-manager"
 
 // Mock setup must come before imports.
@@ -430,6 +431,72 @@ describe("ClineProvider", () => {
 			listResources: vi.fn().mockResolvedValue([]),
 			readResource: vi.fn().mockResolvedValue({ contents: [] }),
 			getAllServers: vi.fn().mockReturnValue([]),
+		})
+	})
+
+	describe("manual context condensation", () => {
+		it("responds and reports an unavailable task", async () => {
+			const postMessage = vi.spyOn(provider, "postMessageToWebview").mockResolvedValue(undefined)
+			const log = vi.spyOn(provider, "log")
+
+			await provider.condenseTaskContext("missing-task")
+
+			expect(postMessage).toHaveBeenCalledExactlyOnceWith({
+				type: "condenseTaskContextResponse",
+				text: "missing-task",
+			})
+			expect(vscode.window.showErrorMessage).toHaveBeenCalledExactlyOnceWith(
+				t("common:errors.condense_failed_with_reason", {
+					reason: t("common:errors.condense_task_unavailable"),
+				}),
+			)
+			expect(log).toHaveBeenCalledWith(expect.stringContaining("missing-task"))
+		})
+
+		it.each([new Error("summary request exploded"), "provider unavailable", undefined])(
+			"responds and reports an unexpected throw: %s",
+			async (error) => {
+				const postMessage = vi.spyOn(provider, "postMessageToWebview").mockResolvedValue(undefined)
+				const log = vi.spyOn(provider, "log")
+				const condenseContext = vi.fn().mockRejectedValue(error)
+				provider["clineStack"] = [{ taskId: "selected-task", condenseContext } as unknown as Task]
+
+				await provider.condenseTaskContext("selected-task")
+
+				expect(condenseContext).toHaveBeenCalledOnce()
+				expect(postMessage).toHaveBeenCalledExactlyOnceWith({
+					type: "condenseTaskContextResponse",
+					text: "selected-task",
+				})
+				const reason = error instanceof Error ? error.message : error
+				expect(vscode.window.showErrorMessage).toHaveBeenCalledExactlyOnceWith(
+					reason
+						? t("common:errors.condense_failed_with_reason", { reason })
+						: t("common:errors.condense_failed"),
+				)
+				expect(log).toHaveBeenCalledWith(expect.stringContaining(String(error)))
+			},
+		)
+
+		it.each(["success", "already-reported error"])("responds without a popup for %s", async (outcome) => {
+			const postMessage = vi.spyOn(provider, "postMessageToWebview").mockResolvedValue(undefined)
+			const clineMessages: ClineMessage[] = []
+			const condenseContext = vi.fn(async () => {
+				if (outcome === "already-reported error") {
+					clineMessages.push({ ts: 1, type: "say", say: "condense_context_error", text: "API failed" })
+				}
+			})
+			provider["clineStack"] = [{ taskId: "selected-task", condenseContext, clineMessages } as unknown as Task]
+
+			await provider.condenseTaskContext("selected-task")
+
+			expect(condenseContext).toHaveBeenCalledOnce()
+			expect(postMessage).toHaveBeenCalledExactlyOnceWith({
+				type: "condenseTaskContextResponse",
+				text: "selected-task",
+			})
+			expect(vscode.window.showErrorMessage).not.toHaveBeenCalled()
+			expect(clineMessages).toHaveLength(outcome === "success" ? 0 : 1)
 		})
 	})
 

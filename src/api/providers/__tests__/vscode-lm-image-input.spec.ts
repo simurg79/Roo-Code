@@ -264,7 +264,8 @@ describe("VS Code LM provider image-input contract", () => {
 		client.countTokens.mockImplementation(async (input) => {
 			if (typeof input === "string" || input.role === vscode.LanguageModelChatMessageRole.Assistant) return 0
 			expect(input).toBeInstanceOf(vscode.LanguageModelChatMessage)
-			return input.content[0] instanceof vscode.LanguageModelToolResultPart ? 7 : 5
+			// Large enough that the length-based floor never masks the provider's own count.
+			return input.content[0] instanceof vscode.LanguageModelToolResultPart ? 700 : 500
 		})
 		const chunks = await send(handler, imageMessages())
 		const sent = client.sendRequest.mock.calls[0][0]
@@ -276,7 +277,7 @@ describe("VS Code LM provider image-input contract", () => {
 		expect(toolResult.callId).toBe("read-image")
 		expect((toolResult.content[0] as vscode.LanguageModelTextPart).value).toBe("tool surrounding text")
 		expectImage(toolResult.content[1])
-		expect(chunks).toContainEqual({ type: "usage", inputTokens: 12, outputTokens: 0 })
+		expect(chunks).toContainEqual({ type: "usage", inputTokens: 1200, outputTokens: 0 })
 	})
 
 	it.each(["user", "tool"])(

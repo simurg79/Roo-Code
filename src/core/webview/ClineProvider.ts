@@ -1850,18 +1850,29 @@ export class ClineProvider
 
 	/* Condenses a task's message history to use fewer tokens. */
 	async condenseTaskContext(taskId: string) {
-		let task: Task | undefined
-		for (let i = this.clineStack.length - 1; i >= 0; i--) {
-			if (this.clineStack[i].taskId === taskId) {
-				task = this.clineStack[i]
-				break
+		try {
+			let task: Task | undefined
+			for (let stackIndex = this.clineStack.length - 1; stackIndex >= 0; stackIndex--) {
+				if (this.clineStack[stackIndex].taskId === taskId) {
+					task = this.clineStack[stackIndex]
+					break
+				}
 			}
+			if (!task) {
+				throw new Error(t("common:errors.condense_task_unavailable"))
+			}
+			await task.condenseContext()
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : typeof error === "string" ? error : undefined
+			this.log(`Failed to condense task ${taskId}: ${String(error)}`)
+			vscode.window.showErrorMessage(
+				reason
+					? t("common:errors.condense_failed_with_reason", { reason })
+					: t("common:errors.condense_failed"),
+			)
+		} finally {
+			await this.postMessageToWebview({ type: "condenseTaskContextResponse", text: taskId })
 		}
-		if (!task) {
-			throw new Error(`Task with id ${taskId} not found in stack`)
-		}
-		await task.condenseContext()
-		await this.postMessageToWebview({ type: "condenseTaskContextResponse", text: taskId })
 	}
 
 	// this function deletes a task from task history, and deletes its checkpoints and delete the task folder

@@ -129,7 +129,9 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 	const [inputValue, setInputValue] = useState("")
 	const inputValueRef = useRef(inputValue)
 	const textAreaRef = useRef<HTMLTextAreaElement>(null)
-	const [sendingDisabled, setSendingDisabled] = useState(false)
+	const [baseSendingDisabled, setSendingDisabled] = useState(false)
+	const [manualCondenseTaskId, setManualCondenseTaskId] = useState<string | undefined>()
+	const sendingDisabled = baseSendingDisabled || manualCondenseTaskId !== undefined
 	const [selectedImages, setSelectedImages] = useState<string[]>([])
 
 	// We need to hold on to the ask because useEffect > lastMessage will always
@@ -468,15 +470,27 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 		everVisibleMessagesTsRef.current.clear()
 		setCurrentFollowUpTs(null)
 		setIsCondensing(false)
-
 		if (autoApproveTimeoutRef.current) {
 			clearTimeout(autoApproveTimeoutRef.current)
 			autoApproveTimeoutRef.current = null
 		}
 		userRespondedRef.current = false
-	}, [task?.ts])
+	}, [task?.ts, currentTaskItem?.id])
 
 	const taskTs = task?.ts
+	const previousCondenseTaskTsRef = useRef(taskTs)
+
+	useEffect(() => {
+		const selectedTaskId = currentTaskItem?.id
+		// Late task details must not end same-task waits; compare timestamps only without an ID.
+		const taskChanged = selectedTaskId
+			? selectedTaskId !== manualCondenseTaskId
+			: taskTs !== previousCondenseTaskTsRef.current
+		if (manualCondenseTaskId && (taskTs === undefined || taskChanged)) {
+			setManualCondenseTaskId(undefined)
+		}
+		previousCondenseTaskTsRef.current = taskTs
+	}, [currentTaskItem?.id, taskTs, manualCondenseTaskId])
 
 	// Request aggregated costs when task changes and has childIds
 	useEffect(() => {
@@ -881,23 +895,15 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 					}
 					break
 				case "condenseTaskContextStarted":
-					// Handle both manual and automatic condensation start
-					// We don't check the task ID because:
-					// 1. There can only be one active task at a time
-					// 2. Task switching resets isCondensing to false (see useEffect with task?.ts dependency)
-					// 3. For new tasks, currentTaskItem may not be populated yet due to async state updates
-					if (message.text) {
+					if (message.text && (!currentTaskItem || message.text === currentTaskItem.id)) {
 						setIsCondensing(true)
-						// Note: sendingDisabled is only set for manual condensation via handleCondenseContext
-						// Automatic condensation doesn't disable sending since the task is already running
 					}
 					break
 				case "condenseTaskContextResponse":
-					// Same reasoning as above - we trust this is for the current task
-					if (message.text) {
-						if (isCondensing && sendingDisabled) {
-							setSendingDisabled(false)
-						}
+					if (message.text && message.text === manualCondenseTaskId) {
+						setManualCondenseTaskId(undefined)
+						setIsCondensing(false)
+					} else if (message.text && (!currentTaskItem || message.text === currentTaskItem.id)) {
 						setIsCondensing(false)
 					}
 					break
@@ -922,7 +928,8 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 			// not using its value but its reference.
 		},
 		[
-			isCondensing,
+			manualCondenseTaskId,
+			currentTaskItem,
 			isHidden,
 			sendingDisabled,
 			enableButtons,
@@ -1541,7 +1548,7 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 			return
 		}
 		setIsCondensing(true)
-		setSendingDisabled(true)
+		setManualCondenseTaskId(taskId)
 		vscode.postMessage({ type: "condenseTaskContextRequest", text: taskId })
 	}
 

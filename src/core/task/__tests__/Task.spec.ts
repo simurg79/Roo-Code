@@ -18,6 +18,10 @@ import { MultiSearchReplaceDiffStrategy } from "../../diff/strategies/multi-sear
 import type { ApiHandler } from "../../../api"
 import { VsCodeLmHandler } from "../../../api/providers/vscode-lm"
 import { getCondenseAllowance } from "../../context-management"
+import * as contextManagement from "../../context-management"
+import * as condensation from "../../condense"
+import * as systemPrompts from "../../prompts/system"
+import type { InstructionFailureCollector } from "../../prompts/sections/custom-instructions"
 import { getModelMaxOutputTokens } from "../../../shared/api"
 import * as buildTools from "../build-tools"
 
@@ -366,6 +370,252 @@ describe("Cline", () => {
 				},
 			],
 		}))
+	})
+
+	describe("instruction refresh after condensation", () => {
+		let task: Task
+		let promptSpy: import("vitest").MockInstance<(failures?: InstructionFailureCollector) => Promise<string>>
+		let createSpy: import("vitest").MockInstance<ApiHandler["createMessage"]>
+		let saySpy: import("vitest").MockInstance<Task["say"]>
+		let manageSpy: import("vitest").MockInstance<typeof contextManagement.manageContext>
+		const instructionSpies: Array<{ mockRestore(): void }> = []
+		let savedInstructions: string
+
+		beforeEach(() => {
+			mockProvider.getState = vi.fn().mockResolvedValue({ mcpEnabled: false, mode: "code" })
+			task = new Task({ provider: mockProvider, apiConfiguration: mockApiConfig, startTask: false })
+			vi.mocked(condensation.summarizeConversation).mockResolvedValue({
+				messages: [{ role: "user", content: "continued" }],
+				summary: "summary",
+				cost: 0,
+				newContextTokens: 1,
+			})
+			savedInstructions = "old instructions"
+			promptSpy = vi
+				.spyOn(
+					task as unknown as { getSystemPrompt(failures?: InstructionFailureCollector): Promise<string> },
+					"getSystemPrompt",
+				)
+				.mockImplementation(async () => savedInstructions)
+			vi.spyOn(task, "getTokenUsage").mockReturnValue({ contextTokens: 0 } as ReturnType<Task["getTokenUsage"]>)
+			vi.spyOn(task, "flushPendingToolResultsToHistory").mockResolvedValue(true)
+			vi.spyOn(task as any, "overwriteApiConversationHistory").mockImplementation(async (messages: any) => {
+				task.apiConversationHistory = messages
+			})
+			vi.spyOn(task as any, "getFilesReadByRooSafely").mockResolvedValue([])
+			vi.spyOn(task as any, "processQueuedMessages").mockImplementation(() => {})
+			instructionSpies.push(
+				vi.spyOn(buildTools, "buildNativeToolsArrayWithRestrictions").mockResolvedValue({ tools: [] }),
+			)
+			saySpy = vi.spyOn(task, "say").mockResolvedValue(undefined)
+			createSpy = vi.spyOn(task.api, "createMessage").mockImplementation(async function* () {
+				yield { type: "text", text: "ok" }
+			})
+			manageSpy = vi.spyOn(contextManagement, "manageContext").mockImplementation(async ({ messages }) => ({
+				messages,
+				cost: 0,
+				prevContextTokens: 10,
+				summary: "",
+			}))
+			instructionSpies.push(promptSpy, saySpy, createSpy, manageSpy)
+			task.apiConversationHistory = [{ role: "user", content: "continue" }]
+		})
+
+		afterEach(() => {
+			task.dispose()
+			for (const spy of instructionSpies.splice(0)) spy.mockRestore()
+			Task.resetGlobalApiRequestTime()
+		})
+
+		async function request() {
+			for await (const _chunk of task.attemptApiRequest(0, { skipProviderRateLimit: true })) {
+			}
+		}
+
+		it.each(["manual", "automatic", "recovery"])(
+			"%s sends current saved instructions after each summary",
+			async (trigger) => {
+				for (const currentInstructions of ["updated instructions", ""]) {
+					if (trigger === "manual") {
+						await task.condenseContext()
+						savedInstructions = currentInstructions
+					} else {
+						manageSpy.mockImplementationOnce(async ({ messages }: any) => {
+							savedInstructions = currentInstructions
+							return {
+								messages,
+								summary: "summary retains old instructions",
+								cost: 0,
+								prevContextTokens: 10,
+							}
+						})
+						if (trigger === "automatic") {
+							vi.mocked(task.getTokenUsage).mockReturnValue({ contextTokens: 10 } as ReturnType<
+								Task["getTokenUsage"]
+							>)
+						} else {
+							await task["handleContextWindowExceededError"]()
+						}
+					}
+					await request()
+					expect(createSpy.mock.calls.at(-1)?.[0]).toBe(currentInstructions)
+					expect(task["pendingInstructionRefresh"]).toBe(false)
+					expect(saySpy.mock.calls.some(([type]) => type === "instruction_refresh_warning")).toBe(false)
+				}
+			},
+		)
+
+		it.each([0, 10])("manual refresh warns before sending when context tokens are %s", async (contextTokens) => {
+			await task.condenseContext()
+			vi.mocked(task.getTokenUsage).mockReturnValue({ contextTokens } as ReturnType<Task["getTokenUsage"]>)
+			promptSpy.mockImplementation(async (failures?: InstructionFailureCollector) => {
+				if (!failures) throw new Error("legacy source unreadable")
+				failures.push({ sourcePath: "/workspace/.roorules", code: "EACCES" })
+				return "readable instructions"
+			})
+			await request()
+			const warningIndex = saySpy.mock.calls.findIndex(([type]) => type === "instruction_refresh_warning")
+			expect(saySpy.mock.calls[warningIndex]).toEqual([
+				"instruction_refresh_warning",
+				"/workspace/.roorules (EACCES)",
+				undefined,
+				false,
+				undefined,
+				undefined,
+				{ isNonInteractive: true },
+			])
+			expect(saySpy.mock.invocationCallOrder[warningIndex]).toBeLessThan(createSpy.mock.invocationCallOrder[0])
+			expect(createSpy.mock.calls[0][0]).toBe("readable instructions")
+			promptSpy.mockResolvedValue("ordinary instructions")
+			await request()
+			expect(promptSpy.mock.calls.at(-1)).toEqual([undefined])
+			expect(saySpy.mock.calls.filter(([type]) => type === "instruction_refresh_warning")).toHaveLength(1)
+		})
+
+		it.each(["automatic", "recovery"])("%s warns before the first continuation only", async (trigger) => {
+			manageSpy.mockResolvedValueOnce({
+				messages: task.apiConversationHistory,
+				summary: "summary",
+				cost: 0,
+				prevContextTokens: 10,
+			})
+			if (trigger === "automatic") {
+				vi.mocked(task.getTokenUsage).mockReturnValue({ contextTokens: 10 } as ReturnType<
+					Task["getTokenUsage"]
+				>)
+			} else {
+				await task["handleContextWindowExceededError"]()
+			}
+			promptSpy.mockImplementation(async (failures?: InstructionFailureCollector) => {
+				failures?.push({ sourcePath: "rule.md", code: "EIO" })
+				return "partial guidance"
+			})
+			await request()
+			const warningIndex = saySpy.mock.calls.findIndex(([type]) => type === "instruction_refresh_warning")
+			expect(saySpy.mock.calls[warningIndex][1]).toBe("rule.md (EIO)")
+			expect(saySpy.mock.invocationCallOrder[warningIndex]).toBeLessThan(createSpy.mock.invocationCallOrder[0])
+			await request()
+			expect(saySpy.mock.calls.filter(([type]) => type === "instruction_refresh_warning")).toHaveLength(1)
+		})
+
+		it("retains the marker when the post-condensation rebuild throws", async () => {
+			vi.mocked(task.getTokenUsage).mockReturnValue({ contextTokens: 10 } as ReturnType<Task["getTokenUsage"]>)
+			manageSpy.mockResolvedValueOnce({
+				messages: task.apiConversationHistory,
+				summary: "summary",
+				cost: 0,
+				prevContextTokens: 10,
+			})
+			promptSpy.mockResolvedValueOnce("initial prompt").mockRejectedValueOnce(new Error("refresh build failed"))
+			await expect(request()).rejects.toThrow("refresh build failed")
+			expect(task["pendingInstructionRefresh"]).toBe(true)
+			expect(createSpy).not.toHaveBeenCalled()
+			await request()
+			expect(task["pendingInstructionRefresh"]).toBe(false)
+			expect(createSpy.mock.calls[0][0]).toBe(savedInstructions)
+		})
+
+		it("replaces initial refresh failures after inline condensation", async () => {
+			await task.condenseContext()
+			vi.mocked(task.getTokenUsage).mockReturnValue({ contextTokens: 10 } as ReturnType<Task["getTokenUsage"]>)
+			promptSpy.mockImplementationOnce(async (failures?: InstructionFailureCollector) => {
+				failures!.push({ sourcePath: "fixed-during-condensation", code: "EACCES" })
+				return "initial"
+			})
+			manageSpy.mockResolvedValueOnce({
+				messages: task.apiConversationHistory,
+				summary: "summary",
+				cost: 0,
+				prevContextTokens: 10,
+			})
+			await request()
+			expect(saySpy.mock.calls.some(([type]) => type === "instruction_refresh_warning")).toBe(false)
+			expect(createSpy.mock.calls[0][0]).toBe(savedInstructions)
+		})
+
+		it("retains pending refresh after an unrelated build error and consumes it on retry", async () => {
+			await task.condenseContext()
+			promptSpy.mockRejectedValueOnce(new Error("provider unavailable"))
+			await expect(request()).rejects.toThrow("provider unavailable")
+			expect(task["pendingInstructionRefresh"]).toBe(true)
+			expect(createSpy).not.toHaveBeenCalled()
+			await request()
+			expect(promptSpy.mock.calls.at(-1)?.[0]).toEqual([])
+			expect(task["pendingInstructionRefresh"]).toBe(false)
+		})
+
+		it.each(["truncation", "failed", "noop"])(
+			"%s context management keeps the ordinary single build",
+			async (outcome) => {
+				vi.mocked(task.getTokenUsage).mockReturnValue({ contextTokens: 10 } as ReturnType<
+					Task["getTokenUsage"]
+				>)
+				manageSpy.mockResolvedValueOnce({
+					messages: task.apiConversationHistory,
+					cost: 0,
+					prevContextTokens: 10,
+					summary: "",
+					...(outcome === "truncation" ? { truncationId: "truncation" } : {}),
+					...(outcome === "failed" ? { error: "condensation failed" } : {}),
+				})
+				await request()
+				expect(promptSpy).toHaveBeenCalledExactlyOnceWith(undefined)
+				expect(task["pendingInstructionRefresh"]).toBe(false)
+			},
+		)
+
+		it("failed manual condensation does not mark a refresh", async () => {
+			vi.mocked(condensation.summarizeConversation).mockResolvedValueOnce({
+				messages: task.apiConversationHistory,
+				error: "failed",
+				cost: 0,
+				summary: "",
+			})
+			await task.condenseContext()
+			expect(task["pendingInstructionRefresh"]).toBe(false)
+		})
+
+		it("threads failures and current provider state through the real system prompt entry", async () => {
+			promptSpy.mockRestore()
+			const systemSpy = vi.spyOn(systemPrompts, "SYSTEM_PROMPT").mockResolvedValue("current prompt")
+			instructionSpies.push(systemSpy)
+			mockProvider.getState.mockResolvedValue({
+				mcpEnabled: false,
+				mode: "ask",
+				customInstructions: "saved global",
+				customModePrompts: { ask: { customInstructions: "saved mode" } },
+				language: "fr",
+			})
+			const failures: InstructionFailureCollector = []
+			expect(await task["getSystemPrompt"](failures)).toBe("current prompt")
+			const argumentsPassed = systemSpy.mock.calls[0]
+			expect(argumentsPassed[1]).toBe(task.cwd)
+			expect(argumentsPassed[5]).toBe("ask")
+			expect(argumentsPassed[6]).toEqual({ ask: { customInstructions: "saved mode" } })
+			expect(argumentsPassed[8]).toBe("saved global")
+			expect(argumentsPassed[10]).toBe("fr")
+			expect(argumentsPassed[16]).toBe(failures)
+		})
 	})
 
 	describe("pending wait lifecycle", () => {

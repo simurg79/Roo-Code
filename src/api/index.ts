@@ -112,6 +112,15 @@ export interface ApiHandler {
 	getCondenseContextWindow?(): number
 
 	/**
+	 * Providers cannot trim flattened tool results; returns excess input characters for condensing (≤ 0 if they fit).
+	 */
+	measureInputOverageChars?(
+		systemPrompt: string,
+		messages: Anthropic.Messages.MessageParam[],
+		metadata?: ApiHandlerCreateMessageMetadata,
+	): number
+
+	/**
 	 * Counts tokens for content blocks
 	 * All providers extend BaseProvider which provides a default tiktoken implementation,
 	 * but they can override this to use their native token counting endpoints

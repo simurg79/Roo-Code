@@ -740,7 +740,11 @@ export const webviewMessageHandler = async (provider: ClineProvider, message: We
 			provider.showTaskWithId(message.text!)
 			break
 		case "condenseTaskContextRequest":
-			provider.condenseTaskContext(message.text!)
+			try {
+				await provider.condenseTaskContext(message.text!)
+			} catch (error) {
+				provider.log(`Failed to complete context condensation request: ${String(error)}`)
+			}
 			break
 		case "deleteTaskWithId":
 			provider.deleteTaskWithId(message.text!)
