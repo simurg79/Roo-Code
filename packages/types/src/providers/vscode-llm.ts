@@ -4,10 +4,10 @@ export type VscodeLlmModelId = keyof typeof vscodeLlmModels
 
 export const vscodeLlmDefaultModelId: VscodeLlmModelId = "claude-sonnet-4.5"
 
-// contextWindow is advertised except for claude-fable-5.5, whose window is borrowed.
-// maxInputTokens is the assigned input budget, not necessarily a measured ceiling.
-// Budgets MUST use measured acceptances; documented safety margins may only lower them, never raise or borrow values.
-// Sole user-approved exception: claude-fable-5.5 borrows claude-fable-5.1's window and budget, not measured for 5.5.
+// contextWindow is advertised except claude-fable-5.5's borrowed window.
+// maxInputTokens is the assigned budget, not necessarily a measured ceiling; MUST use measured acceptances, lowered only by documented margins.
+// User-approved, unmeasured exceptions: claude-fable-5.5 borrows claude-fable-5.1's window/budget; claude-fable-5.2 uses Copilot's advertised limit only.
+// Further exceptions require a specification change.
 // [Per-row evidence, lower-bound and vendor caveats](/myplans/vscode-lm-model-table-integrity/vscode-lm-model-table-integrity-design.md)
 export const vscodeLlmModels = {
 	// Measured 2026-09-23, VS Code 1.137.0/copilot, 13 trials: accepted 677108, rejected 695778.
@@ -235,6 +235,17 @@ export const vscodeLlmModels = {
 		name: "Claude Fable 5.5",
 		supportsToolCalling: true,
 		maxInputTokens: 660686,
+	},
+	// User-authorized Copilot advertised budget, not measured; capabilities follow other Fable rows.
+	"claude-fable-5.2": {
+		contextWindow: 871793,
+		supportsImages: true,
+		supportsPromptCache: false,
+		family: "claude-fable-5.2",
+		version: "claude-fable-5.2",
+		name: "Claude Fable 5.2",
+		supportsToolCalling: true,
+		maxInputTokens: 871793,
 	},
 	"claude-sonnet-5": {
 		contextWindow: 925449,
@@ -527,3 +538,11 @@ export const vscodeLlmModels = {
 		maxInputTokens: number
 	}
 >
+
+// Missing or unknown families use the default budget to avoid trusting an advertised window.
+// The gauge and condensation must share one curated budget.
+export function getVscodeLlmModelInfo(family: string | undefined, vendor: string | undefined) {
+	return family && (family !== "claude-fable-5.2" || vendor === "copilot")
+		? (vscodeLlmModels[family as VscodeLlmModelId] ?? vscodeLlmModels[vscodeLlmDefaultModelId])
+		: vscodeLlmModels[vscodeLlmDefaultModelId]
+}

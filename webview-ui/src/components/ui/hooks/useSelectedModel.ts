@@ -16,7 +16,7 @@ import {
 	openAiNativeModels,
 	vertexModels,
 	xaiModels,
-	vscodeLlmModels,
+	getVscodeLlmModelInfo,
 	vscodeLlmDefaultModelId,
 	openAiCodexModels,
 	sambaNovaModels,
@@ -305,15 +305,6 @@ function getSelectedModel({
 			const id = apiConfiguration?.vsCodeLmModelSelector
 				? `${apiConfiguration.vsCodeLmModelSelector.vendor}/${apiConfiguration.vsCodeLmModelSelector.family}`
 				: vscodeLlmDefaultModelId
-			const modelFamily = apiConfiguration?.vsCodeLmModelSelector?.family ?? vscodeLlmDefaultModelId
-			// On a family miss, fall back to the default model entry instead of openAiModelInfoSaneDefaults,
-			// whose 128K contextWindow would diverge from the gate and make the bar read >100% while
-			// auto-condense never fires (the gate uses the live window).
-			const listedModel =
-				vscodeLlmModels[modelFamily as keyof typeof vscodeLlmModels] ?? vscodeLlmModels[vscodeLlmDefaultModelId]
-			// contextWindow MUST equal maxInputTokens: that is the exact value the gate consumes via
-			// getModel().info.contextWindow = Math.max(0, client.maxInputTokens) in src/api/providers/vscode-lm.ts,
-			// so the UI bar and the condense gate share a single source of truth.
 			const selector = apiConfiguration.vsCodeLmModelSelector
 			const matches = selector
 				? vsCodeLmModels?.filter((model) =>
@@ -322,7 +313,11 @@ function getSelectedModel({
 						),
 					)
 				: undefined
-			const supportsImages = matches?.length === 1 ? matches[0].supportsImages : undefined
+			const liveModel = matches?.length === 1 ? matches[0] : undefined
+			const modelFamily = liveModel?.family ?? selector?.family ?? vscodeLlmDefaultModelId
+			const vendor = liveModel?.vendor ?? selector?.vendor
+			const listedModel = getVscodeLlmModelInfo(modelFamily, vendor)
+			const supportsImages = liveModel?.supportsImages
 			const info: ModelInfo = {
 				...openAiModelInfoSaneDefaults,
 				...listedModel,
