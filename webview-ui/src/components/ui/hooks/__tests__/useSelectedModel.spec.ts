@@ -841,6 +841,63 @@ describe("useSelectedModel", () => {
 			expect(result.current.info?.supportsImages).toBeUndefined()
 		})
 
+		it.each([
+			["copilot", 871793],
+			["copilotcli", 167790],
+			[undefined, 167790],
+		] as const)("feeds the Fable 5.2 gauge for selector vendor %s", (vendor, expected) => {
+			const selector = { vendor, family: "claude-fable-5.2", id: "claude-fable-5.2" }
+			const { result } = renderHook(
+				() => useSelectedModel({ apiProvider: "vscode-lm", vsCodeLmModelSelector: selector }),
+				{ wrapper: createWrapper() },
+			)
+
+			expect(result.current.info?.contextWindow).toBe(expected)
+			expect(result.current.id).toBe(`${vendor}/claude-fable-5.2`)
+			expect(selector).toEqual({ vendor, family: "claude-fable-5.2", id: "claude-fable-5.2" })
+		})
+
+		it.each([
+			["copilot", undefined, 871793],
+			["copilotcli", undefined, 167790],
+			[undefined, "copilot", 871793],
+			[undefined, "copilotcli", 167790],
+			[undefined, undefined, 167790],
+		] as const)(
+			"feeds the Fable 5.2 gauge with live vendor %s and selector vendor %s",
+			(liveVendor, selectorVendor, expected) => {
+				mockUseVsCodeLmModels.mockReturnValue({
+					data: [{ id: "claude-fable-5.2", family: "claude-fable-5.2", vendor: liveVendor }],
+				} as any)
+				const { result } = renderHook(
+					() =>
+						useSelectedModel({
+							apiProvider: "vscode-lm",
+							vsCodeLmModelSelector: {
+								id: "claude-fable-5.2",
+								vendor: selectorVendor,
+								family: selectorVendor ? "claude-fable-5.2" : undefined,
+							},
+						}),
+					{ wrapper: createWrapper() },
+				)
+
+				expect(result.current.info?.contextWindow).toBe(expected)
+			},
+		)
+
+		it("resolves a non-Fable family from the live model when the selector names only an id", () => {
+			mockUseVsCodeLmModels.mockReturnValue({
+				data: [{ id: "gemini-3.8-flash", family: "gemini-3.8-flash", vendor: "copilotcli" }],
+			} as any)
+			const { result } = renderHook(
+				() => useSelectedModel({ apiProvider: "vscode-lm", vsCodeLmModelSelector: { id: "gemini-3.8-flash" } }),
+				{ wrapper: createWrapper() },
+			)
+
+			expect(result.current.info?.contextWindow).toBe(955113)
+		})
+
 		it("reads the same row regardless of the user-selected vendor", () => {
 			const wrapper = createWrapper()
 			const forVendor = (vendor: string) =>

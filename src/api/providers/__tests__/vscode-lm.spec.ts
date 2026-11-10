@@ -190,6 +190,7 @@ describe("VsCodeLmHandler", () => {
 			["claude-fable-5.1", 660686],
 			["claude-fable-5", 658785],
 			["claude-fable-5.5", 660686],
+			["claude-fable-5.2", 871793],
 		])("resolves %s to its assigned static budget when the live client reports it", (family, expected) => {
 			const familyHandler = new VsCodeLmHandler({
 				vsCodeLmModelSelector: { vendor: "copilot", family: "claude-sonnet-4.5" },
@@ -197,6 +198,7 @@ describe("VsCodeLmHandler", () => {
 			familyHandler["client"] = {
 				...mockLanguageModelChat,
 				family,
+				vendor: "copilot",
 			} as unknown as vscode.LanguageModelChat
 
 			expect(familyHandler.getCondenseContextWindow()).toBe(expected)
@@ -206,6 +208,42 @@ describe("VsCodeLmHandler", () => {
 
 			familyHandler.dispose()
 		})
+
+		it.each([
+			["copilot", 871793],
+			["copilotcli", 167790],
+			[undefined, 167790],
+		] as const)("resolves Fable 5.2 from selector vendor %s", (vendor, expected) => {
+			const selector = { vendor, family: "claude-fable-5.2", id: "claude-fable-5.2" }
+			const fableHandler = new VsCodeLmHandler({ vsCodeLmModelSelector: selector })
+
+			expect(fableHandler.getCondenseContextWindow()).toBe(expected)
+			expect(fableHandler["options"].vsCodeLmModelSelector).toEqual(selector)
+			fableHandler.dispose()
+		})
+
+		it.each([
+			["copilot", "copilotcli", 871793],
+			["copilotcli", "copilot", 167790],
+			[undefined, "copilot", 871793],
+			[undefined, "copilotcli", 167790],
+			[undefined, undefined, 167790],
+		] as const)(
+			"resolves Fable 5.2 with live vendor %s ahead of selector vendor %s",
+			(liveVendor, selectorVendor, expected) => {
+				const fableHandler = new VsCodeLmHandler({
+					vsCodeLmModelSelector: { vendor: selectorVendor, family: "claude-fable-5.2" },
+				})
+				fableHandler["client"] = {
+					...mockLanguageModelChat,
+					family: "claude-fable-5.2",
+					vendor: liveVendor,
+				} as unknown as vscode.LanguageModelChat
+
+				expect(fableHandler.getCondenseContextWindow()).toBe(expected)
+				fableHandler.dispose()
+			},
+		)
 
 		it("falls back to the claude-sonnet-4.5 row (167790) for a family absent from the table", () => {
 			const unknownHandler = new VsCodeLmHandler({
