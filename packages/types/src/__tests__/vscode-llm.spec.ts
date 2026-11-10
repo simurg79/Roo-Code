@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest"
 
-import { vscodeLlmModels, vscodeLlmDefaultModelId } from "../providers/vscode-llm.js"
+import { getVscodeLlmModelInfo, vscodeLlmModels, vscodeLlmDefaultModelId } from "../providers/vscode-llm.js"
 
 // The five families added and the two refreshed on 2026-09-10 (VS Code 1.137.0), with Astra remeasured 2026-09-23.
 const SCOPED_ROWS = {
@@ -12,6 +12,38 @@ const SCOPED_ROWS = {
 	"claude-opus-5": { contextWindow: 935793, maxInputTokens: 680456, supportsImages: true },
 	"gemini-3.6-flash": { contextWindow: 935793, maxInputTokens: 935785, supportsImages: true },
 } as const
+
+describe("getVscodeLlmModelInfo", () => {
+	it.each(["copilot", "copilotcli", "unknown-vendor", undefined])(
+		"resolves other known families independently of vendor %s",
+		(vendor) => {
+			for (const [family, model] of Object.entries(vscodeLlmModels)) {
+				if (family !== "claude-fable-5.2") {
+					expect(getVscodeLlmModelInfo(family, vendor)).toBe(model)
+				}
+			}
+		},
+	)
+
+	it.each([undefined, "", "unknown-family"])("keeps the default row for family %s", (family) => {
+		expect(getVscodeLlmModelInfo(family, "copilot")).toBe(vscodeLlmModels[vscodeLlmDefaultModelId])
+	})
+
+	it("resolves Fable 5.2's advertised budget for Copilot", () => {
+		const model = getVscodeLlmModelInfo("claude-fable-5.2", "copilot")
+		expect(model).toBe(vscodeLlmModels["claude-fable-5.2"])
+		expect(model.maxInputTokens).toBe(871793)
+	})
+
+	it.each(["copilotcli", "unknown-vendor", undefined])(
+		"keeps the default row for Fable 5.2 with vendor %s",
+		(vendor) => {
+			const model = getVscodeLlmModelInfo("claude-fable-5.2", vendor)
+			expect(model).toBe(vscodeLlmModels[vscodeLlmDefaultModelId])
+			expect(model.maxInputTokens).toBe(167790)
+		},
+	)
+})
 
 describe("vscodeLlmModels", () => {
 	it("exposes the opus-4.8 row with its measured maxInputTokens and contextWindow", () => {

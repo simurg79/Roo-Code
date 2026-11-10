@@ -16,7 +16,7 @@ import {
 	openAiNativeModels,
 	vertexModels,
 	xaiModels,
-	vscodeLlmModels,
+	getVscodeLlmModelInfo,
 	vscodeLlmDefaultModelId,
 	openAiCodexModels,
 	sambaNovaModels,
@@ -316,12 +316,7 @@ function getSelectedModel({
 			const liveModel = matches?.length === 1 ? matches[0] : undefined
 			const modelFamily = liveModel?.family ?? selector?.family ?? vscodeLlmDefaultModelId
 			const vendor = liveModel?.vendor ?? selector?.vendor
-			// Fable 5.2's advertised budget must not affect other vendors.
-			const listedModel =
-				modelFamily !== "claude-fable-5.2" || vendor === "copilot"
-					? (vscodeLlmModels[modelFamily as keyof typeof vscodeLlmModels] ??
-						vscodeLlmModels[vscodeLlmDefaultModelId])
-					: vscodeLlmModels[vscodeLlmDefaultModelId]
+			const listedModel = getVscodeLlmModelInfo(modelFamily, vendor)
 			const supportsImages = liveModel?.supportsImages
 			const info: ModelInfo = {
 				...openAiModelInfoSaneDefaults,

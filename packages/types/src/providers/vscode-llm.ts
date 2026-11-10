@@ -538,3 +538,11 @@ export const vscodeLlmModels = {
 		maxInputTokens: number
 	}
 >
+
+// Missing or unknown families use the default budget to avoid trusting an advertised window.
+// The gauge and condensation must share one curated budget.
+export function getVscodeLlmModelInfo(family: string | undefined, vendor: string | undefined) {
+	return family && (family !== "claude-fable-5.2" || vendor === "copilot")
+		? (vscodeLlmModels[family as VscodeLlmModelId] ?? vscodeLlmModels[vscodeLlmDefaultModelId])
+		: vscodeLlmModels[vscodeLlmDefaultModelId]
+}

@@ -2,7 +2,7 @@ import { Anthropic } from "@anthropic-ai/sdk"
 import * as vscode from "vscode"
 import OpenAI from "openai"
 
-import { type ModelInfo, openAiModelInfoSaneDefaults, vscodeLlmDefaultModelId, vscodeLlmModels } from "@roo-code/types"
+import { type ModelInfo, openAiModelInfoSaneDefaults, getVscodeLlmModelInfo } from "@roo-code/types"
 
 import type { ApiHandlerOptions } from "../../shared/api"
 import { SELECTOR_SEPARATOR, stringifyVsCodeLmModelSelector } from "../../shared/vsCodeSelectorUtils"
@@ -1206,10 +1206,7 @@ export class VsCodeLmHandler extends BaseProvider implements SingleCompletionHan
 	getCondenseContextWindow(): number {
 		const family = this.client?.family ?? this.options.vsCodeLmModelSelector?.family
 		const vendor = this.client?.vendor ?? this.options.vsCodeLmModelSelector?.vendor
-		const staticModel =
-			family && (family !== "claude-fable-5.2" || vendor === "copilot")
-				? (vscodeLlmModels[family as keyof typeof vscodeLlmModels] ?? vscodeLlmModels[vscodeLlmDefaultModelId])
-				: vscodeLlmModels[vscodeLlmDefaultModelId]
+		const staticModel = getVscodeLlmModelInfo(family, vendor)
 
 		if (staticModel && typeof staticModel.maxInputTokens === "number" && staticModel.maxInputTokens > 0) {
 			return staticModel.maxInputTokens
