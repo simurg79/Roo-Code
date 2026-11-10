@@ -1,6 +1,12 @@
 import { APIConnectionError, APIConnectionTimeoutError, APIUserAbortError } from "openai"
 import { QdrantClientTimeoutError } from "@qdrant/js-client-rest"
-import { classifyIndexingError, getIndexingErrorStatusCode, EmbeddingError, VectorStoreError } from "../indexing-errors"
+import {
+	classifyIndexingError,
+	getIndexingErrorStatusCode,
+	EmbeddingError,
+	VectorStoreError,
+	parseRetryAfterMs,
+} from "../indexing-errors"
 import { formatEmbeddingError } from "../validation-helpers"
 
 vi.mock("../../../../i18n", () => ({ t: (key: string) => key }))
@@ -70,10 +76,39 @@ describe("indexing error classification", () => {
 
 	it("classifies raw errors before translated formatting", () => {
 		const cause = new APIConnectionTimeoutError()
-		const error = formatEmbeddingError(cause, 3)
+		const error = formatEmbeddingError(cause)
 		expect(error).toBeInstanceOf(EmbeddingError)
 		expect(error.message).toBe("embeddings:failedWithError")
 		expect(error.cause).toBe(cause)
 		expect(error.classification).toBe("connection")
+	})
+})
+
+describe("parseRetryAfterMs", () => {
+	const now = Date.parse("2026-11-10T12:00:00Z")
+	it.each([
+		[{ "Retry-After": "2" }, 2000],
+		[new Headers({ "retry-after-ms": "2500", "retry-after": "60" }), 2500],
+		[{ "retry-after-ms": "invalid", "retry-after": "60" }, 60_000],
+		[{ "retry-after-ms": "-1", "retry-after": "61" }, 61_000],
+		[{ "retry-after": new Date(now + 61_000).toUTCString() }, 61_000],
+		[{ "retry-after": new Date(now - 1000).toUTCString() }, undefined],
+		[{ "retry-after": "-1" }, undefined],
+		[{ "retry-after": "" }, undefined],
+		[{ "retry-after": "invalid" }, undefined],
+		[{ "retry-after": "Infinity" }, undefined],
+		[7, 7000],
+		[0, 0],
+		[-1, undefined],
+		[Infinity, undefined],
+		[undefined, undefined],
+	] as const)("parses %o", (source, expected) => {
+		expect(parseRetryAfterMs(source, now)).toBe(expected)
+	})
+
+	it.each([EmbeddingError, VectorStoreError])("preserves delay and explicit override in %s", (ErrorClass) => {
+		const cause = { status: 429, headers: new Headers({ "retry-after": "2" }) }
+		expect(new ErrorClass("limited", cause)).toMatchObject({ retryAfterMs: 2000, cause })
+		expect(new ErrorClass("limited", cause, { retryAfterMs: 7000 })).toMatchObject({ retryAfterMs: 7000 })
 	})
 })

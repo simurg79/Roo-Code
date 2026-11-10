@@ -1,25 +1,19 @@
 import { codeIndexLog } from "../code-index-log"
 import { BedrockRuntimeClient, InvokeModelCommand, InvokeModelCommandInput } from "@aws-sdk/client-bedrock-runtime"
 import { fromIni, fromNodeProviderChain } from "@aws-sdk/credential-providers"
-import { waitForRetry } from "./cancellation"
 import type { TransientClass } from "../shared/indexing-errors"
 import { IEmbedder, EmbeddingResponse, EmbedderInfo } from "../interfaces"
-import {
-	MAX_BATCH_TOKENS,
-	MAX_ITEM_TOKENS,
-	MAX_BATCH_RETRIES as MAX_RETRIES,
-	INITIAL_RETRY_DELAY_MS as INITIAL_DELAY_MS,
-} from "../constants"
+import { MAX_BATCH_TOKENS, MAX_ITEM_TOKENS } from "../constants"
 import { getDefaultModelId } from "../../../shared/embeddingModels"
 import { Package } from "../../../shared/package"
 import { t } from "../../../i18n"
-import { withValidationErrorHandling, formatEmbeddingError, HttpError } from "../shared/validation-helpers"
+import { withValidationErrorHandling, formatEmbeddingError } from "../shared/validation-helpers"
 
 /**
- * Amazon Bedrock implementation of the embedder interface with batching and rate limiting
+ * Amazon Bedrock implementation of the embedder interface with batching
  */
 export class BedrockEmbedder implements IEmbedder {
-	readonly internallyRetriedClasses: ReadonlySet<TransientClass> = new Set(["rate-limit"])
+	readonly internallyRetriedClasses: ReadonlySet<TransientClass> = new Set()
 	private bedrockClient: BedrockRuntimeClient
 	private readonly defaultModelId: string
 
@@ -52,11 +46,10 @@ export class BedrockEmbedder implements IEmbedder {
 		this.defaultModelId = modelId || getDefaultModelId("bedrock")
 	}
 
-	/**
-	 * Creates embeddings for the given texts with batching and rate limiting
-	 * @param texts Array of text strings to embed
+	/** Embeds texts in batches.
+	 * @param texts Texts to embed
 	 * @param model Optional model identifier
-	 * @returns Promise resolving to embedding response
+	 * @returns Embedding response
 	 */
 	async createEmbeddings(texts: string[], model?: string, signal?: AbortSignal): Promise<EmbeddingResponse> {
 		signal?.throwIfAborted()
@@ -103,7 +96,7 @@ export class BedrockEmbedder implements IEmbedder {
 			}
 
 			if (currentBatch.length > 0) {
-				const batchResult = await this._embedBatchWithRetries(currentBatch, modelToUse, signal)
+				const batchResult = await this._embedBatch(currentBatch, modelToUse, signal)
 				allEmbeddings.push(...batchResult.embeddings)
 				usage.promptTokens += batchResult.usage.promptTokens
 				usage.totalTokens += batchResult.usage.totalTokens
@@ -113,69 +106,38 @@ export class BedrockEmbedder implements IEmbedder {
 		return { embeddings: allEmbeddings, usage }
 	}
 
-	/**
-	 * Helper method to handle batch embedding with retries and exponential backoff
-	 * @param batchTexts Array of texts to embed in this batch
-	 * @param model Model identifier to use
-	 * @returns Promise resolving to embeddings and usage statistics
-	 */
-	private async _embedBatchWithRetries(
+	private async _embedBatch(
 		batchTexts: string[],
 		model: string,
 		signal?: AbortSignal,
 	): Promise<{ embeddings: number[][]; usage: { promptTokens: number; totalTokens: number } }> {
-		for (let attempts = 0; attempts < MAX_RETRIES; attempts++) {
-			try {
+		try {
+			signal?.throwIfAborted()
+			const embeddings: number[][] = []
+			let totalPromptTokens = 0
+			let totalTokens = 0
+
+			// Amazon Titan models typically need one request per text.
+			for (const text of batchTexts) {
 				signal?.throwIfAborted()
-				const embeddings: number[][] = []
-				let totalPromptTokens = 0
-				let totalTokens = 0
-
-				// Process each text in the batch
-				// Note: Amazon Titan models typically don't support batch embedding in a single request
-				// So we process them individually
-				for (const text of batchTexts) {
-					signal?.throwIfAborted()
-					const embedding = await this._invokeEmbeddingModel(text, model, signal)
-					embeddings.push(embedding.embedding)
-					totalPromptTokens += embedding.inputTextTokenCount || 0
-					totalTokens += embedding.inputTextTokenCount || 0
-				}
-
-				return {
-					embeddings,
-					usage: {
-						promptTokens: totalPromptTokens,
-						totalTokens,
-					},
-				}
-			} catch (error: any) {
-				signal?.throwIfAborted()
-				const hasMoreAttempts = attempts < MAX_RETRIES - 1
-
-				// Check if it's a rate limit error
-				if (error.name === "ThrottlingException" && hasMoreAttempts) {
-					const delayMs = INITIAL_DELAY_MS * Math.pow(2, attempts)
-					codeIndexLog.warn(
-						t("embeddings:rateLimitRetry", {
-							delayMs,
-							attempt: attempts + 1,
-							maxRetries: MAX_RETRIES,
-						}),
-					)
-					await waitForRetry(delayMs, signal)
-					continue
-				}
-
-				// Log the error for debugging
-				codeIndexLog.error(`Bedrock embedder error (attempt ${attempts + 1}/${MAX_RETRIES}):`, error)
-
-				// Format and throw the error
-				throw formatEmbeddingError(error, MAX_RETRIES)
+				const embedding = await this._invokeEmbeddingModel(text, model, signal)
+				embeddings.push(embedding.embedding)
+				totalPromptTokens += embedding.inputTextTokenCount || 0
+				totalTokens += embedding.inputTextTokenCount || 0
 			}
-		}
 
-		throw new Error(t("embeddings:failedMaxAttempts", { attempts: MAX_RETRIES }))
+			return {
+				embeddings,
+				usage: {
+					promptTokens: totalPromptTokens,
+					totalTokens,
+				},
+			}
+		} catch (error) {
+			signal?.throwIfAborted()
+			codeIndexLog.error("Bedrock embedder error:", error)
+			throw formatEmbeddingError(error)
+		}
 	}
 
 	/**

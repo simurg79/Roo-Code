@@ -1,6 +1,26 @@
 import { FileFailureRegistry } from "../file-failure-registry"
 
 describe("FileFailureRegistry", () => {
+	it("shares retry counters only within one path, revision and operation", () => {
+		const registry = new FileFailureRegistry()
+		registry.renew("a.ts", "one")
+		registry.renew("b.ts", "one")
+		const budget = registry.getRetryBudget("a.ts", "one", "embed")
+		budget.retriesUsed = 2
+		expect(registry.getRetryBudget("a.ts", "one", "embed")).toBe(budget)
+		expect(registry.getRetryBudget("a.ts", "one", "upsert").retriesUsed).toBe(0)
+		registry.renew("b.ts", "two")
+		expect(registry.getRetryBudget("a.ts", "one", "embed").retriesUsed).toBe(2)
+		registry.renew("a.ts", "two")
+		expect(registry.getRetryBudget("a.ts", "two", "embed").retriesUsed).toBe(0)
+		registry.getRetryBudget("a.ts", "two", "embed").retriesUsed = 1
+		registry.resetAllBudgets()
+		expect(registry.getRetryBudget("a.ts", "two", "embed").retriesUsed).toBe(0)
+		registry.getRetryBudget("a.ts", "two", "embed").retriesUsed = 1
+		registry.clear("a.ts", "two")
+		expect(registry.getRetryBudget("a.ts", "two", "embed").retriesUsed).toBe(0)
+	})
+
 	it("retains exhausted budgets per revision and operation until explicit reset", () => {
 		const registry = new FileFailureRegistry()
 		registry.renew("a.ts", "one")

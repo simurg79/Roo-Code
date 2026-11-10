@@ -1,9 +1,9 @@
 {
 	"unknownError": "Unknown error",
 	"authenticationFailed": "Failed to create embeddings: Authentication failed. Please check your API key.",
-	"failedWithStatus": "Failed to create embeddings after {{attempts}} attempts: HTTP {{statusCode}} - {{errorMessage}}",
-	"failedWithError": "Failed to create embeddings after {{attempts}} attempts: {{errorMessage}}",
-	"failedMaxAttempts": "Failed to create embeddings after {{attempts}} attempts",
+	"failedWithStatus": "Failed to create embeddings: HTTP {{statusCode}} - {{errorMessage}}",
+	"failedWithError": "Failed to create embeddings: {{errorMessage}}",
+	"failedMaxAttempts": "Failed to create embeddings",
 	"textExceedsTokenLimit": "Text at index {{index}} exceeds maximum token limit ({{itemTokens}} > {{maxTokens}}). Skipping.",
 	"rateLimitRetry": "Rate limit hit, retrying in {{delayMs}}ms (attempt {{attempt}}/{{maxRetries}})",
 	"ollama": {

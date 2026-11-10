@@ -165,6 +165,27 @@ describe("FileIndexWriter", () => {
 		},
 	)
 
+	it.each(["embed", "upsert"])("shares exactly two %s retries across batches", async (activity) => {
+		const request = activity === "embed" ? embedder.createEmbeddings : store.upsertPoints
+		const success = request.getMockImplementation()!
+		request.mockRejectedValueOnce({ status: 503 }).mockRejectedValueOnce({ status: 503 })
+		request.mockImplementationOnce(success).mockRejectedValue({ status: 503 })
+		const pending = writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal, 1).catch((error) => error)
+		await vi.advanceTimersByTimeAsync(1500)
+		expect(await pending).toMatchObject({ activity, attempts: 3 })
+		expect(request).toHaveBeenCalledTimes(4)
+		expect(failures.list()[0]).toMatchObject({ activity, attempt: 3, state: "exhausted" })
+		await expect(writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal, 1)).rejects.toThrow()
+		expect(request).toHaveBeenCalledTimes(4)
+	})
+
+	it("does not charge successful batch first calls against retries", async () => {
+		await writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal, 1)
+		expect(embedder.createEmbeddings).toHaveBeenCalledTimes(2)
+		expect(store.upsertPoints).toHaveBeenCalledTimes(2)
+		expect(failures.list()).toEqual([])
+	})
+
 	it("keeps exhausted store budgets across writer recreation and unrelated renewal", async () => {
 		store.upsertPoints.mockRejectedValue(Object.assign(new Error("unavailable"), { status: 503 }))
 		const pending = writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal).catch((error) => error)

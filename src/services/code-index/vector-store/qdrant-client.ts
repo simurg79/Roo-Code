@@ -1,6 +1,6 @@
 import { codeIndexLog } from "../code-index-log"
 import { QdrantClient, QdrantClientResourceExhaustedError, Schemas } from "@qdrant/js-client-rest"
-import { VectorStoreError } from "../shared/indexing-errors"
+import { parseRetryAfterMs, VectorStoreError } from "../shared/indexing-errors"
 import { createHash } from "crypto"
 import * as path from "path"
 import { v5 as uuidv5 } from "uuid"
@@ -15,7 +15,7 @@ function normalizeVectorStoreError(error: unknown): VectorStoreError {
 		error instanceof Error ? error.message : String(error),
 		error,
 		error instanceof QdrantClientResourceExhaustedError
-			? { classification: "rate-limit", statusCode: 429 }
+			? { classification: "rate-limit", statusCode: 429, retryAfterMs: parseRetryAfterMs(error.retry_after) }
 			: undefined,
 	)
 }

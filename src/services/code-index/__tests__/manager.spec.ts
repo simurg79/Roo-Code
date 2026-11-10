@@ -1327,6 +1327,27 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 			expect(mockStateManager.setSystemState).not.toHaveBeenCalledWith("Error", expect.any(String))
 		})
 
+		it("T27 forwards the caller signal through the manager to query embedding", async () => {
+			mockServiceFactoryInstance.validateEmbedder.mockResolvedValue({ valid: true })
+			mockEmbedder.createEmbeddings = vi.fn().mockResolvedValue({ embeddings: [[1, 0]] })
+			mockVectorStore.search = vi.fn().mockResolvedValue([])
+			mockStateManager.getCurrentStatus.mockReturnValue({ systemStatus: "Indexing" })
+			;(manager as any)._cacheManager = {}
+			await (manager as any)._recreateServices()
+			mockStateManager.setSystemState.mockClear()
+			const controller = new AbortController()
+			await manager.searchIndex("query", "src", controller.signal)
+			expect(mockEmbedder.createEmbeddings).toHaveBeenCalledWith(["query"], undefined, controller.signal)
+			expect(mockVectorStore.search).toHaveBeenCalledOnce()
+			controller.abort()
+			await expect(manager.searchIndex("query", undefined, controller.signal)).rejects.toMatchObject({
+				name: "AbortError",
+			})
+			expect(mockEmbedder.createEmbeddings).toHaveBeenCalledOnce()
+			expect(mockStateManager.setSystemState).not.toHaveBeenCalled()
+			expect(manager.fileFailureRegistry.list()).toEqual([])
+		})
+
 		it("injects the same failure registry into recreated search services", async () => {
 			mockServiceFactoryInstance.validateEmbedder.mockResolvedValue({ valid: true })
 			mockEmbedder.createEmbeddings = vi.fn().mockResolvedValue({ embeddings: [[1, 0]] })

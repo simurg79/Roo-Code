@@ -3,15 +3,10 @@ import { CacheManager } from "./cache-manager"
 import { GenerationAllocator } from "./generation-allocator"
 import { IndexWriteGate } from "./index-write-gate"
 import { CodeBlock, IEmbedder, IVectorStore } from "./interfaces"
-import {
-	BATCH_SEGMENT_THRESHOLD,
-	QDRANT_CODE_BLOCK_NAMESPACE,
-	FILE_RETRY_ATTEMPTS,
-	FILE_RETRY_BASE_DELAY_MS,
-} from "./constants"
+import { BATCH_SEGMENT_THRESHOLD, QDRANT_CODE_BLOCK_NAMESPACE } from "./constants"
 import { FileFailureRegistry, REMOVAL_REVISION, type FileFailureActivity } from "./file-failure-registry"
-import { classifyIndexingError, type TransientClass } from "./shared/indexing-errors"
-import { waitForRetry } from "./embedders/cancellation"
+import { type TransientClass } from "./shared/indexing-errors"
+import { retryWithPolicy } from "./shared/retry-policy"
 import { toIndexPath } from "../glob/discovery-options"
 import { throwIfAborted } from "./parser-errors"
 
@@ -99,37 +94,29 @@ export class FileIndexWriter {
 		const relativePath = toIndexPath(file, this.workspacePath)
 		const previous = this.failures.getFailure(relativePath, revision, activity)
 		if (previous?.state === "exhausted") throw Object.assign(new Error(previous.reason), previous)
-		let attempt = previous?.attempt ?? 0
-		while (true) {
-			throwIfAborted(signal)
-			attempt++
-			try {
-				return await this.run(signal, operation, activity === "upsert" || activity === "delete" ? [file] : [])
-			} catch (error) {
-				throwIfAborted(signal)
-				const classification = classifyIndexingError(error, signal)
-				const willRetry =
-					classification !== "permanent" &&
-					!ownedClasses?.has(classification) &&
-					attempt < FILE_RETRY_ATTEMPTS
-				const reason = error instanceof Error ? error.message : String(error)
-				this.failures.record(
-					relativePath,
-					revision,
-					activity,
-					reason,
-					attempt,
-					willRetry ? "retrying" : "exhausted",
-					classification,
-				)
-				if (!willRetry)
-					throw Object.assign(error instanceof Error ? error : new Error(reason), {
-						activity,
-						attempts: attempt,
-						classification,
-					})
-				await waitForRetry(FILE_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), signal)
-			}
+		try {
+			return await retryWithPolicy(
+				() => this.run(signal, operation, activity === "upsert" || activity === "delete" ? [file] : []),
+				{
+					signal,
+					ownedClasses,
+					budget: this.failures.getRetryBudget(relativePath, revision, activity),
+					onFailure: ({ error, attempt, willRetry, classification, ...delay }) => {
+						this.failures.record(
+							relativePath,
+							revision,
+							activity,
+							error instanceof Error ? error.message : String(error),
+							attempt,
+							willRetry ? "retrying" : "exhausted",
+							classification,
+							delay,
+						)
+					},
+				},
+			)
+		} catch (error) {
+			throw Object.assign(error instanceof Error ? error : new Error(String(error)), { activity })
 		}
 	}
 

@@ -3,3 +3,6 @@ packages:
     - "webview-ui" # Should be apps/vscode-webview
     - "apps/*"
     - "packages/*"
+
+patchedDependencies:
+    "@qdrant/js-client-rest@1.14.0": patches/@qdrant__js-client-rest@1.14.0.patch

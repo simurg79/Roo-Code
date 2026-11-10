@@ -6,6 +6,8 @@ import { loadRequiredLanguageParsers } from "../../../tree-sitter/languageParser
 import { parseMarkdown } from "../../../tree-sitter/markdownParser"
 import { readFile } from "fs/promises"
 import { Node } from "web-tree-sitter"
+import { createHash } from "crypto"
+import { MAX_BLOCK_CHARS } from "../../constants"
 
 // Override Jest-based fs/promises mock with vitest-compatible version
 vi.mock("fs/promises", () => ({
@@ -295,6 +297,127 @@ describe("CodeParser", () => {
 	})
 
 	describe("_chunkTextByLines", () => {
+		it("keeps surrogate-safe long-line splitting linear on a 1/2/4/8 input ladder", () => {
+			const source = ("a".repeat(MAX_BLOCK_CHARS - 1) + "\u{1f600}").repeat(32)
+			const inputs = [1, 2, 4, 8].map((scale) => source.repeat(scale))
+			const measure = (content: string) => {
+				const samples: number[] = []
+				for (let sample = 0; sample < 5; sample++) {
+					const started = performance.now()
+					for (let repeat = 0; repeat < 40; repeat++) {
+						parser.fallbackContent("test.txt", content, "hash")
+					}
+					samples.push(performance.now() - started)
+				}
+				return Math.min(...samples)
+			}
+			for (const content of inputs) parser.fallbackContent("test.txt", content, "hash")
+			for (let warmup = 0; warmup < 40; warmup++) parser.fallbackContent("test.txt", source, "hash")
+			const timings = inputs.map(measure)
+			process.stdout.write(
+				"Long-line ladder (UTF-16 units, minimum ms/40 parses): " +
+					inputs.map((content, index) => `${content.length}: ${timings[index].toFixed(3)}`).join("; ") +
+					"\n",
+			)
+			process.stdout.write(`Long-line 4x/1x ratio: ${(timings[2] / timings[0]).toFixed(3)}\n`)
+			expect(timings[2] / timings[0]).toBeLessThan(9)
+			expect(timings[3] / timings[0]).toBeLessThan(18)
+		})
+
+		it.each([MAX_BLOCK_CHARS - 2, MAX_BLOCK_CHARS - 1, MAX_BLOCK_CHARS])(
+			"T28 keeps a surrogate pair whole at offset %i and rejoins the line",
+			(pairOffset) => {
+				const line = "a".repeat(pairOffset) + "\u{1f600}" + "b".repeat(MAX_BLOCK_CHARS + 17)
+				const blocks = parser["_chunkTextByLines"]([line], "test.js", "hash", "test_type", new Set(), 42)
+				expect(blocks.map((block) => block.content).join("")).toBe(line)
+				expect(blocks[0].content.length).toBe(
+					pairOffset === MAX_BLOCK_CHARS - 1 ? MAX_BLOCK_CHARS - 1 : MAX_BLOCK_CHARS,
+				)
+				let actualOffset = 0
+				for (const block of blocks) {
+					expect(Buffer.from(block.content, "utf8").toString("utf8")).toBe(block.content)
+					expect(block.content.length).toBeLessThanOrEqual(MAX_BLOCK_CHARS)
+					expect(block).toMatchObject({ start_line: 42, end_line: 42, type: "test_type_segment" })
+					expect(block.segmentHash).toBe(
+						createHash("sha256")
+							.update(
+								`test.js-42-42-${actualOffset}-${block.content.length}-${block.content.slice(0, 100)}`,
+							)
+							.digest("hex"),
+					)
+					actualOffset += block.content.length
+				}
+			},
+		)
+
+		it("T28 uses each adjusted cut for consecutive pairs and preserves a short tail", () => {
+			const line =
+				"a".repeat(MAX_BLOCK_CHARS - 1) +
+				("\u{1f600}" + "a".repeat(MAX_BLOCK_CHARS - 3)).repeat(3) +
+				"\u{1f680}"
+			const blocks = parser["_chunkTextByLines"]([line], "test.js", "hash", "test_type", new Set())
+			expect(blocks.map((block) => block.content.length)).toEqual([999, 999, 999, 999, 2])
+			expect(blocks.map((block) => block.content).join("")).toBe(line)
+			for (const block of blocks) {
+				expect(Buffer.from(block.content, "utf8").toString("utf8")).toBe(block.content)
+			}
+			expect(new Set(blocks.map((block) => block.segmentHash)).size).toBe(blocks.length)
+		})
+
+		it.each(["test.md", "test.scala", "test.js"])(
+			"T28 preserves long-line Unicode through parseFile for %s",
+			async (filePath) => {
+				const line = "a".repeat(MAX_BLOCK_CHARS - 1) + "\u{1f600}" + "漢é".repeat(MAX_BLOCK_CHARS)
+				vi.mocked(parseMarkdown).mockReturnValue([])
+				mockLanguageParser.js.query.captures.mockReturnValue([])
+				const blocks = await parser.parseFile(filePath, { content: line })
+				expect(blocks.length).toBeGreaterThan(1)
+				expect(blocks.map((block) => block.content).join("")).toBe(line)
+				for (const block of blocks) {
+					expect(Buffer.from(block.content, "utf8").toString("utf8")).toBe(block.content)
+				}
+			},
+		)
+
+		it.each(["ascii", "accented", "cjk", "combining", "bmp-limits"])(
+			"keeps old long-line segmentation and hashes unchanged for the %s BMP corpus",
+			(corpus) => {
+				const seeds: Record<string, string> = {
+					ascii: "const example = value => value.toUpperCase(); ",
+					accented: "café naïve résumé Ελληνικά Кириллица ",
+					cjk: "漢字かなカナ한국어 ",
+					combining: "e\u0301 a\u0308 \u200d \ufe0f ",
+					"bmp-limits": "\ud7ff\ue000\ufffd\uffff ",
+				}
+				const line = seeds[corpus].repeat(500)
+				const expected = []
+				let remainingLineContent = line
+				let currentSegmentStartChar = 0
+				while (remainingLineContent.length > 0) {
+					const segment = remainingLineContent.substring(0, MAX_BLOCK_CHARS)
+					remainingLineContent = remainingLineContent.substring(MAX_BLOCK_CHARS)
+					expected.push({
+						file_path: "test.js",
+						identifier: null,
+						type: "test_type_segment",
+						start_line: 42,
+						end_line: 42,
+						content: segment,
+						segmentHash: createHash("sha256")
+							.update(
+								`test.js-42-42-${currentSegmentStartChar}-${segment.length}-${segment.slice(0, 100)}`,
+							)
+							.digest("hex"),
+						fileHash: "hash",
+					})
+					currentSegmentStartChar += MAX_BLOCK_CHARS
+				}
+				expect(parser["_chunkTextByLines"]([line], "test.js", "hash", "test_type", new Set(), 42)).toEqual(
+					expected,
+				)
+			},
+		)
+
 		it("should handle oversized lines by splitting them", async () => {
 			const longLine = "a".repeat(2000)
 			const lines = ["normal", longLine, "normal"]

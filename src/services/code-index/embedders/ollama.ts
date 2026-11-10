@@ -4,8 +4,8 @@ import { EmbedderInfo, EmbeddingResponse, IEmbedder } from "../interfaces"
 import { getModelQueryPrefix } from "../../../shared/embeddingModels"
 import { MAX_ITEM_TOKENS } from "../constants"
 import { t } from "../../../i18n"
-import { withValidationErrorHandling, sanitizeErrorMessage } from "../shared/validation-helpers"
-import { EmbeddingError, type TransientClass } from "../shared/indexing-errors"
+import { withValidationErrorHandling } from "../shared/validation-helpers"
+import { EmbeddingError, parseRetryAfterMs, type TransientClass } from "../shared/indexing-errors"
 
 // Timeout constants for Ollama API requests
 const OLLAMA_EMBEDDING_TIMEOUT_MS = 60000 // 60 seconds for embedding requests
@@ -98,6 +98,7 @@ export class CodeIndexOllamaEmbedder implements IEmbedder {
 						errorBody,
 					}),
 					response,
+					{ retryAfterMs: parseRetryAfterMs(response.headers) },
 				)
 			}
 
@@ -130,7 +131,9 @@ export class CodeIndexOllamaEmbedder implements IEmbedder {
 			}
 
 			// Re-throw a more specific error for the caller
-			throw new EmbeddingError(t("embeddings:ollama.embeddingFailed", { message: error.message }), error)
+			throw new EmbeddingError(t("embeddings:ollama.embeddingFailed", { message: error.message }), error, {
+				retryAfterMs: error instanceof EmbeddingError ? error.retryAfterMs : undefined,
+			})
 		} finally {
 			clearTimeout(timeoutId)
 		}

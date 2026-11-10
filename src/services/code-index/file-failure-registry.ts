@@ -1,5 +1,6 @@
 import type { Disposable, Event } from "vscode"
 import type { IndexingErrorClassification } from "./shared/indexing-errors"
+import type { RetryBudget, RetryFailure } from "./shared/retry-policy"
 
 export type FileFailureActivity = "read" | "parse" | "embed" | "upsert" | "delete" | "verify"
 export type FileFailureState = "retrying" | "exhausted"
@@ -14,12 +15,16 @@ export interface FailedFile {
 	classification: IndexingErrorClassification
 	attempt: number
 	state: FileFailureState
+	delayMs?: number
+	delaySource?: RetryFailure["delaySource"]
+	retryAfterRefusedMs?: number
 }
 
 type Revision = {
 	revision: string
 	controller: AbortController
 	failures: Map<FileFailureActivity, FailedFile>
+	budgets: Map<FileFailureActivity, RetryBudget>
 }
 
 export class FileFailureRegistry {
@@ -82,7 +87,7 @@ export class FileFailureRegistry {
 		let current = this.revisions.get(path)
 		if (!current || current.revision !== revision) {
 			current?.controller.abort()
-			current = { revision, controller: new AbortController(), failures: new Map() }
+			current = { revision, controller: new AbortController(), failures: new Map(), budgets: new Map() }
 			this.revisions.set(path, current)
 			const failure = this.entries.get(path)
 			if (failure) {
@@ -104,6 +109,17 @@ export class FileFailureRegistry {
 		return failure && { ...failure }
 	}
 
+	getRetryBudget(path: string, revision: string, activity: FileFailureActivity): RetryBudget {
+		const current = this.revisions.get(path)
+		if (current?.revision !== revision) return { retriesUsed: 0 }
+		let budget = current.budgets.get(activity)
+		if (!budget) {
+			budget = { retriesUsed: 0 }
+			current.budgets.set(activity, budget)
+		}
+		return budget
+	}
+
 	isExhausted(path: string, revision: string, activity: FileFailureActivity): boolean {
 		return this.getFailure(path, revision, activity)?.state === "exhausted"
 	}
@@ -116,9 +132,10 @@ export class FileFailureRegistry {
 		attempt: number,
 		state: FileFailureState,
 		classification: IndexingErrorClassification = "permanent",
+		delay?: Pick<RetryFailure, "delayMs" | "delaySource" | "retryAfterRefusedMs">,
 	): void {
 		if (!this.isCurrent(path, revision)) return
-		const failure = { path, revision, activity, reason, attempt, state, classification }
+		const failure = { path, revision, activity, reason, attempt, state, classification, ...delay }
 		this.revisions.get(path)!.failures.set(activity, failure)
 		this.entries.set(path, failure)
 		for (const listener of this.records) listener(failure)
@@ -128,6 +145,7 @@ export class FileFailureRegistry {
 	clear(path: string, revision?: string): void {
 		if (revision !== undefined && !this.isCurrent(path, revision)) return
 		this.revisions.get(path)?.failures.clear()
+		this.revisions.get(path)?.budgets.clear()
 		if (this.entries.delete(path)) this.changed()
 	}
 
@@ -136,6 +154,7 @@ export class FileFailureRegistry {
 			current.controller.abort()
 			current.controller = new AbortController()
 			current.failures.clear()
+			current.budgets.clear()
 		}
 		for (const [path, failure] of this.entries) this.entries.set(path, { ...failure, state: "exhausted" })
 		this.changed()

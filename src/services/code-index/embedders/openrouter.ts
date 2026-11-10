@@ -1,18 +1,11 @@
 import { codeIndexLog } from "../code-index-log"
 import { OpenAI } from "openai"
 import type { TransientClass } from "../shared/indexing-errors"
-import { waitForRetry } from "./cancellation"
 import { IEmbedder, EmbeddingResponse, EmbedderInfo } from "../interfaces/embedder"
-import {
-	MAX_BATCH_TOKENS,
-	MAX_ITEM_TOKENS,
-	MAX_BATCH_RETRIES as MAX_RETRIES,
-	INITIAL_RETRY_DELAY_MS as INITIAL_DELAY_MS,
-} from "../constants"
+import { MAX_BATCH_TOKENS, MAX_ITEM_TOKENS } from "../constants"
 import { getDefaultModelId, getModelQueryPrefix } from "../../../shared/embeddingModels"
 import { t } from "../../../i18n"
-import { withValidationErrorHandling, HttpError, formatEmbeddingError } from "../shared/validation-helpers"
-import { Mutex } from "async-mutex"
+import { withValidationErrorHandling, formatEmbeddingError } from "../shared/validation-helpers"
 import { handleOpenAIError } from "../../../api/providers/utils/openai-error-handler"
 
 // Default provider name when no specific provider is selected
@@ -32,28 +25,18 @@ interface OpenRouterEmbeddingResponse {
 }
 
 /**
- * OpenRouter implementation of the embedder interface with batching and rate limiting.
+ * OpenRouter implementation of the embedder interface with batching.
  * OpenRouter provides an OpenAI-compatible API that gives access to hundreds of models
  * through a single endpoint, automatically handling fallbacks and cost optimization.
  */
 export class OpenRouterEmbedder implements IEmbedder {
-	readonly internallyRetriedClasses: ReadonlySet<TransientClass> = new Set(["rate-limit"])
+	readonly internallyRetriedClasses: ReadonlySet<TransientClass> = new Set()
 	private embeddingsClient: OpenAI
 	private readonly defaultModelId: string
 	private readonly apiKey: string
 	private readonly maxItemTokens: number
 	private readonly baseUrl: string = "https://openrouter.ai/api/v1"
 	private readonly specificProvider?: string
-
-	// Global rate limiting state shared across all instances
-	private static globalRateLimitState = {
-		isRateLimited: false,
-		rateLimitResetTime: 0,
-		consecutiveRateLimitErrors: 0,
-		lastRateLimitError: 0,
-		// Mutex to ensure thread-safe access to rate limit state
-		mutex: new Mutex(),
-	}
 
 	/**
 	 * Creates a new OpenRouter embedder
@@ -92,11 +75,10 @@ export class OpenRouterEmbedder implements IEmbedder {
 		this.maxItemTokens = maxItemTokens || MAX_ITEM_TOKENS
 	}
 
-	/**
-	 * Creates embeddings for the given texts with batching and rate limiting
-	 * @param texts Array of text strings to embed
+	/** Embeds texts in batches.
+	 * @param texts Texts to embed
 	 * @param model Optional model identifier
-	 * @returns Promise resolving to embedding response
+	 * @returns Embedding response
 	 */
 	async createEmbeddings(texts: string[], model?: string, signal?: AbortSignal): Promise<EmbeddingResponse> {
 		signal?.throwIfAborted()
@@ -168,7 +150,7 @@ export class OpenRouterEmbedder implements IEmbedder {
 			}
 
 			if (currentBatch.length > 0) {
-				const batchResult = await this._embedBatchWithRetries(currentBatch, modelToUse, signal)
+				const batchResult = await this._embedBatch(currentBatch, modelToUse, signal)
 				allEmbeddings.push(...batchResult.embeddings)
 				usage.promptTokens += batchResult.usage.promptTokens
 				usage.totalTokens += batchResult.usage.totalTokens
@@ -178,114 +160,65 @@ export class OpenRouterEmbedder implements IEmbedder {
 		return { embeddings: allEmbeddings, usage }
 	}
 
-	/**
-	 * Helper method to handle batch embedding with retries and exponential backoff
-	 * @param batchTexts Array of texts to embed in this batch
-	 * @param model Model identifier to use
-	 * @returns Promise resolving to embeddings and usage statistics
-	 */
-	private async _embedBatchWithRetries(
+	private async _embedBatch(
 		batchTexts: string[],
 		model: string,
 		signal?: AbortSignal,
 	): Promise<{ embeddings: number[][]; usage: { promptTokens: number; totalTokens: number } }> {
-		for (let attempts = 0; attempts < MAX_RETRIES; attempts++) {
-			// Check global rate limit before attempting request
+		try {
 			signal?.throwIfAborted()
-			await this.waitForGlobalRateLimit(signal)
-
-			try {
-				signal?.throwIfAborted()
-				// Build the request parameters
-				const requestParams: any = {
-					input: batchTexts,
-					model: model,
-					// OpenAI package (as of v4.78.1) has a parsing issue that truncates embedding dimensions to 256
-					// when processing numeric arrays, which breaks compatibility with models using larger dimensions.
-					// By requesting base64 encoding, we bypass the package's parser and handle decoding ourselves.
-					encoding_format: "base64",
-				}
-
-				// Add provider routing if a specific provider is set
-				if (this.specificProvider) {
-					requestParams.provider = {
-						order: [this.specificProvider],
-						only: [this.specificProvider],
-						allow_fallbacks: false,
-					}
-				}
-
-				const response = (await this.embeddingsClient.embeddings.create(
-					requestParams,
-					...(signal ? [{ signal }] : []),
-				)) as OpenRouterEmbeddingResponse
-
-				signal?.throwIfAborted()
-				// Convert base64 embeddings to float32 arrays
-				const processedEmbeddings = response.data.map((item: EmbeddingItem) => {
-					if (typeof item.embedding === "string") {
-						const buffer = Buffer.from(item.embedding, "base64")
-
-						// Create Float32Array view over the buffer
-						const float32Array = new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 4)
-
-						return {
-							...item,
-							embedding: Array.from(float32Array),
-						}
-					}
-					return item
-				})
-
-				// Replace the original data with processed embeddings
-				response.data = processedEmbeddings
-
-				const embeddings = response.data.map((item) => item.embedding as number[])
-
-				return {
-					embeddings: embeddings,
-					usage: {
-						promptTokens: response.usage?.prompt_tokens || 0,
-						totalTokens: response.usage?.total_tokens || 0,
-					},
-				}
-			} catch (error) {
-				signal?.throwIfAborted()
-				const hasMoreAttempts = attempts < MAX_RETRIES - 1
-
-				// Check if it's a rate limit error
-				const httpError = error as HttpError
-				if (httpError?.status === 429) {
-					// Update global rate limit state
-					await this.updateGlobalRateLimitState(httpError)
-
-					if (hasMoreAttempts) {
-						// Calculate delay based on global rate limit state
-						const baseDelay = INITIAL_DELAY_MS * Math.pow(2, attempts)
-						const globalDelay = await this.getGlobalRateLimitDelay()
-						const delayMs = Math.max(baseDelay, globalDelay)
-
-						codeIndexLog.warn(
-							t("embeddings:rateLimitRetry", {
-								delayMs,
-								attempt: attempts + 1,
-								maxRetries: MAX_RETRIES,
-							}),
-						)
-						await waitForRetry(delayMs, signal)
-						continue
-					}
-				}
-
-				// Log the error for debugging
-				codeIndexLog.error(`OpenRouter embedder error (attempt ${attempts + 1}/${MAX_RETRIES}):`, error)
-
-				// Format and throw the error
-				throw formatEmbeddingError(error, MAX_RETRIES)
+			const requestParams: any = {
+				input: batchTexts,
+				model: model,
+				// Base64 with local decoding bypasses the OpenAI v4.78.1 numeric-array parser's
+				// 256-dimension truncation, which breaks larger models.
+				encoding_format: "base64",
 			}
-		}
 
-		throw new Error(t("embeddings:failedMaxAttempts", { attempts: MAX_RETRIES }))
+			if (this.specificProvider) {
+				requestParams.provider = {
+					order: [this.specificProvider],
+					only: [this.specificProvider],
+					allow_fallbacks: false,
+				}
+			}
+
+			const response = (await this.embeddingsClient.embeddings.create(
+				requestParams,
+				...(signal ? [{ signal }] : []),
+			)) as OpenRouterEmbeddingResponse
+
+			signal?.throwIfAborted()
+			const processedEmbeddings = response.data.map((item: EmbeddingItem) => {
+				if (typeof item.embedding === "string") {
+					const buffer = Buffer.from(item.embedding, "base64")
+
+					const float32Array = new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 4)
+
+					return {
+						...item,
+						embedding: Array.from(float32Array),
+					}
+				}
+				return item
+			})
+
+			response.data = processedEmbeddings
+
+			const embeddings = response.data.map((item) => item.embedding as number[])
+
+			return {
+				embeddings: embeddings,
+				usage: {
+					promptTokens: response.usage?.prompt_tokens || 0,
+					totalTokens: response.usage?.total_tokens || 0,
+				},
+			}
+		} catch (error) {
+			signal?.throwIfAborted()
+			codeIndexLog.error("OpenRouter embedder error:", error)
+			throw formatEmbeddingError(error)
+		}
 	}
 
 	/**
@@ -336,92 +269,6 @@ export class OpenRouterEmbedder implements IEmbedder {
 	get embedderInfo(): EmbedderInfo {
 		return {
 			name: "openrouter",
-		}
-	}
-
-	/**
-	 * Waits if there's an active global rate limit
-	 */
-	private async waitForGlobalRateLimit(signal?: AbortSignal): Promise<void> {
-		signal?.throwIfAborted()
-		const release = await OpenRouterEmbedder.globalRateLimitState.mutex.acquire()
-		let mutexReleased = false
-
-		try {
-			signal?.throwIfAborted()
-			const state = OpenRouterEmbedder.globalRateLimitState
-
-			if (state.isRateLimited && state.rateLimitResetTime > Date.now()) {
-				const waitTime = state.rateLimitResetTime - Date.now()
-				// Silent wait - no logging to prevent flooding
-				release()
-				mutexReleased = true
-				await waitForRetry(waitTime, signal)
-				return
-			}
-
-			// Reset rate limit if time has passed
-			if (state.isRateLimited && state.rateLimitResetTime <= Date.now()) {
-				state.isRateLimited = false
-				state.consecutiveRateLimitErrors = 0
-			}
-		} finally {
-			// Only release if we haven't already
-			if (!mutexReleased) {
-				release()
-			}
-		}
-	}
-
-	/**
-	 * Updates global rate limit state when a 429 error occurs
-	 */
-	private async updateGlobalRateLimitState(error: HttpError): Promise<void> {
-		const release = await OpenRouterEmbedder.globalRateLimitState.mutex.acquire()
-		try {
-			const state = OpenRouterEmbedder.globalRateLimitState
-			const now = Date.now()
-
-			// Increment consecutive rate limit errors
-			if (now - state.lastRateLimitError < 60000) {
-				// Within 1 minute
-				state.consecutiveRateLimitErrors++
-			} else {
-				state.consecutiveRateLimitErrors = 1
-			}
-
-			state.lastRateLimitError = now
-
-			// Calculate exponential backoff based on consecutive errors
-			const baseDelay = 5000 // 5 seconds base
-			const maxDelay = 300000 // 5 minutes max
-			const exponentialDelay = Math.min(baseDelay * Math.pow(2, state.consecutiveRateLimitErrors - 1), maxDelay)
-
-			// Set global rate limit
-			state.isRateLimited = true
-			state.rateLimitResetTime = now + exponentialDelay
-
-			// Silent rate limit activation - no logging to prevent flooding
-		} finally {
-			release()
-		}
-	}
-
-	/**
-	 * Gets the current global rate limit delay
-	 */
-	private async getGlobalRateLimitDelay(): Promise<number> {
-		const release = await OpenRouterEmbedder.globalRateLimitState.mutex.acquire()
-		try {
-			const state = OpenRouterEmbedder.globalRateLimitState
-
-			if (state.isRateLimited && state.rateLimitResetTime > Date.now()) {
-				return state.rateLimitResetTime - Date.now()
-			}
-
-			return 0
-		} finally {
-			release()
 		}
 	}
 }

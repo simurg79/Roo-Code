@@ -1,6 +1,6 @@
 import { t } from "../../../i18n"
 import { serializeError } from "serialize-error"
-import { classifyIndexingError, EmbeddingError, getIndexingErrorStatusCode } from "./indexing-errors"
+import { classifyIndexingError, EmbeddingError, getIndexingErrorStatusCode, parseRetryAfterMs } from "./indexing-errors"
 
 /**
  * Sanitizes error messages by removing sensitive information like file paths and URLs
@@ -49,6 +49,7 @@ export function sanitizeErrorMessage(errorMessage: string): string {
  */
 export interface HttpError extends Error {
 	status?: number
+	headers?: Headers
 	response?: {
 		status?: number
 	}
@@ -216,25 +217,18 @@ export async function withValidationErrorHandling<T extends { valid: boolean; er
 /**
  * Formats an embedding error message based on the error type and context
  */
-export function formatEmbeddingError(error: unknown, maxRetries: number): EmbeddingError {
+export function formatEmbeddingError(error: unknown): EmbeddingError {
 	const classification = classifyIndexingError(error)
 	const statusCode = getIndexingErrorStatusCode(error)
 	const errorMessage = extractErrorMessage(error)
-	const details = { classification, statusCode }
+	const headers = error && typeof error === "object" && "headers" in error ? error.headers : undefined
+	const details = { classification, statusCode, retryAfterMs: parseRetryAfterMs(headers) }
 
 	if (statusCode === 401) {
 		return new EmbeddingError(t("embeddings:authenticationFailed"), error, details)
 	} else if (statusCode) {
-		return new EmbeddingError(
-			t("embeddings:failedWithStatus", { attempts: maxRetries, statusCode, errorMessage }),
-			error,
-			details,
-		)
+		return new EmbeddingError(t("embeddings:failedWithStatus", { statusCode, errorMessage }), error, details)
 	} else {
-		return new EmbeddingError(
-			t("embeddings:failedWithError", { attempts: maxRetries, errorMessage }),
-			error,
-			details,
-		)
+		return new EmbeddingError(t("embeddings:failedWithError", { errorMessage }), error, details)
 	}
 }

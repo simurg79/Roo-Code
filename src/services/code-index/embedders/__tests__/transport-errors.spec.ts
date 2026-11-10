@@ -12,7 +12,6 @@ import { VercelAiGatewayEmbedder } from "../vercel-ai-gateway"
 import { CodeIndexOllamaEmbedder } from "../ollama"
 import { BedrockEmbedder } from "../bedrock"
 import { classifyIndexingError, EmbeddingError } from "../../shared/indexing-errors"
-import { MAX_BATCH_RETRIES } from "../../constants"
 import { transportWriter } from "../../__tests__/transport-writer"
 
 vi.mock("../../../../api/providers/openai-native", () => ({
@@ -21,9 +20,11 @@ vi.mock("../../../../api/providers/openai-native", () => ({
 	},
 }))
 vi.mock("../../../../i18n", () => ({ t: (key: string) => key }))
+const { waits } = vi.hoisted(() => ({ waits: vi.fn() }))
 vi.mock("../cancellation", () => ({
 	waitForRetry: async (delay: number, signal?: AbortSignal) => {
 		signal?.throwIfAborted()
+		waits(delay)
 		vi.setSystemTime(Date.now() + delay)
 	},
 }))
@@ -40,6 +41,7 @@ const embeddingTransportFactories = [
 ] as const
 
 beforeEach(() => {
+	waits.mockClear()
 	vi.useFakeTimers({ toFake: ["Date"] })
 	vi.setSystemTime(Date.now() + 1_000_000)
 	vi.spyOn(console, "error").mockImplementation(() => {})
@@ -70,8 +72,8 @@ describe.each(embeddingTransportFactories)("%s real transport boundary", (transp
 		expect(error).toBeInstanceOf(EmbeddingError)
 		expect(error).toMatchObject({ classification, statusCode: status })
 		expect(classifyIndexingError(error)).toBe(classification)
-		const attempts = status >= 500 || (status === 429 && transport === "ollama") ? 3 : 1
-		expect(request).toHaveBeenCalledTimes(status === 429 && transport !== "ollama" ? MAX_BATCH_RETRIES : attempts)
+		const attempts = status >= 500 || status === 429 ? 3 : 1
+		expect(request).toHaveBeenCalledTimes(attempts)
 		expect(failures.list()).toEqual([
 			expect.objectContaining({
 				path: "test.ts",
@@ -82,7 +84,55 @@ describe.each(embeddingTransportFactories)("%s real transport boundary", (transp
 			}),
 		])
 		expect(cache.completeFile).not.toHaveBeenCalled()
-		expect([...embedder.internallyRetriedClasses]).toEqual(transport === "ollama" ? [] : ["rate-limit"])
+		expect([...embedder.internallyRetriedClasses]).toEqual([])
+	})
+
+	it.each([
+		["retry-after", "2", 2000],
+		["retry-after", "60", 60_000],
+		["retry-after", "61", 61_000],
+		["retry-after-ms", "60001", 60_001],
+		["retry-after-ms", "2500", 2500],
+		["retry-after", "invalid", undefined],
+		["retry-after", "-1", undefined],
+	] as const)("carries %s: %s to the workflow", async (header, value, retryAfterMs) => {
+		const request = vi.fn(
+			async () =>
+				new Response(JSON.stringify({ error: { message: "limited" } }), {
+					status: 429,
+					headers: { "content-type": "application/json", [header]: value },
+				}),
+		)
+		vi.stubGlobal("fetch", request)
+		const { replace, failures } = transportWriter()
+		const error = await replace(createEmbedder()).catch((error: unknown) => error)
+		expect(error).toMatchObject({ classification: "rate-limit", retryAfterMs })
+		expect(request).toHaveBeenCalledTimes(3)
+		const acceptedDelay = retryAfterMs !== undefined && retryAfterMs <= 60_000 ? retryAfterMs : 0
+		expect(waits.mock.calls.map(([delay]) => delay)).toEqual([
+			Math.max(500, acceptedDelay),
+			Math.max(1000, acceptedDelay),
+		])
+		expect(failures.list()[0]).toMatchObject({ classification: "rate-limit", attempt: 3, state: "exhausted" })
+	})
+
+	it.each([5, 61])("carries an HTTP-date %s seconds ahead without wrapper waits", async (seconds) => {
+		vi.setSystemTime(new Date("2026-11-10T12:00:00Z"))
+		const retryDate = new Date(Date.now() + seconds * 1000).toUTCString()
+		const request = vi.fn(
+			async () =>
+				new Response(JSON.stringify({ error: { message: "limited" } }), {
+					status: 429,
+					headers: { "content-type": "application/json", "retry-after": retryDate },
+				}),
+		)
+		vi.stubGlobal("fetch", request)
+		await expect(createEmbedder().createEmbeddings(["test"])).rejects.toMatchObject({
+			classification: "rate-limit",
+			retryAfterMs: seconds * 1000,
+		})
+		expect(request).toHaveBeenCalledTimes(1)
+		expect(waits).not.toHaveBeenCalled()
 	})
 
 	it("preserves a fetch network rejection with no network code", async () => {
@@ -179,8 +229,9 @@ describe("Bedrock real HTTP/2 transport boundary", () => {
 			const error = await replace(embedder).catch((error: unknown) => error)
 			expect(error).toBeInstanceOf(EmbeddingError)
 			expect(error).toMatchObject({ classification, statusCode: status })
-			const attempts = status >= 500 ? 3 : 1
-			expect(requests).toBe(status === 429 ? MAX_BATCH_RETRIES : attempts)
+			const attempts = status >= 500 || status === 429 ? 3 : 1
+			expect(requests).toBe(attempts)
+			if (status === 429) expect(waits.mock.calls.map(([delay]) => delay)).toEqual([500, 1000])
 			expect(failures.list()[0]).toMatchObject({
 				path: "test.ts",
 				activity: "embed",
@@ -188,7 +239,7 @@ describe("Bedrock real HTTP/2 transport boundary", () => {
 				attempt: attempts,
 				state: "exhausted",
 			})
-			expect([...embedder.internallyRetriedClasses]).toEqual(["rate-limit"])
+			expect([...embedder.internallyRetriedClasses]).toEqual([])
 		} finally {
 			;(embedder as unknown as { bedrockClient: { destroy(): void } }).bedrockClient.destroy()
 			await new Promise<void>((resolve) => server.close(() => resolve()))

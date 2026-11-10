@@ -6,15 +6,53 @@ export type IndexingErrorClassification = TransientClass | "permanent"
 type ErrorDetails = {
 	classification?: IndexingErrorClassification
 	statusCode?: number
+	retryAfterMs?: number
 }
 
 type ErrorShape = ErrorDetails & {
 	name?: string
 	code?: string
 	status?: number
+	headers?: RetryAfterHeaders
 	response?: { status?: number }
 	$metadata?: { httpStatusCode?: number }
 	cause?: unknown
+}
+
+type RetryAfterHeaders = Headers | Record<string, unknown>
+
+function nonnegativeNumber(value: unknown): number | undefined {
+	if (typeof value !== "number" && typeof value !== "string") return undefined
+	if (typeof value === "string" && !value.trim()) return undefined
+	const number = Number(value)
+	return Number.isFinite(number) && number >= 0 ? number : undefined
+}
+
+export function parseRetryAfterMs(source: unknown, now = Date.now()): number | undefined {
+	if (typeof source === "number") {
+		const seconds = nonnegativeNumber(source)
+		return seconds !== undefined && Number.isFinite(seconds * 1000) ? seconds * 1000 : undefined
+	}
+	if (!source || typeof source !== "object") return undefined
+	const headers = source as RetryAfterHeaders
+	let milliseconds: unknown
+	let retryAfter: unknown
+	if (typeof headers.get === "function") {
+		milliseconds = headers.get("retry-after-ms")
+		retryAfter = headers.get("retry-after")
+	} else {
+		for (const [name, value] of Object.entries(source)) {
+			if (name.toLowerCase() === "retry-after-ms") milliseconds = value
+			if (name.toLowerCase() === "retry-after") retryAfter = value
+		}
+	}
+	const parsedMilliseconds = nonnegativeNumber(milliseconds)
+	if (parsedMilliseconds !== undefined) return parsedMilliseconds
+	const seconds = nonnegativeNumber(retryAfter)
+	if (seconds !== undefined && Number.isFinite(seconds * 1000)) return seconds * 1000
+	if (typeof retryAfter !== "string" || !/[a-z]/i.test(retryAfter)) return undefined
+	const delay = Date.parse(retryAfter) - now
+	return Number.isFinite(delay) && delay > 0 ? delay : undefined
 }
 
 function errorChain(error: unknown): ErrorShape[] {
@@ -92,11 +130,18 @@ class IndexingError extends Error {
 	readonly classification: IndexingErrorClassification
 	readonly statusCode?: number
 
+	readonly retryAfterMs?: number
+
 	constructor(message: string, cause: unknown, details?: ErrorDetails) {
 		super(message, { cause })
 		this.name = new.target.name
 		this.classification = details?.classification ?? classifyIndexingError(cause)
 		this.statusCode = details?.statusCode ?? getIndexingErrorStatusCode(cause)
+		this.retryAfterMs = details?.retryAfterMs
+		for (const entry of errorChain(cause)) {
+			this.retryAfterMs ??= nonnegativeNumber(entry.retryAfterMs) ?? parseRetryAfterMs(entry.headers)
+			if (this.retryAfterMs !== undefined) break
+		}
 	}
 }
 

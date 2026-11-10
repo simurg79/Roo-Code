@@ -32,6 +32,7 @@ describe("CodebaseSearchTool search envelope", () => {
 		const task = {
 			cwd: "/workspace",
 			consecutiveMistakeCount: 1,
+			lifecycleSignal: new AbortController().signal,
 			say: vi.fn(),
 			providerRef: { deref: () => ({ context: {} }) },
 		}
@@ -41,7 +42,7 @@ describe("CodebaseSearchTool search envelope", () => {
 			pushToolResult: vi.fn(),
 		}
 		await new CodebaseSearchTool().execute({ query: "query", path: "src" }, task as unknown as Task, callbacks)
-		expect(searchIndex).toHaveBeenCalledWith("query", "src")
+		expect(searchIndex).toHaveBeenCalledWith("query", "src", task.lifecycleSignal)
 		expect(callbacks.handleError).not.toHaveBeenCalled()
 		const output = callbacks.pushToolResult.mock.calls[0][0]
 		expect(output).toContain("Partial index")
@@ -52,6 +53,43 @@ describe("CodebaseSearchTool search envelope", () => {
 			tool: "codebaseSearch",
 			content: { query: "query", partial: true, failedFiles },
 		})
+	})
+
+	it("T27 reads the current lifecycle signal after approval on every call", async () => {
+		const searchIndex = vi.fn().mockResolvedValue({ results: [], partial: false, failedFiles: [] })
+		vi.mocked(CodeIndexManager.getInstance).mockReturnValue({
+			isFeatureEnabled: true,
+			isFeatureConfigured: true,
+			searchIndex,
+		} as unknown as CodeIndexManager)
+		let controller = new AbortController()
+		const originalSignal = controller.signal
+		const task = {
+			cwd: "/workspace",
+			say: vi.fn(),
+			providerRef: { deref: () => ({ context: {} }) },
+			get lifecycleSignal() {
+				return controller.signal
+			},
+		}
+		const callbacks = {
+			askApproval: vi.fn().mockImplementation(async () => {
+				controller.abort()
+				controller = new AbortController()
+				return true
+			}),
+			handleError: vi.fn(),
+			pushToolResult: vi.fn(),
+		}
+		const tool = new CodebaseSearchTool()
+		await tool.execute({ query: "first" }, task as unknown as Task, callbacks)
+		const resumedSignal = controller.signal
+		expect(searchIndex).toHaveBeenNthCalledWith(1, "first", undefined, resumedSignal)
+		expect(resumedSignal).not.toBe(originalSignal)
+		await tool.execute({ query: "second", path: "src" }, task as unknown as Task, callbacks)
+		expect(searchIndex).toHaveBeenNthCalledWith(2, "second", "src", controller.signal)
+		expect(controller.signal).not.toBe(resumedSignal)
+		expect(callbacks.handleError).not.toHaveBeenCalled()
 	})
 
 	it("includes complete empty envelopes in the displayed payload without a partial notice", async () => {

@@ -660,6 +660,16 @@ describe("Cline", () => {
 			else await task.abortTask(stopKind === "abandon")
 		}
 
+		it.each(stopKinds)("T27 exposes a read-only lifecycle signal aborted by %s", async (stopKind) => {
+			const signal = task.lifecycleSignal
+			expect(signal).toBe(task["lifecycleAbortController"].signal)
+			expect(signal.aborted).toBe(false)
+			expect(Object.getOwnPropertyDescriptor(Task.prototype, "lifecycleSignal")?.set).toBeUndefined()
+			await stopTask(stopKind)
+			expect(task.lifecycleSignal).toBe(signal)
+			expect(signal.aborted).toBe(true)
+		})
+
 		it.each(stopKinds)("%s cancels content polling without another tick", async (stopKind) => {
 			const predicate = vi.fn(() => false)
 			const signal = task["lifecycleAbortController"].signal
@@ -895,15 +905,15 @@ describe("Cline", () => {
 		})
 
 		it("renews the signal only on explicit delegation resume", async () => {
-			const stoppedSignal = task["lifecycleAbortController"].signal
+			const stoppedSignal = task.lifecycleSignal
 			task.dispose()
 			task.apiConversationHistory = [{ role: "user", content: [{ type: "text", text: "history" }] }]
 			vi.spyOn(task as any, "saveApiConversationHistory").mockResolvedValue(undefined)
 			const loop = vi.spyOn(task as any, "initiateTaskLoop").mockResolvedValue(undefined)
 			await task.resumeAfterDelegation()
 			expect(stoppedSignal.aborted).toBe(true)
-			expect(task["lifecycleAbortController"].signal).not.toBe(stoppedSignal)
-			expect(task["lifecycleAbortController"].signal.aborted).toBe(false)
+			expect(task.lifecycleSignal).not.toBe(stoppedSignal)
+			expect(task.lifecycleSignal.aborted).toBe(false)
 			expect(task.abort).toBe(false)
 			expect(loop).toHaveBeenCalledOnce()
 			const pending = task.ask("followup")
