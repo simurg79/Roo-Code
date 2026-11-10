@@ -18,7 +18,7 @@ overrides:
 
 patchedDependencies:
   '@qdrant/js-client-rest@1.14.0':
-    hash: a89c8e1788bae431399b0a48d9a5def2942d11e423a931a6e19e5f14fe1ff5ac
+    hash: 5fd99568fae403067564b866c88a45298e13f9b857d4e0adc6fc3ce7ec745c01
     path: patches/@qdrant__js-client-rest@1.14.0.patch
 
 importers:
@@ -506,7 +506,7 @@ importers:
         version: 1.12.0
       '@qdrant/js-client-rest':
         specifier: ^1.14.0
-        version: 1.14.0(patch_hash=a89c8e1788bae431399b0a48d9a5def2942d11e423a931a6e19e5f14fe1ff5ac)(typescript@5.8.3)
+        version: 1.14.0(patch_hash=5fd99568fae403067564b866c88a45298e13f9b857d4e0adc6fc3ce7ec745c01)(typescript@5.8.3)
       '@roo-code/core':
         specifier: workspace:^
         version: link:../packages/core
@@ -17569,7 +17569,7 @@ snapshots:
       - bare-buffer
       - supports-color
 
-  '@qdrant/js-client-rest@1.14.0(patch_hash=a89c8e1788bae431399b0a48d9a5def2942d11e423a931a6e19e5f14fe1ff5ac)(typescript@5.8.3)':
+  '@qdrant/js-client-rest@1.14.0(patch_hash=5fd99568fae403067564b866c88a45298e13f9b857d4e0adc6fc3ce7ec745c01)(typescript@5.8.3)':
     dependencies:
       '@qdrant/openapi-typescript-fetch': 1.2.6
       '@sevinf/maybe': 0.5.0

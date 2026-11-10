@@ -1,3 +1,4 @@
+import "../../__tests__/mock-code-index-log"
 import { APIConnectionError, APIConnectionTimeoutError, APIUserAbortError } from "openai"
 import { QdrantClientTimeoutError } from "@qdrant/js-client-rest"
 import {
@@ -8,8 +9,11 @@ import {
 	parseRetryAfterMs,
 } from "../indexing-errors"
 import { formatEmbeddingError } from "../validation-helpers"
+import { CodeIndexOllamaEmbedder } from "../../embedders/ollama"
+import { IndexingRetryError } from "../indexing-errors"
 
 vi.mock("../../../../i18n", () => ({ t: (key: string) => key }))
+vi.mock("../../../../shared/embeddingModels", () => ({ getModelQueryPrefix: () => undefined }))
 
 describe("indexing error classification", () => {
 	it.each([
@@ -111,4 +115,50 @@ describe("parseRetryAfterMs", () => {
 		expect(new ErrorClass("limited", cause)).toMatchObject({ retryAfterMs: 2000, cause })
 		expect(new ErrorClass("limited", cause, { retryAfterMs: 7000 })).toMatchObject({ retryAfterMs: 7000 })
 	})
+})
+
+it.each(["2", "invalid", undefined])(
+	"T33 discovers header delay once across formatting and retry wrappers: %s",
+	(value) => {
+		const get = vi.fn((name: string) => (name === "retry-after" ? value : undefined))
+		const original = { status: 429, headers: { get } }
+		const formatted = formatEmbeddingError(original)
+		const retried = new IndexingRetryError(formatted, 3, "rate-limit", "embed")
+		expect(retried.retryAfterMs).toBe(value === "2" ? 2000 : undefined)
+		expect(formatted.retryAfterMs).toBe(retried.retryAfterMs)
+		expect(get.mock.calls.filter(([name]) => name === "retry-after")).toHaveLength(1)
+		get.mockClear()
+		const constructed = new EmbeddingError("limited", original)
+		expect(constructed.retryAfterMs).toBe(formatted.retryAfterMs)
+		expect(get.mock.calls.filter(([name]) => name === "retry-after")).toHaveLength(1)
+	},
+)
+
+it("T33 explicit delay wins without reading headers", () => {
+	const get = vi.fn()
+	const error = new VectorStoreError("limited", { status: 429, headers: { get } }, { retryAfterMs: 7000 })
+	expect(error.retryAfterMs).toBe(7000)
+	expect(get).not.toHaveBeenCalled()
+})
+
+it.each(["2", "invalid", undefined])("T33 reads Ollama Response headers once: %s", async (value) => {
+	const response = new Response("limited", { status: 429 })
+	if (value !== undefined) response.headers.set("retry-after", value)
+	const get = vi.spyOn(response.headers, "get")
+	vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response))
+	try {
+		const error = await new CodeIndexOllamaEmbedder({ ollamaBaseUrl: "https://example.test" })
+			.createEmbeddings(["test"])
+			.catch((error: unknown) => error)
+		expect(error).toBeInstanceOf(EmbeddingError)
+		expect(error).toMatchObject({
+			statusCode: 429,
+			classification: "rate-limit",
+			retryAfterMs: value === "2" ? 2000 : undefined,
+		})
+		expect(get.mock.calls.filter(([name]) => name === "retry-after")).toHaveLength(1)
+	} finally {
+		vi.unstubAllGlobals()
+		vi.restoreAllMocks()
+	}
 })

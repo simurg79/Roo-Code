@@ -94,30 +94,27 @@ export class FileIndexWriter {
 		const relativePath = toIndexPath(file, this.workspacePath)
 		const previous = this.failures.getFailure(relativePath, revision, activity)
 		if (previous?.state === "exhausted") throw Object.assign(new Error(previous.reason), previous)
-		try {
-			return await retryWithPolicy(
-				() => this.run(signal, operation, activity === "upsert" || activity === "delete" ? [file] : []),
-				{
-					signal,
-					ownedClasses,
-					budget: this.failures.getRetryBudget(relativePath, revision, activity),
-					onFailure: ({ error, attempt, willRetry, classification, ...delay }) => {
-						this.failures.record(
-							relativePath,
-							revision,
-							activity,
-							error instanceof Error ? error.message : String(error),
-							attempt,
-							willRetry ? "retrying" : "exhausted",
-							classification,
-							delay,
-						)
-					},
+		return await retryWithPolicy(
+			() => this.run(signal, operation, activity === "upsert" || activity === "delete" ? [file] : []),
+			{
+				signal,
+				activity,
+				ownedClasses,
+				budget: this.failures.getRetryBudget(relativePath, revision, activity),
+				onFailure: ({ error, attempt, willRetry, classification, ...delay }) => {
+					this.failures.record(
+						relativePath,
+						revision,
+						activity,
+						error instanceof Error ? error.message : String(error),
+						attempt,
+						willRetry ? "retrying" : "exhausted",
+						classification,
+						delay,
+					)
 				},
-			)
-		} catch (error) {
-			throw Object.assign(error instanceof Error ? error : new Error(String(error)), { activity })
-		}
+			},
+		)
 	}
 
 	private async withRevision<T>(

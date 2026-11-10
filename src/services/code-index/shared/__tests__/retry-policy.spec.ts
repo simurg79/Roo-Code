@@ -1,5 +1,6 @@
 import { retryWithPolicy, type RetryFailure } from "../retry-policy"
-import { EmbeddingError } from "../indexing-errors"
+import { EmbeddingError, IndexingRetryError } from "../indexing-errors"
+import { APIUserAbortError } from "openai"
 
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
@@ -70,4 +71,86 @@ it("shares two retries across successful batches without charging their first ca
 	request.mockRejectedValue({ status: 503 })
 	await expect(retryWithPolicy(request, { budget })).rejects.toMatchObject({ attempts: 3 })
 	expect(request).toHaveBeenCalledTimes(6)
+})
+
+it("T33 wraps a frozen error without changing its metadata", async () => {
+	const original = Object.freeze(new EmbeddingError("limited", { status: 429 }, { retryAfterMs: 2000 }))
+	const properties = Object.getOwnPropertyDescriptors(original)
+	const request = vi.fn().mockRejectedValue(original)
+	const pending = retryWithPolicy(request, { activity: "embed" }).catch((error) => error)
+	await vi.advanceTimersByTimeAsync(4000)
+	const error = await pending
+	expect(error).toBeInstanceOf(IndexingRetryError)
+	expect(error).toMatchObject({
+		message: original.message,
+		attempts: 3,
+		classification: "rate-limit",
+		statusCode: 429,
+		retryAfterMs: 2000,
+		activity: "embed",
+	})
+	expect((error as IndexingRetryError).cause).toBe(original)
+	expect(Object.getOwnPropertyDescriptors(original)).toEqual(properties)
+	expect(request).toHaveBeenCalledTimes(3)
+})
+
+it("T33 keeps independent metadata when one error is reused across operations", async () => {
+	const original = Object.assign(new Error("unavailable"), { status: 503 })
+	const properties = Object.getOwnPropertyDescriptors(original)
+	const request = vi.fn().mockRejectedValue(original)
+	const firstPending = retryWithPolicy(request, { activity: "upsert" }).catch((error) => error)
+	await vi.advanceTimersByTimeAsync(1500)
+	const first = await firstPending
+	const second = await retryWithPolicy(request, { activity: "verify", budget: { retriesUsed: 2 } }).catch(
+		(error) => error,
+	)
+	expect(first).toBeInstanceOf(IndexingRetryError)
+	expect(second).toBeInstanceOf(IndexingRetryError)
+	expect(first).not.toBe(second)
+	expect(first).toMatchObject({ attempts: 3, activity: "upsert", classification: "server", statusCode: 503 })
+	expect(second).toMatchObject({ attempts: 3, activity: "verify", classification: "server", statusCode: 503 })
+	expect((first as IndexingRetryError).cause).toBe(original)
+	expect((second as IndexingRetryError).cause).toBe(original)
+	expect(Object.getOwnPropertyDescriptors(original)).toEqual(properties)
+	expect(original).not.toHaveProperty("attempts")
+	expect(original).not.toHaveProperty("activity")
+})
+
+it.each([
+	new DOMException("cancelled", "AbortError"),
+	new APIUserAbortError(),
+	Object.freeze(Object.assign(new Error("cancelled"), { name: "APIUserAbortError" })),
+])("T33 preserves live-signal cancellation identity: %s", async (original) => {
+	const properties = Object.getOwnPropertyDescriptors(original)
+	const request = vi.fn().mockRejectedValue(original)
+	const onFailure = vi.fn()
+	await expect(
+		retryWithPolicy(request, { signal: new AbortController().signal, activity: "embed", onFailure }),
+	).rejects.toBe(original)
+	expect(Object.getOwnPropertyDescriptors(original)).toEqual(properties)
+	expect(original).not.toHaveProperty("attempts")
+	expect(original).not.toHaveProperty("activity")
+	expect(onFailure).toHaveBeenCalledWith(expect.objectContaining({ classification: "permanent", willRetry: false }))
+	expect(request).toHaveBeenCalledOnce()
+})
+
+it("T33 rethrows signal.reason rather than an operation rejection after abort", async () => {
+	const controller = new AbortController()
+	const reason = Object.freeze(new DOMException("stopped", "AbortError"))
+	const rejection = new Error("operation rejected")
+	const request = vi.fn(async () => {
+		controller.abort(reason)
+		throw rejection
+	})
+	const onFailure = vi.fn()
+	await expect(retryWithPolicy(request, { signal: controller.signal, activity: "embed", onFailure })).rejects.toBe(
+		controller.signal.reason,
+	)
+	expect(reason.name).toBe("AbortError")
+	expect(reason).not.toHaveProperty("attempts")
+	expect(reason).not.toHaveProperty("activity")
+	expect(rejection).not.toHaveProperty("attempts")
+	expect(rejection).not.toHaveProperty("activity")
+	expect(onFailure).not.toHaveBeenCalled()
+	expect(request).toHaveBeenCalledOnce()
 })

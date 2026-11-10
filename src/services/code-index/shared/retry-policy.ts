@@ -1,6 +1,13 @@
+import { APIUserAbortError } from "openai"
 import { FILE_RETRY_ATTEMPTS, FILE_RETRY_BASE_DELAY_MS, RATE_LIMIT_MAX_RETRY_AFTER_MS } from "../constants"
 import { waitForRetry } from "../embedders/cancellation"
-import { classifyIndexingError, type IndexingErrorClassification, type TransientClass } from "./indexing-errors"
+import {
+	classifyIndexingError,
+	IndexingRetryError,
+	type IndexingErrorClassification,
+	type TransientClass,
+} from "./indexing-errors"
+import type { FileFailureActivity } from "../file-failure-registry"
 
 export interface RetryBudget {
 	retriesUsed: number
@@ -18,6 +25,7 @@ export interface RetryFailure {
 
 export interface RetryPolicyOptions {
 	signal?: AbortSignal
+	activity?: FileFailureActivity
 	ownedClasses?: ReadonlySet<TransientClass>
 	budget?: RetryBudget
 	onFailure?: (failure: RetryFailure) => void
@@ -25,7 +33,7 @@ export interface RetryPolicyOptions {
 
 export async function retryWithPolicy<T>(
 	operation: () => Promise<T>,
-	{ signal, ownedClasses, budget = { retriesUsed: 0 }, onFailure }: RetryPolicyOptions = {},
+	{ signal, activity, ownedClasses, budget = { retriesUsed: 0 }, onFailure }: RetryPolicyOptions = {},
 ): Promise<T> {
 	while (true) {
 		signal?.throwIfAborted()
@@ -61,10 +69,15 @@ export async function retryWithPolicy<T>(
 				retryAfterRefusedMs,
 			})
 			if (!willRetry) {
-				throw Object.assign(error instanceof Error ? error : new Error(String(error)), {
-					attempts: attempt,
-					classification,
-				})
+				if (
+					error instanceof APIUserAbortError ||
+					(error &&
+						typeof error === "object" &&
+						"name" in error &&
+						(error.name === "AbortError" || error.name === "APIUserAbortError"))
+				)
+					throw error
+				throw new IndexingRetryError(error, attempt, classification, activity)
 			}
 			await waitForRetry(delayMs, signal)
 		}

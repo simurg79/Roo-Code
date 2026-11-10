@@ -11,7 +11,7 @@ import { MistralEmbedder } from "../mistral"
 import { VercelAiGatewayEmbedder } from "../vercel-ai-gateway"
 import { CodeIndexOllamaEmbedder } from "../ollama"
 import { BedrockEmbedder } from "../bedrock"
-import { classifyIndexingError, EmbeddingError } from "../../shared/indexing-errors"
+import { classifyIndexingError, EmbeddingError, IndexingRetryError } from "../../shared/indexing-errors"
 import { transportWriter } from "../../__tests__/transport-writer"
 
 vi.mock("../../../../api/providers/openai-native", () => ({
@@ -69,7 +69,8 @@ describe.each(embeddingTransportFactories)("%s real transport boundary", (transp
 		const { replace, failures, cache } = transportWriter()
 		const error = await replace(embedder).catch((error: unknown) => error)
 		const classification = status === 429 ? "rate-limit" : status >= 500 ? "server" : "permanent"
-		expect(error).toBeInstanceOf(EmbeddingError)
+		expect(error).toBeInstanceOf(IndexingRetryError)
+		expect((error as Error).cause).toBeInstanceOf(EmbeddingError)
 		expect(error).toMatchObject({ classification, statusCode: status })
 		expect(classifyIndexingError(error)).toBe(classification)
 		const attempts = status >= 500 || status === 429 ? 3 : 1
@@ -141,7 +142,8 @@ describe.each(embeddingTransportFactories)("%s real transport boundary", (transp
 		vi.stubGlobal("fetch", request)
 		const { replace, failures } = transportWriter()
 		const error = await replace(createEmbedder()).catch((error: unknown) => error)
-		expect(error).toBeInstanceOf(EmbeddingError)
+		expect(error).toBeInstanceOf(IndexingRetryError)
+		expect((error as Error).cause).toBeInstanceOf(EmbeddingError)
 		expect(classifyIndexingError(error)).toBe("connection")
 		expect(request).toHaveBeenCalledTimes(3)
 		expect(failures.list()[0]).toMatchObject({
@@ -227,7 +229,8 @@ describe("Bedrock real HTTP/2 transport boundary", () => {
 		try {
 			const { replace, failures } = transportWriter()
 			const error = await replace(embedder).catch((error: unknown) => error)
-			expect(error).toBeInstanceOf(EmbeddingError)
+			expect(error).toBeInstanceOf(IndexingRetryError)
+			expect((error as Error).cause).toBeInstanceOf(EmbeddingError)
 			expect(error).toMatchObject({ classification, statusCode: status })
 			const attempts = status >= 500 || status === 429 ? 3 : 1
 			expect(requests).toBe(attempts)

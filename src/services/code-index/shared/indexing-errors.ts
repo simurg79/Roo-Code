@@ -1,4 +1,5 @@
 import { APIConnectionError, APIUserAbortError } from "openai"
+import type { FileFailureActivity } from "../file-failure-registry"
 
 export type TransientClass = "rate-limit" | "server" | "connection"
 export type IndexingErrorClassification = TransientClass | "permanent"
@@ -138,12 +139,28 @@ class IndexingError extends Error {
 		this.classification = details?.classification ?? classifyIndexingError(cause)
 		this.statusCode = details?.statusCode ?? getIndexingErrorStatusCode(cause)
 		this.retryAfterMs = details?.retryAfterMs
-		for (const entry of errorChain(cause)) {
-			this.retryAfterMs ??= nonnegativeNumber(entry.retryAfterMs) ?? parseRetryAfterMs(entry.headers)
-			if (this.retryAfterMs !== undefined) break
+		if (this.retryAfterMs === undefined) {
+			for (const entry of errorChain(cause)) {
+				this.retryAfterMs = nonnegativeNumber(entry.retryAfterMs)
+				// Indexing-owned causes already checked for valid, missing or invalid headers.
+				if (entry instanceof IndexingError) break
+				this.retryAfterMs ??= parseRetryAfterMs(entry.headers)
+				if (this.retryAfterMs !== undefined) break
+			}
 		}
 	}
 }
 
 export class EmbeddingError extends IndexingError {}
 export class VectorStoreError extends IndexingError {}
+
+export class IndexingRetryError extends IndexingError {
+	constructor(
+		cause: unknown,
+		readonly attempts: number,
+		classification: IndexingErrorClassification,
+		readonly activity?: FileFailureActivity,
+	) {
+		super(cause instanceof Error ? cause.message : String(cause), cause, { classification })
+	}
+}

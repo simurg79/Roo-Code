@@ -9,7 +9,9 @@ import { GenerationAllocator } from "../../generation-allocator"
 import { IndexWriteGate, LATE_WRITE_GRACE_MS } from "../../index-write-gate"
 import { ParserFatalError } from "../../parser-errors"
 import { CodeBlock } from "../../interfaces"
-import { MAX_FILE_SIZE_BYTES, PARSE_TIMEOUT_MS, INDEX_STOP_LIMIT_MS } from "../../constants"
+import { MAX_BLOCK_CHARS, MAX_FILE_SIZE_BYTES, PARSE_TIMEOUT_MS, INDEX_STOP_LIMIT_MS } from "../../constants"
+import { CodeIndexOllamaEmbedder } from "../../embedders/ollama"
+import { QdrantVectorStore } from "../../vector-store/qdrant-client"
 import { EventEmitter } from "node:events"
 import { ParseWorkerClient, type ParseRequest } from "../../parse-worker-client"
 import { CodeParser } from "../parser"
@@ -22,11 +24,12 @@ import { codeIndexLog } from "../../code-index-log"
 vi.mock("../../../../utils/safeWriteJson", () => ({ safeWriteJson: vi.fn() }))
 
 vi.mock("../../../../core/ignore/RooIgnoreController", () => ({
-	RooIgnoreController: vi.fn().mockImplementation(() => ({ validateAccess: () => true })),
+	RooIgnoreController: vi.fn().mockImplementation(() => ({ initialize: vi.fn(), validateAccess: () => true })),
 }))
 vi.mock("../../processors", () => ({}))
 vi.mock("../../../../i18n", () => ({ t: (key: string) => key }))
 vi.mock("vscode", () => ({
+	window: { activeTextEditor: undefined },
 	workspace: {
 		workspaceFolders: [{ uri: { fsPath: "/mock/workspace" } }],
 		createFileSystemWatcher: vi.fn(),
@@ -310,6 +313,7 @@ describe("FileWatcher per-file completion", () => {
 
 	afterEach(() => {
 		for (const created of watchers) created.dispose()
+		vi.unstubAllGlobals()
 		vi.useRealTimers()
 	})
 
@@ -1489,6 +1493,269 @@ describe("FileWatcher per-file completion", () => {
 			}
 		},
 	)
+
+	it("T31 explicit Start Indexing replaces a real watcher provider wait and preserves replacement results", async () => {
+		const filePath = path.join(workspace, "restart.md")
+		const oldSource = "waiting revision ".repeat(10).trim()
+		const newSource = "replacement revision ".repeat(10).trim()
+		contents.set(filePath, oldSource)
+		const request = vi.fn(async (_input: RequestInfo | URL, options?: RequestInit) => {
+			const body = JSON.parse(options!.body as string)
+			return body.input[0] === oldSource
+				? new Response(JSON.stringify({ error: "limited" }), { status: 429, headers: { "retry-after": "30" } })
+				: new Response(JSON.stringify({ embeddings: [[1, 2, 3]] }))
+		})
+		vi.stubGlobal("fetch", request)
+		embedder = new CodeIndexOllamaEmbedder({ ollamaBaseUrl: "https://embed.test", ollamaModelId: "custom" })
+		parser = new CodeParser()
+		const createServices = vi.fn()
+		vi.doMock("../../service-factory", () => ({
+			CodeIndexServiceFactory: vi.fn().mockImplementation(() => ({
+				createServices,
+				validateEmbedder: vi.fn().mockResolvedValue({ valid: true }),
+			})),
+		}))
+		Object.assign(codeIndexLog, { redact: (value: string) => value })
+		const { CodeIndexManager } = await import("../../manager")
+		const { CodeIndexStateManager } = await import("../../state-manager")
+		const manager = CodeIndexManager.getInstance(
+			{
+				workspaceState: { get: () => true },
+				globalState: { get: () => true },
+			} as any,
+			workspace,
+		)!
+		const internal = manager as any
+		const managerState = new CodeIndexStateManager()
+		internal._stateManager = managerState
+		internal._configManager = { isFeatureEnabled: true, isFeatureConfigured: true }
+		internal._cacheManager = cache
+		internal._searchService = {}
+		internal.generationAllocator = generations
+		gate = internal.writeGate
+		watcher.dispose()
+		watcher = makeWatcher()
+		failures = manager.fileFailureRegistry
+		// The manager must own the same registry used by both service generations.
+		const makeManagedWatcher = () => {
+			const created = new FileWatcher(
+				workspace,
+				{} as any,
+				cache,
+				embedder,
+				store,
+				ignore,
+				1,
+				parser,
+				gate,
+				generations,
+				failures,
+			)
+			watchers.push(created)
+			return created
+		}
+		watcher.dispose()
+		watcher = makeManagedWatcher()
+		const initialScan = {
+			scanDirectory: vi.fn().mockResolvedValue({ stats: { processed: 0, skipped: 0 }, totalBlockCount: 0 }),
+		}
+		const initial = new CodeIndexOrchestrator(
+			internal._configManager,
+			managerState,
+			workspace,
+			cache,
+			store,
+			initialScan as any,
+			watcher,
+			undefined,
+			undefined,
+			undefined,
+			gate,
+			generations,
+			() => internal.currentAttempt === 0,
+			failures,
+		)
+		internal._orchestrator = initial
+		try {
+			await initial.startIndexing()
+			await queue([filePath])
+			expect(request).toHaveBeenCalledOnce()
+			expect(failures.list()[0]).toMatchObject({ state: "retrying", revision: hash(oldSource) })
+			expect(initial.isScanning).toBe(false)
+			expect(initial.isActive).toBe(true)
+			contents.set(filePath, newSource)
+			const replacementWatcher = makeManagedWatcher()
+			const replacementScan = vi.fn(async () => {
+				const result = await replacementWatcher.processFile(filePath)
+				return {
+					stats: { processed: 1, skipped: 0 },
+					totalBlockCount: 1,
+					incompleteFiles: result.status === "local_error" ? [filePath] : [],
+				}
+			})
+			createServices.mockReturnValue({
+				embedder,
+				vectorStore: store,
+				scanner: { scanDirectory: replacementScan },
+				fileWatcher: replacementWatcher,
+			})
+			const startup = manager.startIndexing()
+			expect(manager.startIndexing()).toBe(startup)
+			await startup
+			await drain()
+			expect(createServices).toHaveBeenCalledOnce()
+			expect(replacementScan).toHaveBeenCalledOnce()
+			expect(request).toHaveBeenCalledTimes(2)
+			expect(hashes[filePath]).toBe(hash(newSource))
+			expect(cache.completeFile).toHaveBeenCalledExactlyOnceWith(filePath, hash(newSource))
+			expect([...points.values()].map((point) => point.payload.codeChunk)).toEqual([newSource])
+			expect(failures.list()).toEqual([])
+			expect(manager.state).toBe("Indexed")
+			const status = manager.getCurrentStatus()
+			const savedPoints = [...points.entries()]
+			const complete = vi.spyOn(managerState, "setSystemState")
+			await vi.advanceTimersByTimeAsync(60_000)
+			expect(request).toHaveBeenCalledTimes(2)
+			expect([...points.entries()]).toEqual(savedPoints)
+			expect(hashes[filePath]).toBe(hash(newSource))
+			expect(cache.completeFile).toHaveBeenCalledOnce()
+			expect(manager.getCurrentStatus()).toEqual(status)
+			expect(complete).not.toHaveBeenCalled()
+			complete.mockRestore()
+		} finally {
+			await manager.stopWatcher()
+			CodeIndexManager.disposeAll()
+			vi.doUnmock("../../service-factory")
+			delete (codeIndexLog as any).redact
+		}
+	})
+
+	it("T29 watcher submits whole Unicode characters and verifies the complete source hash", async () => {
+		const filePath = path.join(workspace, "unicode.md")
+		const source = "a".repeat(MAX_BLOCK_CHARS - 1) + "\u{1f600}" + "漢é".repeat(MAX_BLOCK_CHARS)
+		contents.set(filePath, source)
+		parser = new CodeParser()
+		watcher.dispose()
+		watcher = makeWatcher()
+		await start()
+		await queue([filePath])
+		const submitted = embedder.createEmbeddings.mock.calls.flatMap(([texts]: [string[]]) => texts)
+		expect(submitted.length).toBeGreaterThan(1)
+		expect(submitted[0]).toHaveLength(MAX_BLOCK_CHARS - 1)
+		for (const text of submitted) {
+			expect(text).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u)
+			expect(Buffer.from(text).toString("utf8")).toBe(text)
+		}
+		expect(submitted.join("")).toBe(source)
+		const stored = [...points.values()]
+		expect(stored).toHaveLength(submitted.length)
+		expect(store.countPointsForFile).toHaveBeenCalledWith(filePath, stored[0].payload.generation)
+		expect(hashes[filePath]).toBe(hash(source))
+		expect(open).toEqual({})
+		expect(failures.list()).toEqual([])
+		expect(state.state).toBe("Indexed")
+	})
+
+	it.each(["embed", "upsert"] as const)(
+		"T30 watcher disable interrupts a 30s %s transport wait",
+		async (activity) => {
+			const request = vi.fn(async (input: RequestInfo | URL) => {
+				const url = input instanceof Request ? input.url : String(input)
+				if (url.endsWith("/")) return new Response(JSON.stringify({ title: "qdrant", version: "1.14.0" }))
+				return new Response(JSON.stringify({ error: "limited" }), {
+					status: 429,
+					headers: { "content-type": "application/json", "retry-after": "30" },
+				})
+			})
+			vi.stubGlobal("fetch", request)
+			if (activity === "embed") embedder = new CodeIndexOllamaEmbedder({ ollamaBaseUrl: "https://embed.test" })
+			else {
+				const realStore = new QdrantVectorStore(workspace, "https://store.test", 3)
+				store.upsertPoints.mockImplementation((batch: any[]) => realStore.upsertPoints(batch))
+			}
+			watcher.dispose()
+			watcher = makeWatcher()
+			await start()
+			await queue()
+			expect(failures.list()).toEqual([
+				expect.objectContaining({ activity, classification: "rate-limit", state: "retrying", attempt: 1 }),
+			])
+			expect(state.state).toBe("Indexing")
+			const transportCalls = () =>
+				request.mock.calls.filter(([input]) => {
+					const url = input instanceof Request ? input.url : String(input)
+					return activity === "embed" ? url.includes("/api/embed") : url.includes("/points")
+				})
+			expect(transportCalls()).toHaveLength(1)
+			await vi.advanceTimersByTimeAsync(1000)
+			expect(transportCalls()).toHaveLength(1)
+			const stopped = orchestrator.stopWatcher()
+			await vi.advanceTimersByTimeAsync(INDEX_STOP_LIMIT_MS)
+			await stopped
+			await queue([fileB])
+			await vi.advanceTimersByTimeAsync(60_000)
+			expect(transportCalls()).toHaveLength(1)
+			expect(points.size).toBe(0)
+			if (activity === "embed") expect(store.upsertPoints).not.toHaveBeenCalled()
+			else expect(store.upsertPoints).toHaveBeenCalledOnce()
+			expect(store.deletePointsByFilePath).not.toHaveBeenCalled()
+			expect(store.countPointsForFile).not.toHaveBeenCalled()
+			expect(cache.completeFile).not.toHaveBeenCalled()
+			expect(failures.list()).toEqual([expect.objectContaining({ activity, state: "exhausted" })])
+			expect(state.setSystemState).toHaveBeenLastCalledWith(
+				"Standby",
+				"embeddings:orchestrator.indexingStoppedPartial",
+				"stop",
+			)
+		},
+	)
+
+	it("T31 a newer watcher revision replaces a 30s provider wait without stale requests or completion", async () => {
+		const filePath = path.join(workspace, "revision.md")
+		const oldSource = "old revision ".repeat(10).trim()
+		const newSource = "new revision ".repeat(10).trim()
+		contents.set(filePath, oldSource)
+		const request = vi.fn(async (_input: RequestInfo | URL, options?: RequestInit) => {
+			const body = JSON.parse(options!.body as string)
+			return body.input[0] === oldSource
+				? new Response(JSON.stringify({ error: "limited" }), { status: 429, headers: { "retry-after": "30" } })
+				: new Response(JSON.stringify({ embeddings: [[1, 2, 3]] }))
+		})
+		vi.stubGlobal("fetch", request)
+		embedder = new CodeIndexOllamaEmbedder({ ollamaBaseUrl: "https://embed.test", ollamaModelId: "custom" })
+		parser = new CodeParser()
+		watcher.dispose()
+		watcher = makeWatcher()
+		await start()
+		await queue([filePath])
+		expect(request).toHaveBeenCalledOnce()
+		expect(failures.list()[0]).toMatchObject({ state: "retrying", revision: hash(oldSource) })
+		expect(state.state).toBe("Indexing")
+		contents.set(filePath, newSource)
+		await queue([filePath])
+		await vi.advanceTimersByTimeAsync(500)
+		await drain()
+		expect(request).toHaveBeenCalledTimes(2)
+		expect(hashes[filePath]).toBe(hash(newSource))
+		expect(cache.completeFile).toHaveBeenCalledExactlyOnceWith(filePath, hash(newSource))
+		expect([...points.values()].map((point) => point.payload.codeChunk)).toEqual([newSource])
+		expect(failures.list()).toEqual([])
+		expect(state.state).toBe("Indexed")
+		const savedPoints = [...points.entries()]
+		const statusUpdates = state.setSystemState.mock.calls.length
+		const progressUpdates = state.reportFileQueueProgress.mock.calls.length
+		await vi.advanceTimersByTimeAsync(60_000)
+		expect(request).toHaveBeenCalledTimes(2)
+		expect(request.mock.calls.map(([, options]) => JSON.parse(options!.body as string).input)).toEqual([
+			[oldSource],
+			[newSource],
+		])
+		expect([...points.entries()]).toEqual(savedPoints)
+		expect(hashes[filePath]).toBe(hash(newSource))
+		expect(cache.completeFile).toHaveBeenCalledOnce()
+		expect(state.setSystemState).toHaveBeenCalledTimes(statusUpdates)
+		expect(state.reportFileQueueProgress).toHaveBeenCalledTimes(progressUpdates)
+	})
 
 	it("T22 real parser oversized single-line watcher segments have distinct verified IDs", async () => {
 		const filePath = path.join(workspace, "long.md")
