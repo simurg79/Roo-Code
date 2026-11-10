@@ -62,6 +62,7 @@ myplans
 myscripts
 .roo
 .rooignore
+.rooInclude
 
 # Temp
 .tmp
