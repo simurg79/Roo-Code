@@ -4,6 +4,9 @@ import * as vscode from "vscode"
 import path from "path"
 import { createHash } from "crypto"
 import { FileWatcher } from "../file-watcher"
+import { DirectoryScanner } from "../scanner"
+import { listFiles } from "../../../glob/list-files"
+import { stat } from "fs/promises"
 import { CodeIndexOrchestrator } from "../../orchestrator"
 import { GenerationAllocator } from "../../generation-allocator"
 import { IndexWriteGate, LATE_WRITE_GRACE_MS } from "../../index-write-gate"
@@ -21,7 +24,15 @@ import { FileCompletion } from "../../file-completion"
 import { FileFailureRegistry } from "../../file-failure-registry"
 import { codeIndexLog } from "../../code-index-log"
 
+// Use this spec's workspace double, not the setup-time VS Code module.
+vi.hoisted(() => vi.resetModules())
+
 vi.mock("../../../../utils/safeWriteJson", () => ({ safeWriteJson: vi.fn() }))
+vi.mock("../../../glob/list-files", () => ({ listFiles: vi.fn() }))
+vi.mock("fs/promises", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("fs/promises")>()
+	return { ...actual, stat: vi.fn() }
+})
 
 vi.mock("../../../../core/ignore/RooIgnoreController", () => ({
 	RooIgnoreController: vi.fn().mockImplementation(() => ({ initialize: vi.fn(), validateAccess: () => true })),
@@ -33,6 +44,7 @@ vi.mock("vscode", () => ({
 	workspace: {
 		workspaceFolders: [{ uri: { fsPath: "/mock/workspace" } }],
 		createFileSystemWatcher: vi.fn(),
+		getWorkspaceFolder: vi.fn(),
 		fs: { stat: vi.fn(), readFile: vi.fn() },
 	},
 	RelativePattern: vi.fn().mockImplementation((base, pattern) => ({ base, pattern })),
@@ -1494,8 +1506,11 @@ describe("FileWatcher per-file completion", () => {
 		},
 	)
 
-	it("T31 explicit Start Indexing replaces a real watcher provider wait and preserves replacement results", async () => {
+	it("T34 explicit Start Indexing replaces a watcher provider wait through the real directory scanner", async () => {
 		const filePath = path.join(workspace, "restart.md")
+		vi.mocked(listFiles).mockResolvedValue([[filePath], false, []])
+		vi.mocked(stat).mockResolvedValue({ size: 1000 } as any)
+		vi.mocked(vscode.workspace.getWorkspaceFolder).mockReturnValue({ uri: { fsPath: workspace } } as any)
 		const oldSource = "waiting revision ".repeat(10).trim()
 		const newSource = "replacement revision ".repeat(10).trim()
 		contents.set(filePath, oldSource)
@@ -1580,32 +1595,44 @@ describe("FileWatcher per-file completion", () => {
 			await initial.startIndexing()
 			await queue([filePath])
 			expect(request).toHaveBeenCalledOnce()
-			expect(failures.list()[0]).toMatchObject({ state: "retrying", revision: hash(oldSource) })
+			expect(failures.list()).toEqual([
+				expect.objectContaining({ path: "restart.md", state: "retrying", revision: hash(oldSource) }),
+			])
 			expect(initial.isScanning).toBe(false)
 			expect(initial.isActive).toBe(true)
 			contents.set(filePath, newSource)
 			const replacementWatcher = makeManagedWatcher()
-			const replacementScan = vi.fn(async () => {
-				const result = await replacementWatcher.processFile(filePath)
-				return {
-					stats: { processed: 1, skipped: 0 },
-					totalBlockCount: 1,
-					incompleteFiles: result.status === "local_error" ? [filePath] : [],
-				}
-			})
+			const replacementScanner = new DirectoryScanner(
+				embedder,
+				store,
+				parser,
+				cache,
+				ignore,
+				1,
+				gate,
+				generations,
+				failures,
+			)
+			const replacementScan = vi.spyOn(replacementScanner, "scanDirectory")
 			createServices.mockReturnValue({
 				embedder,
 				vectorStore: store,
-				scanner: { scanDirectory: replacementScan },
+				scanner: replacementScanner,
 				fileWatcher: replacementWatcher,
 			})
 			const startup = manager.startIndexing()
 			expect(manager.startIndexing()).toBe(startup)
 			await startup
-			await drain()
+			for (let advance = 0; advance < 20 && manager.state !== "Indexed"; advance++) {
+				await vi.advanceTimersByTimeAsync(0)
+			}
+			expect(manager.state).toBe("Indexed")
 			expect(createServices).toHaveBeenCalledOnce()
 			expect(replacementScan).toHaveBeenCalledOnce()
+			expect(listFiles).toHaveBeenCalledOnce()
+			expect(stat).toHaveBeenCalledWith(filePath)
 			expect(request).toHaveBeenCalledTimes(2)
+			expect(JSON.parse(request.mock.calls[1][1]!.body as string).input).toEqual([newSource])
 			expect(hashes[filePath]).toBe(hash(newSource))
 			expect(cache.completeFile).toHaveBeenCalledExactlyOnceWith(filePath, hash(newSource))
 			expect([...points.values()].map((point) => point.payload.codeChunk)).toEqual([newSource])
