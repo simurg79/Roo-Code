@@ -4,26 +4,20 @@ import { EmbedderInfo, EmbeddingResponse, IEmbedder } from "../interfaces"
 import { getModelQueryPrefix } from "../../../shared/embeddingModels"
 import { MAX_ITEM_TOKENS } from "../constants"
 import { t } from "../../../i18n"
-import { withValidationErrorHandling, sanitizeErrorMessage } from "../shared/validation-helpers"
+import { withValidationErrorHandling } from "../shared/validation-helpers"
 import { EmbeddingError, type TransientClass } from "../shared/indexing-errors"
 
-// Timeout constants for Ollama API requests
 const OLLAMA_EMBEDDING_TIMEOUT_MS = 60000 // 60 seconds for embedding requests
 const OLLAMA_VALIDATION_TIMEOUT_MS = 30000 // 30 seconds for validation requests
 
-/**
- * Implements the IEmbedder interface using a local Ollama instance.
- */
 export class CodeIndexOllamaEmbedder implements IEmbedder {
 	readonly internallyRetriedClasses: ReadonlySet<TransientClass> = new Set()
 	private readonly baseUrl: string
 	private readonly defaultModelId: string
 
 	constructor(options: ApiHandlerOptions) {
-		// Ensure ollamaBaseUrl and ollamaModelId exist on ApiHandlerOptions or add defaults
 		let baseUrl = options.ollamaBaseUrl || "http://localhost:11434"
 
-		// Normalize the baseUrl by removing all trailing slashes
 		baseUrl = baseUrl.replace(/\/+$/, "")
 
 		this.baseUrl = baseUrl
@@ -31,15 +25,13 @@ export class CodeIndexOllamaEmbedder implements IEmbedder {
 	}
 
 	/**
-	 * Creates embeddings for the given texts using the specified Ollama model.
-	 * @param texts - An array of strings to embed.
-	 * @param model - Optional model ID to override the default.
-	 * @returns A promise that resolves to an EmbeddingResponse containing the embeddings and usage data.
+	 * Embeds texts with Ollama; model overrides the default.
+	 * Returns embeddings and usage data.
 	 */
 	async createEmbeddings(texts: string[], model?: string, signal?: AbortSignal): Promise<EmbeddingResponse> {
 		signal?.throwIfAborted()
 		const modelToUse = model || this.defaultModelId
-		const url = `${this.baseUrl}/api/embed` // Endpoint as specified
+		const url = `${this.baseUrl}/api/embed`
 
 		// Apply model-specific query prefix if required
 		const queryPrefix = getModelQueryPrefix("ollama", modelToUse)
@@ -78,7 +70,7 @@ export class CodeIndexOllamaEmbedder implements IEmbedder {
 				},
 				body: JSON.stringify({
 					model: modelToUse,
-					input: processedTexts, // Using 'input' as requested
+					input: processedTexts,
 				}),
 				signal: requestSignal,
 			})
@@ -104,7 +96,6 @@ export class CodeIndexOllamaEmbedder implements IEmbedder {
 			const data = await response.json()
 			signal?.throwIfAborted()
 
-			// Extract embeddings using 'embeddings' key as requested
 			const embeddings = data.embeddings
 			if (!embeddings || !Array.isArray(embeddings)) {
 				throw new Error(t("embeddings:ollama.invalidResponseStructure"))
@@ -115,10 +106,8 @@ export class CodeIndexOllamaEmbedder implements IEmbedder {
 			}
 		} catch (error: any) {
 			signal?.throwIfAborted()
-			// Log the original error for debugging purposes
 			codeIndexLog.error("Ollama embedding failed:", error)
 
-			// Handle specific error types with better messages
 			if (error.name === "AbortError") {
 				throw new EmbeddingError(t("embeddings:validation.connectionFailed"), error, {
 					classification: controller.signal.aborted ? "connection" : "permanent",
@@ -129,17 +118,15 @@ export class CodeIndexOllamaEmbedder implements IEmbedder {
 				throw new EmbeddingError(t("embeddings:ollama.hostNotFound", { baseUrl: this.baseUrl }), error)
 			}
 
-			// Re-throw a more specific error for the caller
-			throw new EmbeddingError(t("embeddings:ollama.embeddingFailed", { message: error.message }), error)
+			throw new EmbeddingError(t("embeddings:ollama.embeddingFailed", { message: error.message }), error, {
+				retryAfterMs: error instanceof EmbeddingError ? error.retryAfterMs : undefined,
+			})
 		} finally {
 			clearTimeout(timeoutId)
 		}
 	}
 
-	/**
-	 * Validates the Ollama embedder configuration by checking service availability and model existence
-	 * @returns Promise resolving to validation result with success status and optional error message
-	 */
+	/** Checks service availability and model existence; returns validity and an optional error. */
 	async validateConfiguration(): Promise<{ valid: boolean; error?: string }> {
 		return withValidationErrorHandling(
 			async () => {
@@ -253,7 +240,6 @@ export class CodeIndexOllamaEmbedder implements IEmbedder {
 							error: t("embeddings:validation.connectionFailed"),
 						}
 					}
-					// Let standard handling take over
 					return undefined
 				},
 			},

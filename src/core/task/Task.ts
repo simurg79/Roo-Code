@@ -271,6 +271,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	private readonly globalStoragePath: string
 	abort: boolean = false
 	private lifecycleAbortController = new AbortController()
+
+	public get lifecycleSignal(): AbortSignal {
+		return this.lifecycleAbortController.signal
+	}
+
 	currentRequestAbortController?: AbortController
 	skipPrevResponseIdOnce: boolean = false
 	private pendingInstructionRefresh = false

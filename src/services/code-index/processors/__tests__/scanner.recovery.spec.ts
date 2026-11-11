@@ -17,7 +17,9 @@ import { ParserFatalError } from "../../parser-errors"
 import { CodeBlock } from "../../interfaces"
 import { listFiles } from "../../../glob/list-files"
 import { generateRelativeFilePath } from "../../shared/get-relative-path"
-import { INDEX_STOP_LIMIT_MS, PARSE_TIMEOUT_MS, PARSING_CONCURRENCY } from "../../constants"
+import { INDEX_STOP_LIMIT_MS, MAX_BLOCK_CHARS, PARSE_TIMEOUT_MS, PARSING_CONCURRENCY } from "../../constants"
+import { CodeIndexOllamaEmbedder } from "../../embedders/ollama"
+import { QdrantVectorStore } from "../../vector-store/qdrant-client"
 import { FileFailureRegistry } from "../../file-failure-registry"
 import { codeIndexLog } from "../../code-index-log"
 
@@ -143,6 +145,7 @@ describe("DirectoryScanner durable per-file recovery", () => {
 			gate,
 			generations,
 			isCurrent,
+			failures,
 		)
 		return { orchestrator, state, watcher, fatal }
 	}
@@ -226,6 +229,7 @@ describe("DirectoryScanner durable per-file recovery", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks()
+		vi.unstubAllGlobals()
 		vi.useRealTimers()
 	})
 
@@ -1128,6 +1132,82 @@ describe("DirectoryScanner durable per-file recovery", () => {
 			}
 		},
 	)
+
+	it("T29 scanner submits whole Unicode characters and verifies the complete source hash", async () => {
+		const filePath = path.join(workspacePath, "unicode.md")
+		const source = "a".repeat(MAX_BLOCK_CHARS - 1) + "\u{1f600}" + "漢é".repeat(MAX_BLOCK_CHARS)
+		listedPaths = [filePath]
+		vi.mocked(vscode.workspace.fs.readFile).mockResolvedValue(Buffer.from(source))
+		parser = new CodeParser()
+		scanner = createScanner()
+		const errors = vi.fn()
+		const result = await scanner.scanDirectory(workspacePath, errors)
+		const submitted = embedder.createEmbeddings.mock.calls.flatMap(([texts]: [string[]]) => texts)
+		expect(submitted.length).toBeGreaterThan(1)
+		expect(submitted[0]).toHaveLength(MAX_BLOCK_CHARS - 1)
+		for (const text of submitted) {
+			expect(text).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u)
+			expect(Buffer.from(text).toString("utf8")).toBe(text)
+		}
+		expect(submitted.join("")).toBe(source)
+		expect(errors).not.toHaveBeenCalled()
+		expect(result.incompleteFiles).toEqual([])
+		const stored = filePoints(filePath)
+		expect(stored).toHaveLength(submitted.length)
+		expect(store.countPointsForFile).toHaveBeenCalledWith(filePath, stored[0].payload.generation)
+		expect(cache.getHash(filePath)).toBe(createHash("sha256").update(source).digest("hex"))
+		expect(cache.getOpenFiles()).toEqual({})
+	})
+
+	it.each(["embed", "upsert"] as const)("T30 scan disable interrupts a 30s %s transport wait", async (activity) => {
+		const request = vi.fn(async (input: RequestInfo | URL) => {
+			const url = input instanceof Request ? input.url : String(input)
+			if (url.endsWith("/")) return new Response(JSON.stringify({ title: "qdrant", version: "1.14.0" }))
+			return new Response(JSON.stringify({ error: "limited" }), {
+				status: 429,
+				headers: { "content-type": "application/json", "retry-after": "30" },
+			})
+		})
+		vi.stubGlobal("fetch", request)
+		if (activity === "embed") embedder = new CodeIndexOllamaEmbedder({ ollamaBaseUrl: "https://embed.test" })
+		else {
+			const realStore = new QdrantVectorStore(workspacePath, "https://store.test", 1)
+			store.upsertPoints.mockImplementation((batch: any[]) => realStore.upsertPoints(batch))
+		}
+		const { orchestrator, state } = createOrchestrator()
+		const pending = orchestrator.startIndexing()
+		await drain()
+		expect(failures.list()).toEqual([
+			expect.objectContaining({ activity, classification: "rate-limit", state: "retrying", attempt: 1 }),
+		])
+		expect(state.state).toBe("Indexing")
+		const transportCalls = () =>
+			request.mock.calls.filter(([input]) => {
+				const url = input instanceof Request ? input.url : String(input)
+				return activity === "embed" ? url.includes("/api/embed") : url.includes("/points")
+			})
+		expect(transportCalls()).toHaveLength(1)
+		await vi.advanceTimersByTimeAsync(1000)
+		expect(transportCalls()).toHaveLength(1)
+		const stopped = orchestrator.stopWatcher()
+		await vi.advanceTimersByTimeAsync(INDEX_STOP_LIMIT_MS)
+		await stopped
+		await pending
+		await vi.advanceTimersByTimeAsync(60_000)
+		expect(transportCalls()).toHaveLength(1)
+		expect(points.size).toBe(0)
+		if (activity === "embed") expect(store.upsertPoints).not.toHaveBeenCalled()
+		else expect(store.upsertPoints).toHaveBeenCalledOnce()
+		expect(store.deletePointsByFilePath).not.toHaveBeenCalled()
+		expect(store.countPointsForFile).not.toHaveBeenCalled()
+		expect(cache.getHash(fileA)).toBeUndefined()
+		expect(failures.list()).toEqual([expect.objectContaining({ state: "exhausted", activity })])
+		expect(state.setSystemState).toHaveBeenLastCalledWith(
+			"Standby",
+			"embeddings:orchestrator.indexingStoppedPartial",
+			"stop",
+		)
+	})
 
 	it("T22 real parser single-line segments have distinct generation IDs and verified counts", async () => {
 		const markdownPath = path.join(workspacePath, "long.md")

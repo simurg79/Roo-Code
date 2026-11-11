@@ -1,9 +1,9 @@
 {
 	"unknownError": "不明なエラー",
 	"authenticationFailed": "埋め込みの作成に失敗しました：認証に失敗しました。APIキーを確認してください。",
-	"failedWithStatus": "{{attempts}}回試行しましたが、埋め込みの作成に失敗しました：HTTP {{statusCode}} - {{errorMessage}}",
-	"failedWithError": "{{attempts}}回試行しましたが、埋め込みの作成に失敗しました：{{errorMessage}}",
-	"failedMaxAttempts": "{{attempts}}回試行しましたが、埋め込みの作成に失敗しました",
+	"failedWithStatus": "埋め込みの作成に失敗しました：HTTP {{statusCode}} - {{errorMessage}}",
+	"failedWithError": "埋め込みの作成に失敗しました：{{errorMessage}}",
+	"failedMaxAttempts": "埋め込みの作成に失敗しました",
 	"textExceedsTokenLimit": "インデックス{{index}}のテキストが最大トークン制限を超えています（{{itemTokens}}> {{maxTokens}}）。スキップします。",
 	"rateLimitRetry": "レート制限に達しました。{{delayMs}}ミリ秒後に再試行します（試行{{attempt}}/{{maxRetries}}）",
 	"bedrock": {

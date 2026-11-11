@@ -6,6 +6,7 @@ import { IEmbedder } from "./interfaces/embedder"
 import { IVectorStore } from "./interfaces/vector-store"
 import { CodeIndexConfigManager } from "./config-manager"
 import { CodeIndexStateManager } from "./state-manager"
+import { retryWithPolicy } from "./shared/retry-policy"
 
 /**
  * Service responsible for searching the code index.
@@ -26,7 +27,11 @@ export class CodeIndexSearchService {
 	 * @returns Search results and partial-index details
 	 * @throws Error if the service is not properly configured or ready
 	 */
-	public async searchIndex(query: string, directoryPrefix?: string): Promise<CodeIndexSearchResponse> {
+	public async searchIndex(
+		query: string,
+		directoryPrefix?: string,
+		signal?: AbortSignal,
+	): Promise<CodeIndexSearchResponse> {
 		if (!this.configManager.isFeatureEnabled || !this.configManager.isFeatureConfigured) {
 			throw new Error("Code index feature is disabled or not configured.")
 		}
@@ -42,8 +47,11 @@ export class CodeIndexSearchService {
 		}
 
 		try {
-			// Generate embedding for query
-			const embeddingResponse = await this.embedder.createEmbeddings([query])
+			const embeddingResponse = await retryWithPolicy(
+				() => this.embedder.createEmbeddings([query], undefined, signal),
+				{ signal, ownedClasses: this.embedder.internallyRetriedClasses },
+			)
+			signal?.throwIfAborted()
 			const vector = embeddingResponse?.embeddings[0]
 			if (!vector) {
 				throw new Error("Failed to generate embedding for query.")
@@ -61,10 +69,7 @@ export class CodeIndexSearchService {
 			return { results, partial: failedFiles.length > 0, failedFiles }
 		} catch (error) {
 			codeIndexLog.error("Search failed", { error })
-			const message = error instanceof Error ? error.message : String(error)
-			this.stateManager.setSystemState("Error", `Search failed: ${message}`, "error")
-
-			throw error // Re-throw the error after setting state
+			throw error
 		}
 	}
 }

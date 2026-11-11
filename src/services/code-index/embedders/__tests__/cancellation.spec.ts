@@ -91,14 +91,6 @@ beforeEach(() => {
 	vi.stubGlobal("fetch", request)
 	vi.spyOn(console, "warn").mockImplementation(() => {})
 	vi.spyOn(console, "error").mockImplementation(() => {})
-	for (const embedderClass of [OpenAICompatibleEmbedder, OpenRouterEmbedder]) {
-		Object.assign(Reflect.get(embedderClass, "globalRateLimitState"), {
-			isRateLimited: false,
-			rateLimitResetTime: 0,
-			consecutiveRateLimitErrors: 0,
-			lastRateLimitError: 0,
-		})
-	}
 })
 
 afterEach(() => {
@@ -161,50 +153,6 @@ describe.each(providers)("$name cancellation", ({ create, transport }) => {
 			await expect(result).rejects.toBe(controller.signal.reason)
 			expect(request).toHaveBeenCalledTimes(1)
 			expect(vi.getTimerCount()).toBe(0)
-		},
-	)
-})
-
-describe("retry cancellation", () => {
-	it.each(providers.filter(({ name }) => ["OpenAI", "OpenAI-compatible", "OpenRouter", "Bedrock"].includes(name)))(
-		"$name cancels backoff without another request",
-		async ({ create }) => {
-			const controller = new AbortController()
-			const error = Object.assign(new Error("Rate limited"), { status: 429, name: "ThrottlingException" })
-			request.mockRejectedValue(error)
-			const result = create().createEmbeddings(["first"], undefined, controller.signal)
-			await vi.advanceTimersByTimeAsync(0)
-			expect(request).toHaveBeenCalledTimes(1)
-			expect(vi.getTimerCount()).toBe(1)
-			controller.abort()
-			await expect(result).rejects.toBe(controller.signal.reason)
-			expect(vi.getTimerCount()).toBe(0)
-			await vi.runAllTimersAsync()
-			expect(request).toHaveBeenCalledTimes(1)
-		},
-	)
-
-	it.each([OpenAICompatibleEmbedder, OpenRouterEmbedder])(
-		"cancels a request queued behind a global rate limit",
-		async (Embedder) => {
-			const embedder =
-				Embedder === OpenAICompatibleEmbedder
-					? new OpenAICompatibleEmbedder("https://example.test/v1", "test-key")
-					: new OpenRouterEmbedder("test-key")
-			const firstController = new AbortController()
-			request.mockRejectedValue(Object.assign(new Error("Rate limited"), { status: 429 }))
-			const firstResult = embedder.createEmbeddings(["first"], undefined, firstController.signal)
-			await vi.advanceTimersByTimeAsync(0)
-			const queuedController = new AbortController()
-			const queuedResult = embedder.createEmbeddings(["second"], undefined, queuedController.signal)
-			await vi.advanceTimersByTimeAsync(0)
-			expect(vi.getTimerCount()).toBe(2)
-			queuedController.abort()
-			await expect(queuedResult).rejects.toBe(queuedController.signal.reason)
-			firstController.abort()
-			await expect(firstResult).rejects.toBe(firstController.signal.reason)
-			await vi.runAllTimersAsync()
-			expect(request).toHaveBeenCalledTimes(1)
 		},
 	)
 })

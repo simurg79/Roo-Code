@@ -1,9 +1,9 @@
 {
 	"unknownError": "Onbekende fout",
 	"authenticationFailed": "Insluitingen maken mislukt: Authenticatie mislukt. Controleer je API-sleutel.",
-	"failedWithStatus": "Insluitingen maken mislukt na {{attempts}} pogingen: HTTP {{statusCode}} - {{errorMessage}}",
-	"failedWithError": "Insluitingen maken mislukt na {{attempts}} pogingen: {{errorMessage}}",
-	"failedMaxAttempts": "Insluitingen maken mislukt na {{attempts}} pogingen",
+	"failedWithStatus": "Insluitingen maken mislukt: HTTP {{statusCode}} - {{errorMessage}}",
+	"failedWithError": "Insluitingen maken mislukt: {{errorMessage}}",
+	"failedMaxAttempts": "Insluitingen maken mislukt",
 	"textExceedsTokenLimit": "Tekst op index {{index}} overschrijdt de maximale tokenlimiet ({{itemTokens}} > {{maxTokens}}). Wordt overgeslagen.",
 	"rateLimitRetry": "Snelheidslimiet bereikt, opnieuw proberen over {{delayMs}}ms (poging {{attempt}}/{{maxRetries}})",
 	"bedrock": {

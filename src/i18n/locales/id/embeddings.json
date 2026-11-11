@@ -1,9 +1,9 @@
 {
 	"unknownError": "Error tidak dikenal",
 	"authenticationFailed": "Gagal membuat embeddings: Autentikasi gagal. Silakan periksa API key Anda.",
-	"failedWithStatus": "Gagal membuat embeddings setelah {{attempts}} percobaan: HTTP {{statusCode}} - {{errorMessage}}",
-	"failedWithError": "Gagal membuat embeddings setelah {{attempts}} percobaan: {{errorMessage}}",
-	"failedMaxAttempts": "Gagal membuat embeddings setelah {{attempts}} percobaan",
+	"failedWithStatus": "Gagal membuat embeddings: HTTP {{statusCode}} - {{errorMessage}}",
+	"failedWithError": "Gagal membuat embeddings: {{errorMessage}}",
+	"failedMaxAttempts": "Gagal membuat embeddings",
 	"textExceedsTokenLimit": "Teks pada indeks {{index}} melebihi batas maksimum token ({{itemTokens}} > {{maxTokens}}). Dilewati.",
 	"rateLimitRetry": "Batas rate tercapai, mencoba lagi dalam {{delayMs}}ms (percobaan {{attempt}}/{{maxRetries}})",
 	"bedrock": {

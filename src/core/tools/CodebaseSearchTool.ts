@@ -68,7 +68,11 @@ export class CodebaseSearchTool extends BaseTool<"codebase_search"> {
 				throw new Error("Code Indexing is not configured (Missing OpenAI Key or Qdrant URL).")
 			}
 
-			const { results: searchResults, partial, failedFiles } = await manager.searchIndex(query, directoryPrefix)
+			const {
+				results: searchResults,
+				partial,
+				failedFiles,
+			} = await manager.searchIndex(query, directoryPrefix, task.lifecycleSignal)
 			const partialNotice = partial
 				? `Partial index: results may be incomplete. Failed files:\n${failedFiles.map((file) => `- ${file}`).join("\n")}\n\n`
 				: ""

@@ -332,13 +332,22 @@ export class CodeParser implements ICodeParser {
 				}
 
 				// Split the oversized line into segments
-				let remainingLineContent = line
 				let currentSegmentStartChar = 0
-				while (remainingLineContent.length > 0) {
-					const segment = remainingLineContent.substring(0, MAX_BLOCK_CHARS)
-					remainingLineContent = remainingLineContent.substring(MAX_BLOCK_CHARS)
+				while (currentSegmentStartChar < line.length) {
+					let segmentEnd = Math.min(currentSegmentStartChar + MAX_BLOCK_CHARS, line.length)
+					const precedingUnit = line.charCodeAt(segmentEnd - 1)
+					const followingUnit = line.charCodeAt(segmentEnd)
+					if (
+						precedingUnit >= 0xd800 &&
+						precedingUnit <= 0xdbff &&
+						followingUnit >= 0xdc00 &&
+						followingUnit <= 0xdfff
+					) {
+						segmentEnd--
+					}
+					const segment = line.slice(currentSegmentStartChar, segmentEnd)
 					createSegmentBlock(segment, originalLineNumber, currentSegmentStartChar)
-					currentSegmentStartChar += MAX_BLOCK_CHARS
+					currentSegmentStartChar = segmentEnd
 				}
 				// Update chunkStartLineIndex to continue processing from the next line
 				chunkStartLineIndex = i + 1

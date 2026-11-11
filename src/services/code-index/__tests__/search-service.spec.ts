@@ -111,11 +111,7 @@ describe("CodeIndexSearchService partial index", () => {
 			store.search.mockRejectedValue(error)
 			await expect(service.searchIndex("query")).rejects.toBe(error)
 			expect(codeIndexLog.error).toHaveBeenLastCalledWith("Search failed", { error })
-			expect(stateManager.setSystemState).toHaveBeenCalledWith(
-				"Error",
-				"Search failed: search unavailable",
-				"error",
-			)
+			expect(stateManager.setSystemState).not.toHaveBeenCalled()
 		},
 	)
 })

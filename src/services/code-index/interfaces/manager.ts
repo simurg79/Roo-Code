@@ -69,7 +69,7 @@ export interface ICodeIndexManager {
 	 * @param directoryPrefix Optional directory path to filter results by
 	 * @returns Search results and partial-index details
 	 */
-	searchIndex(query: string, directoryPrefix?: string): Promise<CodeIndexSearchResponse>
+	searchIndex(query: string, directoryPrefix?: string, signal?: AbortSignal): Promise<CodeIndexSearchResponse>
 
 	/**
 	 * Gets the current status of the indexing system

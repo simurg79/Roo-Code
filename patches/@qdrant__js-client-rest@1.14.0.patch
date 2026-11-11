@@ -1,0 +1,26 @@
+diff --git a/dist/cjs/api-client.js b/dist/cjs/api-client.js
+--- a/dist/cjs/api-client.js
++++ b/dist/cjs/api-client.js
+@@ -52,7 +52,7 @@ function createClient(baseUrl, { headers, timeout, connections }) {
+         }
+         catch (error) {
+             if (error instanceof openapi_typescript_fetch_1.ApiError && error.status === 429) {
+-                const retryAfterHeader = error.headers.get('retry-after')?.[0];
++                const retryAfterHeader = error.headers.get('retry-after');
+-                if (retryAfterHeader) {
++                if (retryAfterHeader && !isNaN(Number(retryAfterHeader))) {
+                     throw new errors_js_1.QdrantClientResourceExhaustedError(error.message, retryAfterHeader);
+                 }
+diff --git a/dist/esm/api-client.js b/dist/esm/api-client.js
+--- a/dist/esm/api-client.js
++++ b/dist/esm/api-client.js
+@@ -49,7 +49,7 @@ export function createClient(baseUrl, { headers, timeout, connections }) {
+         }
+         catch (error) {
+             if (error instanceof ApiError && error.status === 429) {
+-                const retryAfterHeader = error.headers.get('retry-after')?.[0];
++                const retryAfterHeader = error.headers.get('retry-after');
+-                if (retryAfterHeader) {
++                if (retryAfterHeader && !isNaN(Number(retryAfterHeader))) {
+                     throw new QdrantClientResourceExhaustedError(error.message, retryAfterHeader);
+                 }

@@ -3,7 +3,7 @@ import { codeIndexLog } from "../../code-index-log"
 import type { MockedClass, MockedFunction } from "vitest"
 import { OpenAI } from "openai"
 import { OpenAICompatibleEmbedder } from "../openai-compatible"
-import { MAX_ITEM_TOKENS, INITIAL_RETRY_DELAY_MS } from "../../constants"
+import { MAX_ITEM_TOKENS } from "../../constants"
 
 // Mock the OpenAI SDK
 vitest.mock("openai")
@@ -17,9 +17,9 @@ vitest.mock("../../../../i18n", () => ({
 		const translations: Record<string, string> = {
 			"embeddings:authenticationFailed":
 				"Failed to create embeddings: Authentication failed. Please check your API key.",
-			"embeddings:failedWithStatus": `Failed to create embeddings after ${params?.attempts} attempts: HTTP ${params?.statusCode} - ${params?.errorMessage}`,
-			"embeddings:failedWithError": `Failed to create embeddings after ${params?.attempts} attempts: ${params?.errorMessage}`,
-			"embeddings:failedMaxAttempts": `Failed to create embeddings after ${params?.attempts} attempts`,
+			"embeddings:failedWithStatus": `Failed to create embeddings: HTTP ${params?.statusCode} - ${params?.errorMessage}`,
+			"embeddings:failedWithError": `Failed to create embeddings: ${params?.errorMessage}`,
+			"embeddings:failedMaxAttempts": `Failed to create embeddings`,
 			"embeddings:textExceedsTokenLimit": `Text at index ${params?.index} exceeds maximum token limit (${params?.itemTokens} > ${params?.maxTokens}). Skipping.`,
 			"embeddings:rateLimitRetry": `Rate limit hit, retrying in ${params?.delayMs}ms (attempt ${params?.attempt}/${params?.maxRetries})`,
 			"embeddings:unknownError": "Unknown error",
@@ -68,16 +68,6 @@ describe("OpenAICompatibleEmbedder", () => {
 		}
 
 		MockedOpenAI.mockImplementation(() => mockOpenAIInstance)
-
-		// Reset global rate limit state to prevent interference between tests
-		const tempEmbedder = new OpenAICompatibleEmbedder(testBaseUrl, testApiKey, testModelId)
-		;(tempEmbedder as any).constructor.globalRateLimitState = {
-			isRateLimited: false,
-			rateLimitResetTime: 0,
-			consecutiveRateLimitErrors: 0,
-			lastRateLimitError: 0,
-			mutex: (tempEmbedder as any).constructor.globalRateLimitState.mutex,
-		}
 	})
 
 	afterEach(() => {
@@ -403,44 +393,20 @@ describe("OpenAICompatibleEmbedder", () => {
 				vitest.useRealTimers()
 			})
 
-			it("should retry on rate limit errors with exponential backoff", async () => {
-				const testTexts = ["Hello world"]
-				const rateLimitError = { status: 429, message: "Rate limit exceeded" }
-
-				// Create base64 encoded embedding for successful response
-				const testEmbedding = new Float32Array([0.25, 0.5, 0.75])
-				const base64String = Buffer.from(testEmbedding.buffer).toString("base64")
-
-				mockEmbeddingsCreate
-					.mockRejectedValueOnce(rateLimitError)
-					.mockRejectedValueOnce(rateLimitError)
-					.mockResolvedValueOnce({
-						data: [{ embedding: base64String }],
-						usage: { prompt_tokens: 10, total_tokens: 15 },
-					})
-
-				const resultPromise = embedder.createEmbeddings(testTexts)
-
-				// First attempt fails immediately, triggering global rate limit (5s)
-				await vitest.advanceTimersByTimeAsync(100)
-
-				// Wait for global rate limit delay
-				await vitest.advanceTimersByTimeAsync(5000)
-
-				// Second attempt also fails, increasing delay
-				await vitest.advanceTimersByTimeAsync(100)
-
-				// Wait for increased global rate limit delay (10s)
-				await vitest.advanceTimersByTimeAsync(10000)
-
-				const result = await resultPromise
-
-				expect(mockEmbeddingsCreate).toHaveBeenCalledTimes(3)
-				expect(codeIndexLog.warn).toHaveBeenCalledWith(expect.stringContaining("Rate limit hit, retrying in"))
-				expect(result).toEqual({
-					embeddings: [[0.25, 0.5, 0.75]],
-					usage: { promptTokens: 10, totalTokens: 15 },
+			it("returns rate limits immediately without wrapper retries", async () => {
+				const cause = Object.assign(new Error("Rate limit exceeded"), {
+					status: 429,
+					name: "ThrottlingException",
 				})
+				mockEmbeddingsCreate.mockRejectedValue(cause)
+				await expect(embedder.createEmbeddings(["Hello world"])).rejects.toMatchObject({
+					classification: "rate-limit",
+					statusCode: 429,
+					cause,
+				})
+				expect(mockEmbeddingsCreate).toHaveBeenCalledTimes(1)
+				expect(vitest.getTimerCount()).toBe(0)
+				expect([...embedder.internallyRetriedClasses]).toEqual([])
 			})
 
 			it("should not retry on non-rate-limit errors", async () => {
@@ -466,7 +432,7 @@ describe("OpenAICompatibleEmbedder", () => {
 				mockEmbeddingsCreate.mockRejectedValue(serverError)
 
 				await expect(embedder.createEmbeddings(testTexts)).rejects.toThrow(
-					"Failed to create embeddings after 3 attempts: HTTP 500 - Internal server error",
+					"Failed to create embeddings: HTTP 500 - Internal server error",
 				)
 
 				expect(mockEmbeddingsCreate).toHaveBeenCalledTimes(1)
@@ -484,7 +450,7 @@ describe("OpenAICompatibleEmbedder", () => {
 				mockEmbeddingsCreate.mockRejectedValue(apiError)
 
 				await expect(embedder.createEmbeddings(testTexts)).rejects.toThrow(
-					"Failed to create embeddings after 3 attempts: API connection failed",
+					"Failed to create embeddings: API connection failed",
 				)
 
 				expect(codeIndexLog.error).toHaveBeenCalledWith(
@@ -500,7 +466,7 @@ describe("OpenAICompatibleEmbedder", () => {
 				mockEmbeddingsCreate.mockRejectedValue(batchError)
 
 				await expect(embedder.createEmbeddings(testTexts)).rejects.toThrow(
-					"Failed to create embeddings after 3 attempts: Batch processing failed",
+					"Failed to create embeddings: Batch processing failed",
 				)
 
 				expect(codeIndexLog.error).toHaveBeenCalledWith(
@@ -553,7 +519,7 @@ describe("OpenAICompatibleEmbedder", () => {
 				mockEmbeddingsCreate.mockRejectedValue(httpError)
 
 				await expect(embedder.createEmbeddings(testTexts)).rejects.toThrow(
-					"Failed to create embeddings after 3 attempts: HTTP 400 - Bad request",
+					"Failed to create embeddings: HTTP 400 - Bad request",
 				)
 			})
 
@@ -564,7 +530,7 @@ describe("OpenAICompatibleEmbedder", () => {
 				mockEmbeddingsCreate.mockRejectedValue(networkError)
 
 				await expect(embedder.createEmbeddings(testTexts)).rejects.toThrow(
-					"Failed to create embeddings after 3 attempts: Network timeout",
+					"Failed to create embeddings: Network timeout",
 				)
 			})
 
@@ -575,7 +541,7 @@ describe("OpenAICompatibleEmbedder", () => {
 				mockEmbeddingsCreate.mockRejectedValue(weirdError)
 
 				await expect(embedder.createEmbeddings(testTexts)).rejects.toThrow(
-					"Failed to create embeddings after 3 attempts: Custom error object",
+					"Failed to create embeddings: Custom error object",
 				)
 			})
 
@@ -586,7 +552,7 @@ describe("OpenAICompatibleEmbedder", () => {
 				mockEmbeddingsCreate.mockRejectedValue(unknownError)
 
 				await expect(embedder.createEmbeddings(testTexts)).rejects.toThrow(
-					"Failed to create embeddings after 3 attempts: Unknown error",
+					"Failed to create embeddings: Unknown error",
 				)
 			})
 		})
@@ -810,7 +776,7 @@ describe("OpenAICompatibleEmbedder", () => {
 
 				it.each([
 					[401, "Authentication failed. Please check your API key."],
-					[500, "Failed to create embeddings after 3 attempts"],
+					[500, "Failed to create embeddings"],
 				])("should handle HTTP errors: %d", async (status, expectedMessage) => {
 					const embedder = new OpenAICompatibleEmbedder(azureUrl, testApiKey, testModelId)
 					const mockResponse = createMockResponse({}, status, false)
@@ -819,42 +785,14 @@ describe("OpenAICompatibleEmbedder", () => {
 					await expect(embedder.createEmbeddings(["test"])).rejects.toThrow(expectedMessage)
 				})
 
-				it("should handle rate limiting with retries", async () => {
-					vitest.useFakeTimers()
+				it("returns direct-fetch rate limits without retrying", async () => {
 					const embedder = new OpenAICompatibleEmbedder(azureUrl, testApiKey, testModelId)
-					const base64String = createBase64Embedding([0.1, 0.2, 0.3])
-
-					;(global.fetch as MockedFunction<typeof fetch>)
-						.mockResolvedValueOnce(createMockResponse({}, 429, false) as any)
-						.mockResolvedValueOnce(createMockResponse({}, 429, false) as any)
-						.mockResolvedValueOnce(
-							createMockResponse({
-								data: [{ embedding: base64String }],
-								usage: { prompt_tokens: 10, total_tokens: 15 },
-							}) as any,
-						)
-
-					const resultPromise = embedder.createEmbeddings(["test"])
-
-					// First attempt fails, triggering global rate limit
-					await vitest.advanceTimersByTimeAsync(100)
-
-					// Wait for global rate limit (5s)
-					await vitest.advanceTimersByTimeAsync(5000)
-
-					// Second attempt also fails
-					await vitest.advanceTimersByTimeAsync(100)
-
-					// Wait for increased global rate limit (10s)
-					await vitest.advanceTimersByTimeAsync(10000)
-
-					const result = await resultPromise
-
-					expect(global.fetch).toHaveBeenCalledTimes(3)
-					// Check that rate limit warnings were logged
-					expect(codeIndexLog.warn).toHaveBeenCalledWith(expect.stringContaining("Rate limit hit"))
-					expectEmbeddingValues(result.embeddings[0], [0.1, 0.2, 0.3])
-					vitest.useRealTimers()
+					vi.mocked(global.fetch).mockResolvedValue(new Response("rate limited", { status: 429 }))
+					await expect(embedder.createEmbeddings(["test"])).rejects.toMatchObject({
+						classification: "rate-limit",
+						statusCode: 429,
+					})
+					expect(global.fetch).toHaveBeenCalledTimes(1)
 				})
 
 				it("should handle multiple embeddings and network errors", async () => {
@@ -877,9 +815,7 @@ describe("OpenAICompatibleEmbedder", () => {
 					// Test network error
 					const networkError = new Error("Network failed")
 					;(global.fetch as MockedFunction<typeof fetch>).mockRejectedValue(networkError)
-					await expect(embedder.createEmbeddings(["test"])).rejects.toThrow(
-						"Failed to create embeddings after 3 attempts",
-					)
+					await expect(embedder.createEmbeddings(["test"])).rejects.toThrow("Failed to create embeddings")
 				})
 			})
 		})

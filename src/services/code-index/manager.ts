@@ -485,13 +485,17 @@ export class CodeIndexManager {
 		}
 	}
 
-	public async searchIndex(query: string, directoryPrefix?: string): Promise<CodeIndexSearchResponse> {
+	public async searchIndex(
+		query: string,
+		directoryPrefix?: string,
+		signal?: AbortSignal,
+	): Promise<CodeIndexSearchResponse> {
 		if (!this.isFeatureEnabled) {
 			const failedFiles = this.fileFailureRegistry.list().map((failure) => failure.path)
 			return { results: [], partial: failedFiles.length > 0, failedFiles }
 		}
 		this.assertInitialized()
-		return this._searchService!.searchIndex(query, directoryPrefix)
+		return this._searchService!.searchIndex(query, directoryPrefix, signal)
 	}
 
 	/**
