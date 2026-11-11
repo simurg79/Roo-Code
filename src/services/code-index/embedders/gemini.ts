@@ -1,4 +1,5 @@
 import { OpenAICompatibleEmbedder } from "./openai-compatible"
+import { makeRateLimitScope } from "../provider-pacer"
 import { IEmbedder, EmbeddingResponse, EmbedderInfo } from "../interfaces/embedder"
 import { GEMINI_MAX_ITEM_TOKENS } from "../constants"
 import { t } from "../../../i18n"
@@ -14,9 +15,7 @@ import { t } from "../../../i18n"
  * migrated to gemini-embedding-001 for backward compatibility.
  */
 export class GeminiEmbedder implements IEmbedder {
-	get internallyRetriedClasses() {
-		return this.openAICompatibleEmbedder.internallyRetriedClasses
-	}
+	readonly rateLimitScope: string
 
 	private readonly openAICompatibleEmbedder: OpenAICompatibleEmbedder
 	private static readonly GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
@@ -48,6 +47,8 @@ export class GeminiEmbedder implements IEmbedder {
 		if (!apiKey) {
 			throw new Error(t("embeddings:validation.apiKeyRequired"))
 		}
+
+		this.rateLimitScope = makeRateLimitScope("gemini", GeminiEmbedder.GEMINI_BASE_URL, apiKey)
 
 		// Migrate deprecated models to their replacements silently
 		const migratedModelId = modelId ? GeminiEmbedder.migrateModelId(modelId) : undefined

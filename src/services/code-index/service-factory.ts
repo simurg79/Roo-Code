@@ -29,6 +29,8 @@ import { CacheManager } from "./cache-manager"
 import { BATCH_SEGMENT_THRESHOLD } from "./constants"
 
 import { FileFailureRegistry } from "./file-failure-registry"
+import { ProviderPacerRegistry } from "./provider-pacer"
+import { classifyIndexingError } from "./shared/indexing-errors"
 
 import { createDiscoveryContext, type DiscoveryContext } from "../glob/discovery-options"
 
@@ -46,6 +48,7 @@ export class CodeIndexServiceFactory {
 		private readonly writeGate = new IndexWriteGate(),
 		private readonly generationAllocator = new GenerationAllocator(cacheManager),
 		private readonly failures = new FileFailureRegistry(),
+		private readonly providerPacers = new ProviderPacerRegistry(),
 	) {}
 
 	/**
@@ -130,7 +133,7 @@ export class CodeIndexServiceFactory {
 		try {
 			return await embedder.validateConfiguration()
 		} catch (error) {
-			// If validation throws an exception, preserve the original error message
+			if (classifyIndexingError(error) === "rate-limit") throw error
 			return {
 				valid: false,
 				error: error instanceof Error ? error.message : "embeddings:validation.configurationError",
@@ -207,6 +210,7 @@ export class CodeIndexServiceFactory {
 			this.generationAllocator,
 			this.failures,
 			this.getDiscoveryContext,
+			this.providerPacers,
 		)
 	}
 
@@ -245,6 +249,7 @@ export class CodeIndexServiceFactory {
 			this.generationAllocator,
 			this.failures,
 			this.getDiscoveryContext,
+			this.providerPacers,
 		)
 	}
 

@@ -17,6 +17,7 @@ import * as path from "path"
 import { Package } from "../../../shared/package"
 import { FileFailureRegistry, UNKNOWN_REVISION, type FileFailureActivity } from "../file-failure-registry"
 import { codeIndexLog } from "../code-index-log"
+import { ProviderPacerRegistry } from "../provider-pacer"
 
 type FileEvent = { uri: vscode.Uri; type: "create" | "change" | "delete" }
 
@@ -63,6 +64,7 @@ export class FileWatcher implements IFileWatcher {
 		private readonly generations = new GenerationAllocator(cacheManager),
 		private readonly failures = new FileFailureRegistry(),
 		private readonly getDiscoveryContext?: () => Promise<DiscoveryContext>,
+		private readonly pacers = new ProviderPacerRegistry(),
 	) {
 		if (vectorStore) {
 			this.writer = new FileIndexWriter(
@@ -72,6 +74,7 @@ export class FileWatcher implements IFileWatcher {
 				generations,
 				workspacePath,
 				failures,
+				pacers,
 			)
 		}
 		if (batchSegmentThreshold !== undefined) {

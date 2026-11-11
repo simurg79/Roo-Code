@@ -98,6 +98,10 @@
 		"description": "Configureer ondersteuningsprompts die worden gebruikt voor snelle acties zoals het verbeteren van prompts, het uitleggen van code en het oplossen van problemen. Deze prompts helpen Roo om betere ondersteuning te bieden voor veelvoorkomende ontwikkelingstaken."
 	},
 	"codeIndex": {
+		"providerWaiting": "Wachten op {{service}}; de indexering wordt automatisch hervat",
+		"providerWaitingUntil": "Wachten op {{service}}; de indexering wordt automatisch hervat om {{time}}",
+		"providerPaused": "Wachten op {{service}}",
+		"providerPausedUntil": "Wachten op {{service}} tot {{time}}",
 		"title": "Codebase indexering",
 		"enableLabel": "Codebase indexering inschakelen",
 		"enableDescription": "Code-indexering inschakelen voor verbeterde zoekresultaten en contextbegrip",

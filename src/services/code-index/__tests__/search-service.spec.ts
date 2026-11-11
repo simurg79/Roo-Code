@@ -3,6 +3,7 @@ import path from "node:path"
 import { CodeIndexSearchService } from "../search-service"
 import { codeIndexLog } from "../code-index-log"
 import { FileFailureRegistry } from "../file-failure-registry"
+import { ProviderPacerRegistry } from "../provider-pacer"
 import type { CodeIndexConfigManager } from "../config-manager"
 import type { CodeIndexStateManager } from "../state-manager"
 import type { IEmbedder, IVectorStore } from "../interfaces"
@@ -24,7 +25,11 @@ describe("CodeIndexSearchService partial index", () => {
 			currentSearchMaxResults: 12,
 		}
 		const stateManager = { getCurrentStatus: () => ({ systemStatus: state }), setSystemState: vi.fn() }
-		const embedder = { createEmbeddings: vi.fn().mockResolvedValue({ embeddings: [[1, 0]] }) }
+		const registry = new ProviderPacerRegistry()
+		const embedder = {
+			rateLimitScope: "openai:test",
+			createEmbeddings: vi.fn().mockResolvedValue({ embeddings: [[1, 0]] }),
+		}
 		const store = { search: vi.fn().mockResolvedValue([]), collectionExists: vi.fn().mockResolvedValue(exists) }
 		const service = new CodeIndexSearchService(
 			config as CodeIndexConfigManager,
@@ -32,8 +37,9 @@ describe("CodeIndexSearchService partial index", () => {
 			embedder as unknown as IEmbedder,
 			store as unknown as IVectorStore,
 			failures,
+			registry,
 		)
-		return { service, failures, store, embedder, config, stateManager }
+		return { service, failures, store, embedder, config, stateManager, registry }
 	}
 
 	it.each(["Indexed", "Indexing", "Standby"] as const)(
@@ -44,6 +50,7 @@ describe("CodeIndexSearchService partial index", () => {
 				results: [],
 				partial: true,
 				failedFiles: ["src/a.ts", "other/b.ts"],
+				waitingFiles: [],
 			})
 			expect(store.search).toHaveBeenCalledWith([1, 0], path.normalize("src/folder"), 0.4, 12)
 			expect(store.collectionExists).toHaveBeenCalledTimes(state === "Standby" ? 1 : 0)
@@ -60,6 +67,7 @@ describe("CodeIndexSearchService partial index", () => {
 				results,
 				partial: true,
 				failedFiles: ["src/a.ts", "other/b.ts"],
+				waitingFiles: [],
 			})
 		},
 	)
@@ -70,7 +78,12 @@ describe("CodeIndexSearchService partial index", () => {
 		failures.clear("other/b.ts")
 		const results = [{ id: "point", score: 0.9 }]
 		store.search.mockResolvedValue(results)
-		await expect(service.searchIndex("query")).resolves.toEqual({ results, partial: false, failedFiles: [] })
+		await expect(service.searchIndex("query")).resolves.toEqual({
+			results,
+			partial: false,
+			failedFiles: [],
+			waitingFiles: [],
+		})
 	})
 
 	it.each([
@@ -101,7 +114,32 @@ describe("CodeIndexSearchService partial index", () => {
 			results: [],
 			partial: true,
 			failedFiles: ["pending.ts"],
+			waitingFiles: [],
 		})
+	})
+
+	it.each([true, false])("T39 separates waiting files from failures, matches: %s", async (matches) => {
+		vi.useFakeTimers()
+		const { service, registry, store } = prepare("Standby")
+		const pacer = registry.get("openai:test")
+		pacer.reportRateLimit({ status: 429, headers: { "retry-after": "120" } }, pacer.markIssued())
+		const controller = new AbortController()
+		const waiting = pacer.run("src/waiting.ts", controller.signal, async () => undefined).catch(() => undefined)
+		const results = matches ? [{ id: "point", score: 0.9 }] : []
+		store.search.mockResolvedValue(results)
+		try {
+			await expect(service.searchIndex("query")).resolves.toEqual({
+				results,
+				partial: true,
+				failedFiles: ["src/a.ts", "other/b.ts"],
+				waitingFiles: ["src/waiting.ts"],
+			})
+		} finally {
+			controller.abort()
+			await waiting
+			await vi.advanceTimersByTimeAsync(120_000)
+			vi.useRealTimers()
+		}
 	})
 
 	it.each([new Error("search unavailable"), "search unavailable"])(

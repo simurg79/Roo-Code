@@ -1,11 +1,12 @@
 import { VectorStoreSearchResult } from "./vector-store"
-import type { FailedFileStatus, FailedFileSummary } from "@roo-code/types"
+import type { FailedFileStatus, FailedFileSummary, ProviderWaitStatus } from "@roo-code/types"
 import * as vscode from "vscode"
 
 export interface CodeIndexSearchResponse {
 	results: VectorStoreSearchResult[]
 	partial: boolean
 	failedFiles: string[]
+	waitingFiles: string[]
 }
 
 /**
@@ -21,6 +22,7 @@ export interface ICodeIndexManager {
 		message?: string
 		failedFiles?: FailedFileStatus[]
 		failedFileSummary?: FailedFileSummary
+		providerWaits?: ProviderWaitStatus[]
 	}>
 
 	/**
@@ -81,6 +83,7 @@ export interface ICodeIndexManager {
 		message?: string
 		failedFiles?: FailedFileStatus[]
 		failedFileSummary?: FailedFileSummary
+		providerWaits?: ProviderWaitStatus[]
 	}
 
 	/**
@@ -107,4 +110,5 @@ export interface IndexProgressUpdate {
 	totalBlockCount?: number
 	failedFiles?: FailedFileStatus[]
 	failedFileSummary?: FailedFileSummary
+	providerWaits?: ProviderWaitStatus[]
 }

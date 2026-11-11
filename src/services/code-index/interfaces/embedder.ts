@@ -1,11 +1,9 @@
-import type { TransientClass } from "../shared/indexing-errors"
-
 /**
  * Interface for code index embedders.
  * This interface is implemented by both OpenAI and Ollama embedders.
  */
 export interface IEmbedder {
-	readonly internallyRetriedClasses?: ReadonlySet<TransientClass>
+	readonly rateLimitScope: string
 
 	/**
 	 * Creates embeddings for the given texts.

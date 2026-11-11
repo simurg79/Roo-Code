@@ -153,6 +153,7 @@ class IndexingError extends Error {
 
 export class EmbeddingError extends IndexingError {}
 export class VectorStoreError extends IndexingError {}
+export class SearchProviderRateLimitError extends IndexingError {}
 
 export class IndexingRetryError extends IndexingError {
 	constructor(

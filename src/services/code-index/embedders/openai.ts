@@ -1,6 +1,6 @@
 import { codeIndexLog } from "../code-index-log"
 import { OpenAI } from "openai"
-import type { TransientClass } from "../shared/indexing-errors"
+import { makeRateLimitScope } from "../provider-pacer"
 import { OpenAiNativeHandler } from "../../../api/providers/openai-native"
 import { ApiHandlerOptions } from "../../../shared/api"
 import { IEmbedder, EmbeddingResponse, EmbedderInfo } from "../interfaces"
@@ -14,7 +14,7 @@ import { handleOpenAIError } from "../../../api/providers/utils/openai-error-han
  * OpenAI implementation of the embedder interface with batching
  */
 export class OpenAiEmbedder extends OpenAiNativeHandler implements IEmbedder {
-	readonly internallyRetriedClasses: ReadonlySet<TransientClass> = new Set()
+	readonly rateLimitScope: string
 	private embeddingsClient: OpenAI
 	private readonly defaultModelId: string
 
@@ -25,6 +25,7 @@ export class OpenAiEmbedder extends OpenAiNativeHandler implements IEmbedder {
 	constructor(options: ApiHandlerOptions & { openAiEmbeddingModelId?: string }) {
 		super(options)
 		const apiKey = this.options.openAiNativeApiKey ?? "not-provided"
+		this.rateLimitScope = makeRateLimitScope("openai", "https://api.openai.com/v1", apiKey)
 
 		// Wrap OpenAI client creation to handle invalid API key characters
 		try {

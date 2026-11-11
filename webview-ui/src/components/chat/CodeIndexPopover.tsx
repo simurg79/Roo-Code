@@ -317,6 +317,7 @@ export const CodeIndexPopover: React.FC<CodeIndexPopoverProps> = ({
 						autoEnableDefault: event.data.values.autoEnableDefault,
 						failedFiles: event.data.values.failedFiles,
 						failedFileSummary: event.data.values.failedFileSummary,
+						providerWaits: event.data.values.providerWaits,
 					})
 				}
 			} else if (event.data.type === "codeIndexSettingsSaved") {
@@ -670,6 +671,36 @@ export const CodeIndexPopover: React.FC<CodeIndexPopoverProps> = ({
 								{t(`settings:codeIndex.indexingStatuses.${indexingStatus.systemStatus.toLowerCase()}`)}
 								{indexingStatus.message ? ` - ${indexingStatus.message}` : ""}
 							</div>
+
+							{indexingStatus.providerWaits?.map((wait, index) => (
+								<div
+									key={`${wait.service}-${index}`}
+									className="text-sm text-vscode-descriptionForeground break-words">
+									<p className="m-0">
+										{t(
+											indexingStatus.systemStatus === "Indexing"
+												? wait.resumeAt === undefined
+													? "settings:codeIndex.providerWaiting"
+													: "settings:codeIndex.providerWaitingUntil"
+												: wait.resumeAt === undefined
+													? "settings:codeIndex.providerPaused"
+													: "settings:codeIndex.providerPausedUntil",
+											{
+												service: wait.service,
+												time:
+													wait.resumeAt === undefined
+														? undefined
+														: new Date(wait.resumeAt).toLocaleString(),
+											},
+										)}
+									</p>
+									<ul className="m-0 pl-4">
+										{wait.waitingFiles.map((file) => (
+											<li key={file}>{file}</li>
+										))}
+									</ul>
+								</div>
+							))}
 
 							{hasFailedFiles && (
 								<div className="space-y-2 text-sm text-vscode-descriptionForeground break-words">

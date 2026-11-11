@@ -1,3 +1,5 @@
+import "../../__tests__/mock-code-index-log"
+import { ProviderPacer } from "../../provider-pacer"
 import { retryWithPolicy, type RetryFailure } from "../retry-policy"
 import { EmbeddingError, IndexingRetryError } from "../indexing-errors"
 import { APIUserAbortError } from "openai"
@@ -5,33 +7,81 @@ import { APIUserAbortError } from "openai"
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
 
-it.each([
-	[undefined, [500, 1000], "default", undefined],
-	[100, [500, 1000], "default", undefined],
-	[2000, [2000, 2000], "provider", undefined],
-	[60_000, [60_000, 60_000], "provider", undefined],
-	[60_001, [500, 1000], "default", 60_001],
-	[NaN, [500, 1000], "default", undefined],
-	[-1, [500, 1000], "default", undefined],
-] as const)("bounds provider delay %s", async (retryAfterMs, delays, delaySource, refused) => {
-	const request = vi.fn().mockRejectedValue(new EmbeddingError("limited", { status: 429 }, { retryAfterMs }))
+it("paces repeated limits even after both retries were consumed, then preserves exhaustion", async () => {
+	const budget = { retriesUsed: 0 }
+	const pacer = new ProviderPacer("openai:test")
+	const onFailure = vi.fn()
+	const unavailable = new EmbeddingError("server", { status: 503 })
+	const limited = new EmbeddingError("limited", { status: 429 }, { retryAfterMs: 120_000 })
+	const request = vi
+		.fn()
+		.mockRejectedValueOnce(unavailable)
+		.mockRejectedValueOnce(unavailable)
+		.mockResolvedValueOnce("first batch")
+	const run = () => retryWithPolicy(() => pacer.run("test.ts", undefined, request), { budget, onFailure })
+	const first = run()
+	await vi.advanceTimersByTimeAsync(1500)
+	await expect(first).resolves.toBe("first batch")
+	expect(budget.retriesUsed).toBe(2)
+	expect(onFailure).toHaveBeenCalledTimes(2)
+	request
+		.mockRejectedValueOnce(limited)
+		.mockRejectedValueOnce(limited)
+		.mockRejectedValueOnce(limited)
+		.mockRejectedValueOnce(limited)
+		.mockResolvedValueOnce("second batch")
+	const second = run()
+	await vi.advanceTimersByTimeAsync(0)
+	for (const index of [0, 1, 2, 3]) {
+		expect(request).toHaveBeenCalledTimes(4 + index)
+		expect(budget.retriesUsed).toBe(2)
+		expect(onFailure).toHaveBeenCalledTimes(2)
+		await vi.advanceTimersByTimeAsync(120_000)
+	}
+	await expect(second).resolves.toBe("second batch")
+	request.mockRejectedValueOnce(unavailable)
+	const exhausted = run().catch((error: unknown) => error)
+	await vi.advanceTimersByTimeAsync(375)
+	expect(await exhausted).toMatchObject({ classification: "server", attempts: 3 })
+	expect(request).toHaveBeenCalledTimes(9)
+	expect(onFailure).toHaveBeenCalledTimes(3)
+})
+
+it.each([undefined, 100, 2000, 60_000, 120_000, NaN, -1])(
+	"rethrows rate limits unchanged before callbacks or budget use: %s",
+	async (retryAfterMs) => {
+		const original = Object.freeze(new EmbeddingError("limited", { status: 429 }, { retryAfterMs }))
+		const request = vi.fn().mockRejectedValue(original)
+		const onFailure = vi.fn()
+		const budget = { retriesUsed: 2 }
+		await expect(retryWithPolicy(request, { budget, onFailure })).rejects.toBe(original)
+		expect(budget.retriesUsed).toBe(2)
+		expect(onFailure).not.toHaveBeenCalled()
+		expect(request).toHaveBeenCalledOnce()
+		expect(vi.getTimerCount()).toBe(0)
+	},
+)
+
+it.each([503, { code: "ECONNRESET" }])("retains bounded connection/server waits: %s", async (failure) => {
+	const cause = typeof failure === "number" ? { status: failure } : failure
+	const request = vi.fn().mockRejectedValue(new EmbeddingError("failed", cause))
 	const failures: RetryFailure[] = []
 	const pending = retryWithPolicy(request, { onFailure: (failure) => failures.push(failure) }).catch((error) => error)
-	await vi.advanceTimersByTimeAsync(0)
-	for (const [index, delay] of delays.entries()) {
+	for (const [index, delay] of [500, 1000].entries()) {
+		await vi.advanceTimersByTimeAsync(0)
 		expect(request).toHaveBeenCalledTimes(index + 1)
-		expect(failures[index]).toMatchObject({ delayMs: delay, delaySource, retryAfterRefusedMs: refused })
+		expect(failures[index]).toMatchObject({ delayMs: delay, delaySource: "default", willRetry: true })
 		await vi.advanceTimersByTimeAsync(delay - 1)
 		expect(request).toHaveBeenCalledTimes(index + 1)
 		await vi.advanceTimersByTimeAsync(1)
 	}
-	expect(await pending).toMatchObject({ attempts: 3, classification: "rate-limit" })
+	expect(await pending).toMatchObject({ attempts: 3 })
 	expect(request).toHaveBeenCalledTimes(3)
 })
 
 it("aborts a long wait without another request", async () => {
 	const controller = new AbortController()
-	const request = vi.fn().mockRejectedValue(new EmbeddingError("limited", { status: 429 }, { retryAfterMs: 60_000 }))
+	const request = vi.fn().mockRejectedValue(new EmbeddingError("unavailable", { status: 503 }))
 	const pending = retryWithPolicy(request, { signal: controller.signal }).catch((error) => error)
 	await vi.advanceTimersByTimeAsync(0)
 	controller.abort()
@@ -40,9 +90,9 @@ it("aborts a long wait without another request", async () => {
 	expect(request).toHaveBeenCalledOnce()
 })
 
-it.each([401, 408, 409, 429])("does not retry permanent or owned HTTP %s", async (status) => {
+it.each([401, 408, 409])("does not retry permanent HTTP %s", async (status) => {
 	const request = vi.fn().mockRejectedValue(new EmbeddingError("failed", { status }))
-	await expect(retryWithPolicy(request, { ownedClasses: new Set(["rate-limit"]) })).rejects.toMatchObject({
+	await expect(retryWithPolicy(request)).rejects.toMatchObject({
 		attempts: 1,
 	})
 	expect(request).toHaveBeenCalledOnce()
@@ -74,7 +124,7 @@ it("shares two retries across successful batches without charging their first ca
 })
 
 it("T33 wraps a frozen error without changing its metadata", async () => {
-	const original = Object.freeze(new EmbeddingError("limited", { status: 429 }, { retryAfterMs: 2000 }))
+	const original = Object.freeze(new EmbeddingError("unavailable", { status: 503 }, { retryAfterMs: 2000 }))
 	const properties = Object.getOwnPropertyDescriptors(original)
 	const request = vi.fn().mockRejectedValue(original)
 	const pending = retryWithPolicy(request, { activity: "embed" }).catch((error) => error)
@@ -84,8 +134,8 @@ it("T33 wraps a frozen error without changing its metadata", async () => {
 	expect(error).toMatchObject({
 		message: original.message,
 		attempts: 3,
-		classification: "rate-limit",
-		statusCode: 429,
+		classification: "server",
+		statusCode: 503,
 		retryAfterMs: 2000,
 		activity: "embed",
 	})

@@ -24,6 +24,7 @@ import { GenerationAllocator } from "../generation-allocator"
 import { FileIndexWriter } from "../file-completion"
 import { FileFailureRegistry, UNKNOWN_REVISION, type FileFailureActivity } from "../file-failure-registry"
 import { codeIndexLog } from "../code-index-log"
+import { ProviderPacerRegistry } from "../provider-pacer"
 
 export class DirectoryScanner implements IDirectoryScanner {
 	private readonly batchSegmentThreshold: number
@@ -42,6 +43,7 @@ export class DirectoryScanner implements IDirectoryScanner {
 		private readonly generations = new GenerationAllocator(cacheManager),
 		private readonly failures = new FileFailureRegistry(),
 		private readonly getDiscoveryContext?: () => Promise<DiscoveryContext>,
+		private readonly pacers = new ProviderPacerRegistry(),
 	) {
 		if (batchSegmentThreshold !== undefined) {
 			this.batchSegmentThreshold = batchSegmentThreshold
@@ -126,6 +128,7 @@ export class DirectoryScanner implements IDirectoryScanner {
 				this.generations,
 				scanWorkspace,
 				this.failures,
+				this.pacers,
 			)
 			let fatalError: ParserFatalError | undefined
 			const checkActive = () => {

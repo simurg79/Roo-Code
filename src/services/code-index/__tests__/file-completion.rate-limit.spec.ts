@@ -8,8 +8,10 @@ vi.mock("../../../i18n", () => ({ t: (key: string) => key }))
 beforeEach(() => {
 	vi.useFakeTimers()
 	vi.setSystemTime(new Date("2026-11-10T12:00:00Z"))
+	vi.spyOn(Math, "random").mockReturnValue(0)
 })
 afterEach(() => {
+	vi.restoreAllMocks()
 	vi.useRealTimers()
 	vi.unstubAllGlobals()
 })
@@ -22,16 +24,16 @@ const factories = [
 
 describe.each(factories)("T25 %s full-path timer boundary", (_name, createEmbedder) => {
 	it.each([
-		["seconds", "2", 2000, undefined],
-		["seconds", "60", 60_000, undefined],
-		["seconds", "61", 500, 61_000],
-		["milliseconds", "60001", 500, 60_001],
-		["milliseconds", "2500", 2500, undefined],
-		["date", "5", 5000, undefined],
-		["date", "61", 500, 61_000],
-		["date", "-5", 500, undefined],
-		["seconds", "invalid", 500, undefined],
-	] as const)("waits for %s %s", async (kind, value, firstDelay, retryAfterRefusedMs) => {
+		["seconds", "2", 2000],
+		["seconds", "60", 60_000],
+		["seconds", "61", 61_000],
+		["milliseconds", "60001", 60_001],
+		["milliseconds", "2500", 2500],
+		["date", "5", 5000],
+		["date", "61", 61_000],
+		["date", "-5", 500],
+		["seconds", "invalid", 500],
+	] as const)("waits for %s %s without exhaustion", async (kind, value, firstDelay) => {
 		const request = vi.fn(
 			async () =>
 				new Response(JSON.stringify({ error: { message: "limited" } }), {
@@ -44,30 +46,29 @@ describe.each(factories)("T25 %s full-path timer boundary", (_name, createEmbedd
 				}),
 		)
 		vi.stubGlobal("fetch", request)
-		const { replace, failures } = transportWriter()
-		const pending = replace(createEmbedder()).catch((error: unknown) => error)
+		const controller = new AbortController()
+		const { replace, failures, pacers, cache } = transportWriter()
+		const pending = replace(createEmbedder(), controller.signal).catch((error: unknown) => error)
 		await vi.advanceTimersByTimeAsync(0)
-		expect(failures.list()[0]).toMatchObject({
-			state: "retrying",
-			delayMs: firstDelay,
-			retryAfterRefusedMs,
-			delaySource: firstDelay > 500 ? "provider" : "default",
-		})
-		await vi.advanceTimersByTimeAsync(firstDelay - 1)
-		expect(request).toHaveBeenCalledOnce()
-		expect(failures.list()[0].state).toBe("retrying")
-		await vi.advanceTimersByTimeAsync(1)
-		expect(request).toHaveBeenCalledTimes(2)
-		const secondDelay = Math.max(1000, firstDelay)
-		await vi.advanceTimersByTimeAsync(secondDelay - 1)
-		expect(request).toHaveBeenCalledTimes(2)
-		await vi.advanceTimersByTimeAsync(1)
-		expect(await pending).toMatchObject({ attempts: 3, classification: "rate-limit" })
-		expect(request).toHaveBeenCalledTimes(3)
-		expect(failures.list()[0].state).toBe("exhausted")
+		try {
+			for (const attempt of [1, 2, 3, 4]) {
+				const delay = firstDelay === 500 ? 500 * 2 ** (attempt - 1) : firstDelay
+				expect(pacers.waitingPaths()).toEqual(["test.ts"])
+				expect(failures.list()).toEqual([])
+				expect(cache.completeFile).not.toHaveBeenCalled()
+				await vi.advanceTimersByTimeAsync(delay - 1)
+				expect(request).toHaveBeenCalledTimes(attempt)
+				await vi.advanceTimersByTimeAsync(1)
+				expect(request).toHaveBeenCalledTimes(attempt + 1)
+			}
+		} finally {
+			controller.abort()
+			await pending
+		}
+		expect(failures.list()).toEqual([])
 	})
 
-	it("recovers after a provider-requested wait and clears the failure", async () => {
+	it("recovers after a provider-requested wait without recording a failure", async () => {
 		const request = vi
 			.fn()
 			.mockResolvedValueOnce(
@@ -87,7 +88,7 @@ describe.each(factories)("T25 %s full-path timer boundary", (_name, createEmbedd
 		const pending = replace(createEmbedder())
 		await vi.advanceTimersByTimeAsync(59_999)
 		expect(request).toHaveBeenCalledOnce()
-		expect(failures.list()[0].state).toBe("retrying")
+		expect(failures.list()).toEqual([])
 		await vi.advanceTimersByTimeAsync(1)
 		await pending
 		expect(request).toHaveBeenCalledTimes(2)
@@ -105,14 +106,16 @@ describe.each(factories)("T25 %s full-path timer boundary", (_name, createEmbedd
 		)
 		vi.stubGlobal("fetch", request)
 		const controller = new AbortController()
-		const { replace, failures } = transportWriter()
+		const { replace, failures, pacers } = transportWriter()
 		const pending = replace(createEmbedder(), controller.signal).catch((error: unknown) => error)
 		await vi.advanceTimersByTimeAsync(0)
-		expect(failures.list()[0].state).toBe("retrying")
+		expect(pacers.waitingPaths()).toEqual(["test.ts"])
+		expect(failures.list()).toEqual([])
 		controller.abort()
 		expect(await pending).toMatchObject({ name: "AbortError" })
 		await vi.advanceTimersByTimeAsync(120_000)
 		expect(request).toHaveBeenCalledOnce()
-		expect(failures.list()[0].state).toBe("exhausted")
+		expect(failures.list()).toEqual([])
+		expect(pacers.waitingPaths()).toEqual([])
 	})
 })

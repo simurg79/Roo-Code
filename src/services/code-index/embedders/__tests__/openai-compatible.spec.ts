@@ -406,7 +406,6 @@ describe("OpenAICompatibleEmbedder", () => {
 				})
 				expect(mockEmbeddingsCreate).toHaveBeenCalledTimes(1)
 				expect(vitest.getTimerCount()).toBe(0)
-				expect([...embedder.internallyRetriedClasses]).toEqual([])
 			})
 
 			it("should not retry on non-rate-limit errors", async () => {
@@ -994,10 +993,7 @@ describe("OpenAICompatibleEmbedder", () => {
 			;(rateLimitError as any).status = 429
 			mockEmbeddingsCreate.mockRejectedValue(rateLimitError)
 
-			const result = await embedder.validateConfiguration()
-
-			expect(result.valid).toBe(false)
-			expect(result.error).toBe("embeddings:validation.serviceUnavailable")
+			await expect(embedder.validateConfiguration()).rejects.toBe(rateLimitError)
 		})
 
 		it("should fail validation with generic error", async () => {

@@ -7,6 +7,9 @@ import { IVectorStore } from "./interfaces/vector-store"
 import { CodeIndexConfigManager } from "./config-manager"
 import { CodeIndexStateManager } from "./state-manager"
 import { retryWithPolicy } from "./shared/retry-policy"
+import { ProviderPacerRegistry } from "./provider-pacer"
+import { classifyIndexingError, SearchProviderRateLimitError } from "./shared/indexing-errors"
+import { t } from "../../i18n"
 
 /**
  * Service responsible for searching the code index.
@@ -18,6 +21,7 @@ export class CodeIndexSearchService {
 		private readonly embedder: IEmbedder,
 		private readonly vectorStore: IVectorStore,
 		private readonly failures: FileFailureRegistry,
+		private readonly providerPacers = new ProviderPacerRegistry(),
 	) {}
 
 	/**
@@ -41,15 +45,29 @@ export class CodeIndexSearchService {
 
 		const currentState = this.stateManager.getCurrentStatus().systemStatus
 		const partialStandby =
-			currentState === "Standby" && this.failures.list().length > 0 && (await this.vectorStore.collectionExists())
+			currentState === "Standby" &&
+			(this.failures.list().length > 0 || this.providerPacers.waitingPaths().length > 0) &&
+			(await this.vectorStore.collectionExists())
 		if (currentState !== "Indexed" && currentState !== "Indexing" && !partialStandby) {
 			throw new Error(`Code index is not ready for search. Current state: ${currentState}`)
 		}
 
 		try {
+			const pacer = this.providerPacers.get(this.embedder.rateLimitScope)
 			const embeddingResponse = await retryWithPolicy(
-				() => this.embedder.createEmbeddings([query], undefined, signal),
-				{ signal, ownedClasses: this.embedder.internallyRetriedClasses },
+				async () => {
+					const issueSeq = pacer.markIssued()
+					try {
+						return await this.embedder.createEmbeddings([query], undefined, signal)
+					} catch (error) {
+						if (classifyIndexingError(error, signal) === "rate-limit") {
+							pacer.reportRateLimit(error, issueSeq)
+							throw new SearchProviderRateLimitError(t("embeddings:searchProviderRateLimited"), error)
+						}
+						throw error
+					}
+				},
+				{ signal },
 			)
 			signal?.throwIfAborted()
 			const vector = embeddingResponse?.embeddings[0]
@@ -66,7 +84,8 @@ export class CodeIndexSearchService {
 			// Perform search
 			const results = await this.vectorStore.search(vector, normalizedPrefix, minScore, maxResults)
 			const failedFiles = this.failures.list().map((failure) => failure.path)
-			return { results, partial: failedFiles.length > 0, failedFiles }
+			const waitingFiles = this.providerPacers.waitingPaths()
+			return { results, partial: failedFiles.length > 0 || waitingFiles.length > 0, failedFiles, waitingFiles }
 		} catch (error) {
 			codeIndexLog.error("Search failed", { error })
 			throw error

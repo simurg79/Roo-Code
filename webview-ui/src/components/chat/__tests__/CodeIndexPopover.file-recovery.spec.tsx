@@ -6,8 +6,14 @@ import type { FailedFileStatus, IndexingStatus } from "@roo-code/types"
 import { act, render, screen, within } from "@/utils/test-utils"
 import { PopoverTrigger } from "@/components/ui/popover"
 import englishSettings from "@/i18n/locales/en/settings.json"
+import germanSettings from "@/i18n/locales/de/settings.json"
 import { vscode } from "@/utils/vscode"
 import { CodeIndexPopover } from "../CodeIndexPopover"
+
+vi.mock("react", async () => {
+	const { createRequire } = await import("node:module")
+	return createRequire(import.meta.url)("react")
+})
 
 const { codebaseIndexConfig } = vi.hoisted(() => ({ codebaseIndexConfig: { codebaseIndexEnabled: true } }))
 
@@ -72,13 +78,14 @@ const sendStatus = (status: IndexingStatus) => {
 beforeAll(async () => {
 	await translation.init({
 		lng: "en",
-		resources: { en: { settings: englishSettings } },
+		resources: { en: { settings: englishSettings }, de: { settings: germanSettings } },
 		interpolation: { escapeValue: false },
 	})
 })
 
-beforeEach(() => {
+beforeEach(async () => {
 	vi.clearAllMocks()
+	await translation.changeLanguage("en")
 })
 
 describe("CodeIndexPopover file recovery", () => {
@@ -168,6 +175,76 @@ describe("CodeIndexPopover file recovery", () => {
 		expect(screen.queryByRole("status")).not.toBeInTheDocument()
 		expect(screen.queryByText("Failed file details")).not.toBeInTheDocument()
 	})
+
+	it.each(["Indexing", "Standby", "Stopping", "Error"])(
+		"localizes timed and untimed waits without false resume promises in %s",
+		async (systemStatus) => {
+			await translation.changeLanguage("de")
+			const resumeAt = Date.parse("2026-11-11T12:02:00Z")
+			await openPopover({
+				...makeStatus(systemStatus),
+				providerWaits: [
+					{ service: "openai", resumeAt, waitingFiles: ["waiting.ts"] },
+					{ service: "qdrant", waitingFiles: [] },
+				],
+			})
+			const active = systemStatus === "Indexing"
+			const timed = active ? "providerWaitingUntil" : "providerPausedUntil"
+			const untimed = active ? "providerWaiting" : "providerPaused"
+			expect(
+				screen.getByText(
+					translation.t(`settings:codeIndex.${timed}`, {
+						service: "openai",
+						time: new Date(resumeAt).toLocaleString(),
+					}),
+				),
+			).toBeVisible()
+			expect(
+				screen.getByText(translation.t(`settings:codeIndex.${untimed}`, { service: "qdrant" })),
+			).toBeVisible()
+			expect(screen.queryByText(/Waiting for/)).not.toBeInTheDocument()
+			if (!active) expect(screen.queryByText(/automatisch fortgesetzt/)).not.toBeInTheDocument()
+		},
+	)
+
+	it("T38 keeps two provider waits distinct from genuine failures and clears live snapshots", async () => {
+		const providerWaits = [
+			{ service: "openai", resumeAt: Date.now() + 120_000, waitingFiles: ["src/waiting-embed.ts"] },
+			{ service: "qdrant", waitingFiles: ["src/waiting-store.ts"] },
+		]
+		await openPopover({ ...makeStatus(), providerWaits })
+		expect(screen.getByText(/Waiting for openai; indexing resumes automatically at/)).toBeVisible()
+		expect(screen.getByText("Waiting for qdrant; indexing resumes automatically")).toBeVisible()
+		for (const wait of providerWaits) expect(screen.getByText(wait.waitingFiles[0])).toBeVisible()
+		expect(screen.getByRole("status")).toHaveTextContent("Files with indexing failures: 6.")
+		expect(screen.getByRole("status")).not.toHaveTextContent("waiting-embed")
+		expect(screen.getByRole("button", { name: "Stop Indexing" })).toBeEnabled()
+		sendStatus({ ...makeStatus(), providerWaits: [], failedFiles: [], failedFileSummary: undefined })
+		expect(screen.queryByText(/Waiting for/)).not.toBeInTheDocument()
+		expect(screen.queryByRole("status")).not.toBeInTheDocument()
+	})
+
+	it.each(["empty", "omitted"])(
+		"T39 waiting-only snapshots have no failure UI and clear when %s",
+		async (snapshot) => {
+			await openPopover({
+				...makeStatus(),
+				failedFiles: [],
+				failedFileSummary: undefined,
+				providerWaits: [{ service: "openai", waitingFiles: ["waiting.ts"] }],
+			})
+			expect(screen.queryByRole("status")).not.toBeInTheDocument()
+			expect(screen.queryByRole("button", { name: "Start Indexing" })).not.toBeInTheDocument()
+			sendStatus({
+				...makeStatus("Standby"),
+				failedFiles: [],
+				failedFileSummary: undefined,
+				providerWaits: snapshot === "empty" ? [] : undefined,
+			})
+			expect(screen.queryByText("waiting.ts")).not.toBeInTheDocument()
+			expect(screen.getByRole("button", { name: "Start Indexing" })).toBeEnabled()
+		},
+	)
 
 	it.each(systemStatuses)("does not add failure UI to a clean %s status", async (status) => {
 		await openPopover({ ...makeStatus(status), failedFiles: [], failedFileSummary: undefined })

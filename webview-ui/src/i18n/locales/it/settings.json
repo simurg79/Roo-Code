@@ -98,6 +98,10 @@
 		"description": "Configura i prompt di supporto utilizzati per azioni rapide come il miglioramento dei prompt, la spiegazione del codice e la risoluzione dei problemi. Questi prompt aiutano Roo a fornire una migliore assistenza per le attività di sviluppo comuni."
 	},
 	"codeIndex": {
+		"providerWaiting": "In attesa di {{service}}; l’indicizzazione riprende automaticamente",
+		"providerWaitingUntil": "In attesa di {{service}}; l’indicizzazione riprende automaticamente alle {{time}}",
+		"providerPaused": "In attesa di {{service}}",
+		"providerPausedUntil": "In attesa di {{service}} fino alle {{time}}",
 		"title": "Indicizzazione del codice",
 		"enableLabel": "Abilita indicizzazione del codice",
 		"enableDescription": "Abilita l'indicizzazione del codice per una ricerca e una comprensione del contesto migliorate",

@@ -72,9 +72,20 @@ export class CodebaseSearchTool extends BaseTool<"codebase_search"> {
 				results: searchResults,
 				partial,
 				failedFiles,
+				waitingFiles,
 			} = await manager.searchIndex(query, directoryPrefix, task.lifecycleSignal)
 			const partialNotice = partial
-				? `Partial index: results may be incomplete. Failed files:\n${failedFiles.map((file) => `- ${file}`).join("\n")}\n\n`
+				? [
+						"Partial index: results may be incomplete.",
+						...(failedFiles.length ? ["Failed files:", ...failedFiles.map((file) => `- ${file}`)] : []),
+						...(waitingFiles.length
+							? [
+									"Waiting files (indexing resumes automatically):",
+									...waitingFiles.map((file) => `- ${file}`),
+								]
+							: []),
+						"\n",
+					].join("\n")
 				: ""
 
 			const jsonResult = {
@@ -82,10 +93,12 @@ export class CodebaseSearchTool extends BaseTool<"codebase_search"> {
 				results: [],
 				partial,
 				failedFiles,
+				waitingFiles,
 			} as {
 				query: string
 				partial: boolean
 				failedFiles: string[]
+				waitingFiles: string[]
 				results: Array<{
 					filePath: string
 					score: number

@@ -1,4 +1,5 @@
 {
+	"searchProviderRateLimited": "Arama sağlayıcısının istek hızı sınırına ulaşıldı. Sağlayıcının bekleme süresi dolunca dizinleme otomatik olarak devam eder.",
 	"unknownError": "Bilinmeyen hata",
 	"authenticationFailed": "Gömülmeler oluşturulamadı: Kimlik doğrulama başarısız oldu. Lütfen API anahtarınızı kontrol edin.",
 	"failedWithStatus": "Gömülmeler oluşturulamadı: HTTP {{statusCode}} - {{errorMessage}}",
@@ -63,6 +64,8 @@
 		"codeIndexingNotConfigured": "Hizmetler oluşturulamıyor: Kod indeksleme düzgün yapılandırılmamış"
 	},
 	"orchestrator": {
+		"providerWaiting": "{{service}} bekleniyor; dizinleme otomatik olarak devam eder",
+		"providerWaitingUntil": "{{service}} bekleniyor; dizinleme {{time}} zamanında otomatik olarak devam eder",
 		"parserFailed": "{{filePath}} ayrıştırılırken kod dizinleme durdu ({{category}}). Dosyayı düzeltip yeniden denemek için dizinlemeyi elle başlat veya dizinlemeyi devre dışı bırak. Bu bir model/sağlayıcı hatası değil.",
 		"indexingFailedNoBlocks": "İndeksleme başarısız: Hiçbir kod bloğu başarıyla indekslenemedi. Bu genellikle bir embedder yapılandırma sorunu olduğunu gösterir.",
 		"indexingFailedCritical": "İndeksleme başarısız: İşlenecek dosyalar bulunmasına rağmen hiçbir kod bloğu başarıyla indekslenemedi. Bu kritik bir embedder hatası olduğunu gösterir.",

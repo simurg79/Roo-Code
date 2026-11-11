@@ -5,6 +5,7 @@ import { LATE_WRITE_GRACE_MS } from "../index-write-gate"
 import type { MockedClass } from "vitest"
 import { FileIndexWriter } from "../file-completion"
 import * as path from "path"
+import { formatProviderWaitMessage } from "../shared/provider-wait-message"
 
 import { codeIndexLog } from "../code-index-log"
 
@@ -235,6 +236,79 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 			internal._stateManager.getCurrentStatus.mockReturnValue({ systemStatus: "Standby", message: "partial" })
 			return internal
 		}
+
+		it("retains a search-only pause without changing Indexed or a complete stop to partial", async () => {
+			vi.useFakeTimers()
+			const internal = prepare()
+			const pacer = manager.providerPacerRegistry.get("openai:test")
+			internal._stateManager.getCurrentStatus.mockReturnValue({ systemStatus: "Indexed", message: "complete" })
+			pacer.reportRateLimit({ status: 429, retryAfterMs: 120_000 }, pacer.markIssued())
+			try {
+				expect(manager.getCurrentStatus()).toMatchObject({
+					systemStatus: "Indexed",
+					message: "complete",
+					providerWaits: [{ service: "openai", waitingFiles: [] }],
+				})
+				internal.servicesStopped = true
+				internal._stateManager.getCurrentStatus.mockReturnValue({ systemStatus: "Standby", message: "stopped" })
+				expect(manager.getCurrentStatus()).toMatchObject({ systemStatus: "Standby", message: "stopped" })
+				internal._cacheManager = { getOpenFiles: () => ({ "open.ts": true }) }
+				expect(manager.getCurrentStatus().message).toContain("indexingStoppedPartial")
+				for (const systemStatus of ["Error", "Stopping"]) {
+					internal._stateManager.getCurrentStatus.mockReturnValue({ systemStatus, message: "primary" })
+					expect(manager.getCurrentStatus()).toMatchObject({ systemStatus, message: "primary" })
+				}
+			} finally {
+				await vi.advanceTimersByTimeAsync(120_000)
+				vi.useRealTimers()
+			}
+		})
+
+		it("T38 reports genuine failures beside two provider waits with Error and Stop precedence", async () => {
+			vi.useFakeTimers()
+			const internal = prepare()
+			manager.fileFailureRegistry.renew("failed.ts", "revision")
+			manager.fileFailureRegistry.record("failed.ts", "revision", "embed", "failed", 3, "exhausted", "server")
+			const controller = new AbortController()
+			const pending: Promise<unknown>[] = []
+			for (const service of ["openai", "qdrant"]) {
+				const pacer = manager.providerPacerRegistry.get(`${service}:test`)
+				pacer.reportRateLimit({ status: 429, headers: { "retry-after": "120" } }, pacer.markIssued())
+				pending.push(
+					pacer.run(`${service}-waiting.ts`, controller.signal, async () => undefined).catch(() => undefined),
+				)
+			}
+			try {
+				expect(manager.getCurrentStatus()).toMatchObject({
+					systemStatus: "Indexing",
+					message: formatProviderWaitMessage(manager.providerPacerRegistry.providerWaits()),
+					failedFiles: [{ path: "failed.ts" }],
+					failedFileSummary: { count: 1 },
+					providerWaits: [
+						{ service: "openai", waitingFiles: ["openai-waiting.ts"] },
+						{ service: "qdrant", waitingFiles: ["qdrant-waiting.ts"] },
+					],
+				})
+				for (const systemStatus of ["Error", "Stopping"]) {
+					internal._stateManager.getCurrentStatus.mockReturnValue({ systemStatus, message: "primary" })
+					expect(manager.getCurrentStatus()).toMatchObject({ systemStatus, message: "primary" })
+				}
+				internal._stateManager.getCurrentStatus.mockReturnValue({ systemStatus: "Indexing" })
+				internal.servicesStopped = true
+				expect(manager.getCurrentStatus().systemStatus).toBe("Standby")
+				expect(manager.getCurrentStatus().message).not.toContain("resumes automatically")
+				controller.abort()
+				await Promise.all(pending)
+				await vi.advanceTimersByTimeAsync(120_000)
+				expect(manager.getCurrentStatus().providerWaits).toEqual([])
+				expect(manager.getCurrentStatus().failedFileSummary?.count).toBe(1)
+			} finally {
+				controller.abort()
+				await Promise.all(pending)
+				await vi.advanceTimersByTimeAsync(120_000)
+				vi.useRealTimers()
+			}
+		})
 
 		it.each([true, false])(
 			"retries failed startup on settings save (configuration changed: %s)",
@@ -629,7 +703,7 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 				registry.renew("bad.ts", "revision")
 				const writer = new FileIndexWriter(
 					{} as any,
-					{} as any,
+					{ rateLimitScope: "qdrant:manager-test" } as any,
 					internal.writeGate,
 					{} as any,
 					testWorkspacePath,
@@ -984,7 +1058,7 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 			const old = { clearIndexData: vi.fn(() => pendingClear), stopWatcher: vi.fn() }
 			internal._orchestrator = old
 			const createServices = vi.fn(() => ({
-				embedder: {},
+				embedder: { rateLimitScope: "openai:test" },
 				vectorStore: {},
 				scanner: {},
 				fileWatcher: { dispose: vi.fn() },
@@ -1029,7 +1103,7 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 				() =>
 					({
 						createServices: vi.fn(() => ({
-							embedder: {},
+							embedder: { rateLimitScope: "openai:test" },
 							vectorStore: {},
 							scanner: {},
 							fileWatcher: watcher,
@@ -1045,6 +1119,8 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 			expect(internal._orchestrator.generationAllocator).toBe(allocator)
 			expect(MockedCodeIndexServiceFactory.mock.calls.at(-1)?.[4]).toBe(allocator)
 			expect(MockedCodeIndexServiceFactory.mock.calls.at(-1)?.[5]).toBe(manager.fileFailureRegistry)
+			expect(MockedCodeIndexServiceFactory.mock.calls.at(-1)?.[6]).toBe(manager.providerPacerRegistry)
+			expect((internal._searchService as any).providerPacers).toBe(manager.providerPacerRegistry)
 			expect(old.isCurrentAttempt()).toBe(false)
 			old.onFatal(new Error("old parser"), "old failure")
 			old.onStopped()
@@ -1106,7 +1182,7 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 					dispose: vi.fn(),
 				}),
 				createServices: vi.fn().mockReturnValue({
-					embedder: { embedderInfo: { name: "openai" } },
+					embedder: { rateLimitScope: "openai:test", embedderInfo: { name: "openai" } },
 					vectorStore: {},
 					scanner: {},
 					fileWatcher: {
@@ -1180,7 +1256,7 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 					dispose: vi.fn(),
 				}),
 				createServices: vi.fn().mockReturnValue({
-					embedder: { embedderInfo: { name: "openai" } },
+					embedder: { rateLimitScope: "openai:test", embedderInfo: { name: "openai" } },
 					vectorStore: {},
 					scanner: {},
 					fileWatcher: {
@@ -1226,7 +1302,7 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 
 		beforeEach(() => {
 			// Mock service factory objects
-			mockEmbedder = { embedderInfo: { name: "openai" } }
+			mockEmbedder = { rateLimitScope: "openai:test", embedderInfo: { name: "openai" } }
 			mockVectorStore = {}
 			mockScanner = {}
 			mockFileWatcher = {
@@ -1313,6 +1389,134 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 			expect(internal.startupFailureMessage).toBeUndefined()
 		})
 
+		it.each(["paused", "fresh-429"])(
+			"T41 actual Start defers %s validation without delaying readiness",
+			async (scenario) => {
+				vi.useFakeTimers()
+				const internal = manager as any
+				const actual = await vi.importActual<typeof import("../orchestrator")>("../orchestrator")
+				const { CodeIndexOrchestrator } = await import("../orchestrator")
+				const { CodeIndexStateManager } =
+					await vi.importActual<typeof import("../state-manager")>("../state-manager")
+				vi.mocked(CodeIndexOrchestrator).mockImplementation(
+					(...dependencies: any[]) => new (actual.CodeIndexOrchestrator as any)(...dependencies),
+				)
+				internal._stateManager = new CodeIndexStateManager()
+				internal._cacheManager = { getOpenFiles: () => ({}) }
+				internal.generationAllocator = { initialize: vi.fn() }
+				mockVectorStore.initialize = vi.fn().mockResolvedValue(false)
+				mockVectorStore.markIndexingIncomplete = vi.fn()
+				mockVectorStore.markIndexingComplete = vi.fn()
+				mockScanner.scanDirectory = vi.fn().mockResolvedValue({ incompleteFiles: [] })
+				mockFileWatcher.initialize = vi.fn()
+				for (const event of [
+					"onDidStartBatchProcessing",
+					"onBatchProgressUpdate",
+					"onDidFinishBatchProcessing",
+				]) {
+					mockFileWatcher[event] = vi.fn(() => ({ dispose: vi.fn() }))
+				}
+				const pacer = manager.providerPacerRegistry.get(mockEmbedder.rateLimitScope)
+				const limited = Object.assign(new Error("limited"), { status: 429, headers: { "retry-after": "120" } })
+				if (scenario === "paused") pacer.reportRateLimit(limited, pacer.markIssued())
+				else mockServiceFactoryInstance.validateEmbedder.mockRejectedValueOnce(limited)
+				mockServiceFactoryInstance.validateEmbedder.mockResolvedValue({ valid: true })
+				try {
+					await manager.startIndexing()
+					expect(mockServiceFactoryInstance.validateEmbedder).toHaveBeenCalledTimes(
+						scenario === "paused" ? 0 : 1,
+					)
+					expect(mockScanner.scanDirectory).not.toHaveBeenCalled()
+					expect(mockVectorStore.initialize).not.toHaveBeenCalled()
+					expect(manager.getCurrentStatus()).toMatchObject({
+						systemStatus: "Indexing",
+						message: formatProviderWaitMessage(manager.providerPacerRegistry.providerWaits()),
+						providerWaits: [{ service: "openai", waitingFiles: [] }],
+					})
+					expect(internal._stateManager.getCurrentStatus().message).toBe(manager.getCurrentStatus().message)
+					await vi.advanceTimersByTimeAsync(119_999)
+					expect(mockScanner.scanDirectory).not.toHaveBeenCalled()
+					await vi.advanceTimersByTimeAsync(1)
+					expect(mockServiceFactoryInstance.validateEmbedder).toHaveBeenCalledTimes(
+						scenario === "paused" ? 1 : 2,
+					)
+					expect(mockScanner.scanDirectory).toHaveBeenCalledOnce()
+					expect(manager.getCurrentStatus().systemStatus).toBe("Indexed")
+				} finally {
+					await manager.stopWatcher()
+					vi.mocked(CodeIndexOrchestrator).mockImplementation(
+						(...dependencies: any[]) =>
+							({
+								startIndexing: vi.fn(),
+								stopWatcher: vi.fn(),
+								stopIndexing: vi.fn(),
+								generationAllocator: dependencies[11],
+								isCurrentAttempt: dependencies[12],
+								onFatal: dependencies[8],
+								onStopped: dependencies[9],
+							}) as any,
+					)
+					vi.useRealTimers()
+				}
+			},
+		)
+
+		it("T41 deferred permanent validation failure becomes scan Error after successful Start", async () => {
+			vi.useFakeTimers()
+			const internal = manager as any
+			const actual = await vi.importActual<typeof import("../orchestrator")>("../orchestrator")
+			const { CodeIndexOrchestrator } = await import("../orchestrator")
+			const previous = vi.mocked(CodeIndexOrchestrator).getMockImplementation()!
+			vi.mocked(CodeIndexOrchestrator).mockImplementation(
+				(...dependencies: any[]) => new (actual.CodeIndexOrchestrator as any)(...dependencies),
+			)
+			const { CodeIndexStateManager } =
+				await vi.importActual<typeof import("../state-manager")>("../state-manager")
+			internal._stateManager = new CodeIndexStateManager()
+			internal._cacheManager = { getOpenFiles: () => ({}) }
+			const pacer = manager.providerPacerRegistry.get(mockEmbedder.rateLimitScope)
+			pacer.reportRateLimit({ status: 429, headers: { "retry-after": "120" } }, pacer.markIssued())
+			mockServiceFactoryInstance.validateEmbedder.mockResolvedValue({
+				valid: false,
+				error: "invalid credentials",
+			})
+			try {
+				await expect(manager.startIndexing()).resolves.toBeUndefined()
+				expect(internal.startupFailureMessage).toBeUndefined()
+				await vi.advanceTimersByTimeAsync(120_000)
+				expect(manager.getCurrentStatus().systemStatus).toBe("Error")
+				expect(internal.startupFailureMessage).toBeUndefined()
+				expect(mockFileWatcher.dispose).toHaveBeenCalled()
+			} finally {
+				await manager.stopWatcher()
+				vi.mocked(CodeIndexOrchestrator).mockImplementation(previous)
+				vi.useRealTimers()
+			}
+		})
+
+		it("preserves paused allowance state across service rebuilds and search injection", async () => {
+			vi.useFakeTimers()
+			const internal = manager as any
+			internal._cacheManager = {}
+			const registry = manager.providerPacerRegistry
+			const pacer = registry.get(mockEmbedder.rateLimitScope)
+			pacer.reportRateLimit({ status: 429, headers: { "retry-after": "120" } }, pacer.markIssued())
+			const before = pacer.state()
+			try {
+				await internal._recreateServices()
+				await internal._recreateServices()
+				expect(manager.providerPacerRegistry).toBe(registry)
+				expect(registry.get(mockEmbedder.rateLimitScope)).toBe(pacer)
+				expect(pacer.state()).toEqual(before)
+				expect(mockServiceFactoryInstance.validateEmbedder).not.toHaveBeenCalled()
+				expect(MockedCodeIndexServiceFactory.mock.calls.at(-1)?.[6]).toBe(registry)
+				expect(internal._searchService.providerPacers).toBe(registry)
+			} finally {
+				await vi.advanceTimersByTimeAsync(120_000)
+				vi.useRealTimers()
+			}
+		})
+
 		it("should validate embedder during _recreateServices when validation succeeds", async () => {
 			// Arrange
 			mockServiceFactoryInstance.validateEmbedder.mockResolvedValue({ valid: true })
@@ -1362,12 +1566,14 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 				results: [],
 				partial: true,
 				failedFiles: ["failed.ts"],
+				waitingFiles: [],
 			})
 			await (manager as any)._recreateServices()
 			await expect(manager.searchIndex("query")).resolves.toEqual({
 				results: [],
 				partial: true,
 				failedFiles: ["failed.ts"],
+				waitingFiles: [],
 			})
 			manager.fileFailureRegistry.clear("failed.ts")
 			mockStateManager.getCurrentStatus.mockReturnValue({ systemStatus: "Indexed" })
@@ -1375,6 +1581,7 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 				results: [],
 				partial: false,
 				failedFiles: [],
+				waitingFiles: [],
 			})
 		})
 
@@ -1384,6 +1591,7 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 				results: [],
 				partial: false,
 				failedFiles: [],
+				waitingFiles: [],
 			})
 			manager.fileFailureRegistry.renew("failed.ts", "revision")
 			manager.fileFailureRegistry.record("failed.ts", "revision", "embed", "failed", 3, "exhausted")
@@ -1391,6 +1599,7 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 				results: [],
 				partial: true,
 				failedFiles: ["failed.ts"],
+				waitingFiles: [],
 			})
 		})
 
@@ -1540,7 +1749,7 @@ describe("CodeIndexManager - handleSettingsChange regression", () => {
 			// Setup mock for re-initialization
 			const mockServiceFactoryInstance = {
 				createServices: vi.fn().mockReturnValue({
-					embedder: { embedderInfo: { name: "openai" } },
+					embedder: { rateLimitScope: "openai:test", embedderInfo: { name: "openai" } },
 					vectorStore: {},
 					scanner: {},
 					fileWatcher: {

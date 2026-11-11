@@ -1,4 +1,5 @@
 {
+	"searchProviderRateLimited": "搜尋供應商已限制請求速率。供應商的等待時間結束後，索引將自動恢復。",
 	"unknownError": "未知錯誤",
 	"authenticationFailed": "建立內嵌失敗：驗證失敗。請檢查您的 API 金鑰。",
 	"failedWithStatus": "建立內嵌失敗：HTTP {{statusCode}} - {{errorMessage}}",
@@ -63,6 +64,8 @@
 		"codeIndexingNotConfigured": "無法建立服務：程式碼索引未正確設定"
 	},
 	"orchestrator": {
+		"providerWaiting": "正在等待 {{service}}；索引將自動恢復",
+		"providerWaitingUntil": "正在等待 {{service}}；索引將於 {{time}} 自動恢復",
 		"parserFailed": "剖析 {{filePath}} 時，程式碼索引已停止（{{category}}）。請修正檔案並手動啟動索引以重試，或停用索引。這不是模型或供應商錯誤。",
 		"indexingFailedNoBlocks": "索引失敗：沒有程式碼區塊被成功索引。這通常表示 Embedder 設定問題。",
 		"indexingFailedCritical": "索引失敗：儘管找到了要處理的檔案，但沒有程式碼區塊被成功索引。這表示 Embedder 出現嚴重故障。",

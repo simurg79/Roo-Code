@@ -1,4 +1,5 @@
 {
+	"searchProviderRateLimited": "Le fournisseur de recherche a limité la fréquence des requêtes. L’indexation reprend automatiquement après le délai d’attente du fournisseur.",
 	"unknownError": "Erreur inconnue",
 	"authenticationFailed": "Échec de la création des embeddings : Échec de l'authentification. Veuillez vérifier votre clé API.",
 	"failedWithStatus": "Échec de la création des embeddings : HTTP {{statusCode}} - {{errorMessage}}",
@@ -63,6 +64,8 @@
 		"codeIndexingNotConfigured": "Impossible de créer les services : L'indexation du code n'est pas correctement configurée"
 	},
 	"orchestrator": {
+		"providerWaiting": "En attente de {{service}} ; l’indexation reprend automatiquement",
+		"providerWaitingUntil": "En attente de {{service}} ; l’indexation reprend automatiquement à {{time}}",
 		"parserFailed": "L’indexation du code s’est arrêtée pendant l’analyse de {{filePath}} ({{category}}). Corrige le fichier et relance explicitement l’indexation, ou désactive-la. Ce n’est pas une erreur de modèle ou de fournisseur.",
 		"indexingFailedNoBlocks": "Échec de l'indexation : Aucun bloc de code n'a été indexé avec succès. Cela indique généralement un problème de configuration de l'embedder.",
 		"indexingFailedCritical": "Échec de l'indexation : Aucun bloc de code n'a été indexé avec succès malgré la découverte de fichiers à traiter. Cela indique une défaillance critique de l'embedder.",

@@ -53,7 +53,10 @@ let points: Map<string, any>
 let watchers: any[]
 
 function makeProcessors(workspaceGitignore = ignore()) {
-	const embedder = { createEmbeddings: vi.fn(async (texts: string[]) => ({ embeddings: texts.map(() => [1]) })) }
+	const embedder = {
+		rateLimitScope: "openai:discovery-test",
+		createEmbeddings: vi.fn(async (texts: string[]) => ({ embeddings: texts.map(() => [1]) })),
+	}
 	const getContext = async () => context
 	failures = new FileFailureRegistry()
 	const generations = new GenerationAllocator(cache)
@@ -97,6 +100,7 @@ beforeEach(async () => {
 	cache = new CacheManager({ globalStorageUri: { fsPath: fixture } } as any, workspace)
 	points = new Map()
 	store = {
+		rateLimitScope: "qdrant:discovery-test",
 		upsertPoints: vi.fn(async (batch) => {
 			for (const point of batch) points.set(point.id, point)
 		}),

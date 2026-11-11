@@ -165,6 +165,10 @@
 		"statusTitle": "Status",
 		"indexingFilesRetrying": "Files with indexing failures: {{count}}. Retrying {{path}}: {{reason}}",
 		"indexingFilesFailed": "Files with indexing failures: {{count}}. Automatic retry ended for {{path}}: {{reason}}",
+		"providerWaiting": "Waiting for {{service}}; indexing resumes automatically",
+		"providerWaitingUntil": "Waiting for {{service}}; indexing resumes automatically at {{time}}",
+		"providerPaused": "Waiting for {{service}}",
+		"providerPausedUntil": "Waiting for {{service}} until {{time}}",
 		"failedFileDetails": "Failed file details",
 		"failedFileReason": "Reason",
 		"failedFileStates": {

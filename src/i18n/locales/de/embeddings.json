@@ -1,4 +1,5 @@
 {
+	"searchProviderRateLimited": "Der Suchanbieter hat die Anfragerate begrenzt. Die Indexierung wird nach der Wartezeit des Anbieters automatisch fortgesetzt.",
 	"unknownError": "Unbekannter Fehler",
 	"authenticationFailed": "Erstellung von Einbettungen fehlgeschlagen: Authentifizierung fehlgeschlagen. Bitte überprüfe deinen API-Schlüssel.",
 	"failedWithStatus": "Erstellung von Einbettungen fehlgeschlagen: HTTP {{statusCode}} - {{errorMessage}}",
@@ -63,6 +64,8 @@
 		"codeIndexingNotConfigured": "Kann keine Dienste erstellen: Code-Indizierung ist nicht richtig konfiguriert"
 	},
 	"orchestrator": {
+		"providerWaiting": "Warten auf {{service}}; die Indexierung wird automatisch fortgesetzt",
+		"providerWaitingUntil": "Warten auf {{service}}; die Indexierung wird um {{time}} automatisch fortgesetzt",
 		"parserFailed": "Die Code-Indexierung wurde beim Parsen von {{filePath}} angehalten ({{category}}). Korrigiere die Datei und starte die Indexierung ausdrücklich erneut oder deaktiviere sie. Dies ist kein Modell-/Anbieterfehler.",
 		"indexingFailedNoBlocks": "Indizierung fehlgeschlagen: Keine Code-Blöcke wurden erfolgreich indiziert. Dies deutet normalerweise auf ein Embedder-Konfigurationsproblem hin.",
 		"indexingFailedCritical": "Indizierung fehlgeschlagen: Keine Code-Blöcke wurden erfolgreich indiziert, obwohl zu verarbeitende Dateien gefunden wurden. Dies deutet auf einen kritischen Embedder-Fehler hin.",

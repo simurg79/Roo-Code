@@ -21,7 +21,9 @@ export const MAX_LIST_FILES_LIMIT_CODE_INDEX = 50_000
 export const BATCH_SEGMENT_THRESHOLD = 60 // Number of code segments to batch for embeddings/upserts
 export const FILE_RETRY_ATTEMPTS = 3
 export const FILE_RETRY_BASE_DELAY_MS = 500
-export const RATE_LIMIT_MAX_RETRY_AFTER_MS = 60_000
+export const PACER_INCREASE_AFTER = 20
+export const PACER_MAX_BACKOFF_MS = 300_000
+export const PACER_RESUME_SPACING_MS = 250
 export const PARSING_CONCURRENCY = 10
 export const MAX_PENDING_BATCHES = 20 // Maximum number of batches to accumulate before waiting
 

@@ -98,6 +98,10 @@
 		"description": "Konfiguriere Support-Prompts, die für schnelle Aktionen wie das Verbessern von Prompts, das Erklären von Code und das Beheben von Problemen verwendet werden. Diese Prompts helfen Roo dabei, bessere Unterstützung für häufige Entwicklungsaufgaben zu bieten."
 	},
 	"codeIndex": {
+		"providerWaiting": "Warten auf {{service}}; die Indexierung wird automatisch fortgesetzt",
+		"providerWaitingUntil": "Warten auf {{service}}; die Indexierung wird um {{time}} automatisch fortgesetzt",
+		"providerPaused": "Warten auf {{service}}",
+		"providerPausedUntil": "Warten auf {{service}} bis {{time}}",
 		"title": "Codebase-Indexierung",
 		"description": "Konfiguriere Codebase-Indexierungseinstellungen, um semantische Suche in deinem Projekt zu aktivieren. <0>Mehr erfahren</0>",
 		"statusTitle": "Status",

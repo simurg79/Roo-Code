@@ -1,8 +1,29 @@
-import { formatEmbeddingError, sanitizeErrorMessage } from "../validation-helpers"
+import { formatEmbeddingError, sanitizeErrorMessage, withValidationErrorHandling } from "../validation-helpers"
 import { EmbeddingError } from "../indexing-errors"
 import { t } from "../../../../i18n"
 
 vi.mock("../../../../i18n", () => ({ t: vi.fn((key: string) => key) }))
+
+describe("withValidationErrorHandling", () => {
+	it.each([
+		Object.freeze(Object.assign(new Error("limited"), { status: 429 })),
+		new EmbeddingError("limited", { $metadata: { httpStatusCode: 429 } }),
+	])("rethrows rate limits unchanged before custom handlers", async (original) => {
+		const beforeStandardHandling = vi.fn(() => ({ valid: false, error: "custom" }))
+		await expect(
+			withValidationErrorHandling(() => Promise.reject(original), "openai", { beforeStandardHandling }),
+		).rejects.toBe(original)
+		expect(beforeStandardHandling).not.toHaveBeenCalled()
+	})
+
+	it("keeps custom handling for other failures", async () => {
+		const beforeStandardHandling = vi.fn(() => ({ valid: false, error: "custom" }))
+		await expect(
+			withValidationErrorHandling(() => Promise.reject({ status: 503 }), "openai", { beforeStandardHandling }),
+		).resolves.toEqual({ valid: false, error: "custom" })
+		expect(beforeStandardHandling).toHaveBeenCalledOnce()
+	})
+})
 
 describe("formatEmbeddingError", () => {
 	it.each([
