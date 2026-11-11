@@ -41,6 +41,8 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 		setLastNonRelevantSort,
 		showAllWorkspaces,
 		setShowAllWorkspaces,
+		showCompleted,
+		setShowCompleted,
 	} = useTaskSearch()
 	const { t } = useAppTranslation()
 
@@ -224,6 +226,15 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 							</SelectContent>
 						</Select>
 					</div>
+
+					<label className="flex items-center gap-2">
+						<Checkbox
+							checked={showCompleted}
+							onCheckedChange={(checked) => setShowCompleted(checked === true)}
+							aria-label={t("history:showCompleted")}
+						/>
+						{t("history:showCompleted")}
+					</label>
 
 					{/* Select all control in selection mode */}
 					{isSelectionMode && tasks.length > 0 && (

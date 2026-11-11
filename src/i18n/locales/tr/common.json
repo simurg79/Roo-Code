@@ -19,6 +19,15 @@
 		"delete_config_profile": "Bu yapılandırma profilini silmek istediğinizden emin misiniz?",
 		"delete_custom_mode_with_rules": "Bu {scope} modunu silmek istediğinizden emin misiniz?\n\nBu işlem, ilişkili kurallar klasörünü de şu konumdan silecektir:\n{rulesFolderPath}"
 	},
+	"session_history": {
+		"reopen_first": "Bu oturum tamamlandı. Çalışmaya devam etmeden önce yeniden aç.",
+		"edit_not_sent": "Düzenlenen mesaj gönderilmedi.",
+		"resume_fallback": "Planlanan devam durumu geri yüklenemedi: {{reason}}. Oturumun kök görevi açıldı. Devam etmek için orada Sürdür'e bas.",
+		"cycle": "Görev ilişkileri bir döngü içeriyor",
+		"missingChild": "Beklenen alt görev bulunamadı",
+		"missingAwaitingChild": "Devredilen bir görev, beklediği alt görevi belirtmiyor",
+		"inconsistentChild": "Beklenen alt görevin görev ilişkileri tutarsız veya görev zaten tamamlanmış"
+	},
 	"errors": {
 		"invalid_data_uri": "Geçersiz veri URI formatı",
 		"error_copying_image": "Resim kopyalanırken hata oluştu: {{errorMessage}}",

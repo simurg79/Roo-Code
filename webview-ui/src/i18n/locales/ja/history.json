@@ -1,4 +1,11 @@
 {
+	"showCompleted": "完了済みを表示",
+	"sessionCompleted": "完了済み",
+	"markSessionCompleted": "セッションを完了して保持",
+	"confirmSessionCompleted": "完了して保持",
+	"completeSessionMessage": "このセッションとメッセージを残したまま、通常は履歴に表示しないようにする？何も削除されず、実行中の作業も続くよ。後で見つけて開き直すには「完了済みを表示」を使ってね。",
+	"reopenSession": "セッションを再度開く",
+	"resumeSession": "再開",
 	"recentTasks": "最近のタスク",
 	"history": "履歴",
 	"exitSelectionMode": "選択モードを終了",

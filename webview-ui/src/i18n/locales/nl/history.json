@@ -1,4 +1,11 @@
 {
+	"showCompleted": "Voltooide sessies tonen",
+	"sessionCompleted": "Voltooid",
+	"markSessionCompleted": "Sessie voltooien en bewaren",
+	"confirmSessionCompleted": "Voltooien en bewaren",
+	"completeSessionMessage": "Deze sessie en de berichten bewaren, maar standaard verbergen in de geschiedenis? Er wordt niets verwijderd en lopend werk gaat door. Gebruik Voltooide sessies tonen om de sessie later te vinden en te heropenen.",
+	"reopenSession": "Sessie heropenen",
+	"resumeSession": "Hervatten",
 	"recentTasks": "Recente taken",
 	"history": "Geschiedenis",
 	"exitSelectionMode": "Selectiemodus verlaten",

@@ -1,4 +1,11 @@
 {
+	"showCompleted": "Mostrar completadas",
+	"sessionCompleted": "Completada",
+	"markSessionCompleted": "Completar y conservar sesión",
+	"confirmSessionCompleted": "Completar y conservar",
+	"completeSessionMessage": "¿Quieres conservar esta sesión y sus mensajes, pero ocultarla del historial de forma predeterminada? No se elimina nada y cualquier trabajo en curso continuará. Usa Mostrar completadas para encontrarla y volver a abrirla más tarde.",
+	"reopenSession": "Volver a abrir sesión",
+	"resumeSession": "Reanudar",
 	"recentTasks": "Tareas",
 	"viewAll": "Ver todas",
 	"tokens": "Tokens: ↑{{in}} ↓{{out}}",

@@ -19,6 +19,15 @@
 		"delete_config_profile": "Sei sicuro di voler eliminare questo profilo di configurazione?",
 		"delete_custom_mode_with_rules": "Sei sicuro di voler eliminare questa modalità {scope}?\n\nQuesto eliminerà anche la cartella delle regole associata in:\n{rulesFolderPath}"
 	},
+	"session_history": {
+		"reopen_first": "Questa sessione è completata. Riaprila prima di riprendere il lavoro.",
+		"edit_not_sent": "Il messaggio modificato non è stato inviato.",
+		"resume_fallback": "Non è stato possibile ripristinare la continuazione prevista: {{reason}}. È stata aperta l'attività radice della sessione. Premi Riprendi lì per continuare.",
+		"cycle": "Le relazioni tra le attività contengono un ciclo",
+		"missingChild": "La sottoattività attesa non è presente",
+		"missingAwaitingChild": "Un'attività delegata non identifica la sottoattività che sta aspettando",
+		"inconsistentChild": "La sottoattività attesa ha relazioni incoerenti o è già completata"
+	},
 	"errors": {
 		"invalid_data_uri": "Formato URI dati non valido",
 		"error_copying_image": "Errore durante la copia dell'immagine: {{errorMessage}}",

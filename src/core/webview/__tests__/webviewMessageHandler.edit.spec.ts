@@ -58,13 +58,16 @@ describe("webviewMessageHandler - Edit Message with Timestamp Fallback", () => {
 			overwriteClineMessages: vi.fn(),
 			overwriteApiConversationHistory: vi.fn(),
 			handleWebviewAskResponse: vi.fn(),
+			submitUserMessage: vi.fn(),
 		}
 		mockCurrentTask.messageManager = new MessageManager(mockCurrentTask)
 
 		// Create mock provider
 		mockClineProvider = {
 			getCurrentTask: vi.fn().mockReturnValue(mockCurrentTask),
+			guardSessionEdit: vi.fn().mockResolvedValue(true),
 			postMessageToWebview: vi.fn(),
+			postStateToWebview: vi.fn(),
 			contextProxy: {
 				getValue: vi.fn(),
 				setValue: vi.fn(),
@@ -77,6 +80,37 @@ describe("webviewMessageHandler - Edit Message with Timestamp Fallback", () => {
 			}),
 		} as unknown as ClineProvider
 	})
+
+	it("SH-19: an allowed edit rewinds and submits the edited content", async () => {
+		mockCurrentTask.clineMessages = [{ ts: 1, type: "say", say: "user_feedback", text: "original" }]
+		await webviewMessageHandler(mockClineProvider, {
+			type: "editMessageConfirm",
+			messageTs: 1,
+			text: "edited",
+			restoreCheckpoint: false,
+		})
+		expect(mockCurrentTask.submitUserMessage).toHaveBeenCalledWith("edited", [])
+	})
+
+	it.each([false, true])(
+		"SH-18: blocked edit never rewinds or restores (checkpoint %s)",
+		async (restoreCheckpoint) => {
+			vi.mocked(mockClineProvider.guardSessionEdit).mockResolvedValue(false)
+			mockCurrentTask.clineMessages = [{ ts: 1, type: "say", say: "user_feedback", text: "original" }]
+			mockCurrentTask.submitUserMessage = vi.fn()
+			await webviewMessageHandler(mockClineProvider, {
+				type: "editMessageConfirm",
+				messageTs: 1,
+				text: "edited",
+				restoreCheckpoint,
+			})
+			expect(mockClineProvider.guardSessionEdit).toHaveBeenCalledWith("test-task-id")
+			expect(mockCurrentTask.overwriteClineMessages).not.toHaveBeenCalled()
+			expect(mockCurrentTask.submitUserMessage).not.toHaveBeenCalled()
+			const { handleCheckpointRestoreOperation } = await import("../checkpointRestoreHandler")
+			expect(handleCheckpointRestoreOperation).not.toHaveBeenCalled()
+		},
+	)
 
 	it("should not modify API history when apiConversationHistoryIndex is -1", async () => {
 		// Setup: User message followed by attempt_completion

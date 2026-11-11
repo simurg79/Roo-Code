@@ -1,4 +1,11 @@
 {
+	"showCompleted": "완료된 세션 표시",
+	"sessionCompleted": "완료됨",
+	"markSessionCompleted": "세션 완료 및 보관",
+	"confirmSessionCompleted": "완료 및 보관",
+	"completeSessionMessage": "이 세션과 메시지를 보관하되 기본적으로 기록에서 숨길까? 아무것도 삭제되지 않고 실행 중인 작업도 계속돼. 나중에 찾아서 다시 열려면 완료된 세션 표시를 사용해 줘.",
+	"reopenSession": "세션 다시 열기",
+	"resumeSession": "재개",
 	"recentTasks": "최근 작업",
 	"history": "기록",
 	"exitSelectionMode": "선택 모드 종료",

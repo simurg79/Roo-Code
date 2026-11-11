@@ -60,6 +60,35 @@ describe("useTaskSearch", () => {
 		} as any)
 	})
 
+	it("hides completed roots and every descendant before workspace and search filtering", () => {
+		mockUseExtensionState.mockReturnValue({
+			cwd: "/workspace/project1",
+			taskHistory: [
+				{ ...mockTaskHistory[2], id: "root", sessionCompletedAt: 0 },
+				{ ...mockTaskHistory[0], id: "child", parentTaskId: "root" },
+				{ ...mockTaskHistory[0], id: "grandchild", parentTaskId: "child" },
+				{ ...mockTaskHistory[1], status: "completed", parentTaskId: "missing" },
+			],
+		})
+		const { result, unmount } = renderHook(() => useTaskSearch())
+		expect(result.current.showCompleted).toBe(false)
+		expect(result.current.tasks.map((task) => task.id)).toEqual(["task-2"])
+		act(() => result.current.setSearchQuery("React"))
+		expect(result.current.tasks).toHaveLength(0)
+		act(() => result.current.setShowCompleted(true))
+		expect(result.current.tasks.map((task) => task.id).sort()).toEqual(["child", "grandchild"])
+		act(() => {
+			result.current.setSearchQuery("")
+			result.current.setShowAllWorkspaces(true)
+		})
+		expect(result.current.tasks).toHaveLength(4)
+		act(() => result.current.setShowCompleted(false))
+		expect(result.current.tasks.map((task) => task.id)).toEqual(["task-2"])
+		unmount()
+		const remounted = renderHook(() => useTaskSearch())
+		expect(remounted.result.current.showCompleted).toBe(false)
+	})
+
 	it("returns all tasks by default", () => {
 		const { result } = renderHook(() => useTaskSearch())
 
@@ -284,4 +313,11 @@ describe("useTaskSearch", () => {
 		// When not searching, it should fall back to newest
 		expect(result.current.sortOption).toBe("mostRelevant")
 	})
+})
+
+// Share the renderer's React instance across Vite and native dependencies.
+vi.mock("react", async () => {
+	const { createRequire } = await import("node:module")
+	const react = createRequire(import.meta.url)("react")
+	return { ...react, default: react }
 })

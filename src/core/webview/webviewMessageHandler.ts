@@ -398,17 +398,21 @@ export const webviewMessageHandler = async (provider: ClineProvider, message: We
 			return
 		}
 
-		// Use findMessageIndices to find messages based on timestamp
-		const { messageIndex, apiConversationHistoryIndex } = findMessageIndices(messageTs, currentCline)
-
-		if (messageIndex === -1) {
-			const errorMessage = t("common:errors.message.message_not_found", { messageTs })
-			console.error("[handleEditMessageConfirm]", errorMessage)
-			await vscode.window.showErrorMessage(errorMessage)
-			return
-		}
-
 		try {
+			if (!(await provider.guardSessionEdit(currentCline.taskId))) {
+				return
+			}
+
+			// Use findMessageIndices to find messages based on timestamp
+			const { messageIndex, apiConversationHistoryIndex } = findMessageIndices(messageTs, currentCline)
+
+			if (messageIndex === -1) {
+				const errorMessage = t("common:errors.message.message_not_found", { messageTs })
+				console.error("[handleEditMessageConfirm]", errorMessage)
+				await vscode.window.showErrorMessage(errorMessage)
+				return
+			}
+
 			const targetMessage = currentCline.clineMessages[messageIndex]
 
 			// If checkpoint restoration is requested, find and restore to the last checkpoint before this message
@@ -736,6 +740,28 @@ export const webviewMessageHandler = async (provider: ClineProvider, message: We
 				provider.exportTaskWithId(currentTaskId)
 			}
 			break
+		case "markSessionCompleted":
+		case "reopenSession":
+		case "resumeSession": {
+			try {
+				if (message.type === "resumeSession") {
+					const resolved = await resolveIncomingImages({ text: message.input, images: message.images })
+					await provider.resumeSession(message.text!, resolved.text, resolved.images)
+				} else {
+					await provider[message.type](message.text!)
+				}
+			} catch (error) {
+				provider.log(`Failed to handle ${message.type} for task ${message.text}: ${String(error)}`)
+				vscode.window.showErrorMessage(
+					error instanceof Error && error.message === "Task not found"
+						? t("common:errors.share_task_not_found")
+						: error instanceof Error
+							? error.message
+							: String(error),
+				)
+			}
+			break
+		}
 		case "showTaskWithId":
 			provider.showTaskWithId(message.text!)
 			break

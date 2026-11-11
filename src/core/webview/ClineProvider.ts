@@ -88,6 +88,7 @@ import { webviewMessageHandler } from "./webviewMessageHandler"
 import type { ClineMessage, TodoItem } from "@roo-code/types"
 import { readApiMessages, saveApiMessages, saveTaskMessages, TaskHistoryStore } from "../task-persistence"
 import { readTaskMessages } from "../task-persistence/taskMessages"
+import { resolveSessionRoot, resolveResumeTarget } from "../task-persistence/sessionHistory"
 import { getNonce } from "./getNonce"
 import { getUri } from "./getUri"
 import { REQUESTY_BASE_URL } from "../../shared/utils/requesty"
@@ -372,9 +373,7 @@ export class ClineProvider
 		}
 	}
 
-	// Removes and destroys the top Cline instance (the current finished task),
-	// activating the previous one (resuming the parent task).
-	async removeClineFromStack(options?: { skipDelegationRepair?: boolean }) {
+	async removeClineFromStack() {
 		if (this.clineStack.length === 0) {
 			return
 		}
@@ -383,11 +382,6 @@ export class ClineProvider
 		let task = this.clineStack.pop()
 
 		if (task) {
-			// Capture delegation metadata before abort/dispose, since abortTask(true)
-			// is async and the task reference is cleared afterwards.
-			const childTaskId = task.taskId
-			const parentTaskId = task.parentTaskId
-
 			task.emit(RooCodeEventName.TaskUnfocused)
 
 			try {
@@ -411,37 +405,6 @@ export class ClineProvider
 			// Make sure no reference kept, once promises end it will be
 			// garbage collected.
 			task = undefined
-
-			// Delegation-aware parent metadata repair:
-			// If the popped task was a delegated child, repair the parent's metadata
-			// so it transitions from "delegated" back to "active" and becomes resumable
-			// from the task history list.
-			// Skip when called from delegateParentAndOpenChild() during nested delegation
-			// transitions (A→B→C), where the caller intentionally replaces the active
-			// child and will update the parent to point at the new child.
-			if (parentTaskId && childTaskId && !options?.skipDelegationRepair) {
-				try {
-					const { historyItem: parentHistory } = await this.getTaskWithId(parentTaskId)
-
-					if (parentHistory.status === "delegated" && parentHistory.awaitingChildId === childTaskId) {
-						await this.updateTaskHistory({
-							...parentHistory,
-							status: "active",
-							awaitingChildId: undefined,
-						})
-						this.log(
-							`[ClineProvider#removeClineFromStack] Repaired parent ${parentTaskId} metadata: delegated → active (child ${childTaskId} removed)`,
-						)
-					}
-				} catch (err) {
-					// Non-fatal: log but do not block the pop operation.
-					this.log(
-						`[ClineProvider#removeClineFromStack] Failed to repair parent metadata for ${parentTaskId} (non-fatal): ${
-							err instanceof Error ? err.message : String(err)
-						}`,
-					)
-				}
-			}
 		}
 	}
 
@@ -1824,6 +1787,75 @@ export class ClineProvider
 		return { historyItem, aggregatedCosts }
 	}
 
+	private async getSessionHistory(id: string) {
+		await this.taskHistoryStore.initialized
+		const historyById = new Map(this.taskHistoryStore.getAll().map((item) => [item.id, item]))
+		const root = resolveSessionRoot(id, historyById)
+		return { historyById, root: historyById.get(root.taskId)! }
+	}
+
+	async guardSessionEdit(id: string): Promise<boolean> {
+		const { root, historyById } = await this.getSessionHistory(id)
+		if (root.sessionCompletedAt !== undefined) {
+			vscode.window.showInformationMessage(t("common:session_history.reopen_first"))
+		} else if (historyById.get(id)?.status === "delegated") {
+			await this.resumeSession(id)
+		} else {
+			return true
+		}
+		vscode.window.showInformationMessage(t("common:session_history.edit_not_sent"))
+		return false
+	}
+
+	async markSessionCompleted(id: string) {
+		const { root } = await this.getSessionHistory(id)
+		await this.taskHistoryStore.updateIfPresent(root.id, () => ({ sessionCompletedAt: Date.now() }))
+		this.recentTasksCache = undefined
+		await this.postStateToWebview()
+	}
+
+	async reopenSession(id: string) {
+		const { root } = await this.getSessionHistory(id)
+		await this.taskHistoryStore.updateIfPresent(root.id, () => ({ sessionCompletedAt: undefined }))
+		this.recentTasksCache = undefined
+		await this.postStateToWebview()
+	}
+
+	async resumeSession(id: string, input?: string, images?: string[]) {
+		const { root, historyById } = await this.getSessionHistory(id)
+		if (root.sessionCompletedAt !== undefined) {
+			vscode.window.showInformationMessage(t("common:session_history.reopen_first"))
+			return
+		}
+		const target = resolveResumeTarget(id, historyById)
+		if (target.fallbackReason) {
+			// Closing saves the instance's old status, so repair only after it has closed.
+			if (this.getCurrentTask()?.taskId === root.id) {
+				await this.removeClineFromStack()
+			}
+			await this.taskHistoryStore.updateIfPresent(root.id, () => ({
+				status: "active",
+				awaitingChildId: undefined,
+			}))
+			this.recentTasksCache = undefined
+			await this.showTaskWithId(root.id)
+			vscode.window.showWarningMessage(
+				t("common:session_history.resume_fallback", {
+					reason: t(`common:session_history.${target.fallbackReason}`),
+				}),
+			)
+			return
+		}
+		const current = this.getCurrentTask()
+		if (current?.taskId === target.taskId && current.taskAsk?.ask === "resume_task") {
+			const hasInput = Boolean(input || images?.length)
+			await current.handleWebviewAskResponse(hasInput ? "messageResponse" : "yesButtonClicked", input, images)
+			await this.postMessageToWebview({ type: "resumeSessionInputUsed", text: target.taskId })
+			return
+		}
+		await this.showTaskWithId(target.taskId)
+	}
+
 	async showTaskWithId(id: string) {
 		if (id !== this.getCurrentTask()?.taskId) {
 			// Non-current task.
@@ -1884,6 +1916,7 @@ export class ClineProvider
 
 			// Collect all task IDs to delete (parent + all subtasks)
 			const allIdsToDelete: string[] = [id]
+			const deletedIds = new Set(allIdsToDelete)
 
 			if (cascadeSubtasks) {
 				// Recursively collect all child IDs
@@ -1892,8 +1925,11 @@ export class ClineProvider
 						const { historyItem: item } = await this.getTaskWithId(taskId)
 						if (item.childIds && item.childIds.length > 0) {
 							for (const childId of item.childIds) {
-								allIdsToDelete.push(childId)
-								await collectChildIds(childId)
+								if (!deletedIds.has(childId)) {
+									deletedIds.add(childId)
+									allIdsToDelete.push(childId)
+									await collectChildIds(childId)
+								}
 							}
 						}
 					} catch (error) {
@@ -1911,6 +1947,30 @@ export class ClineProvider
 					// Close the current task instance; delegation flows will be handled via metadata if applicable.
 					await this.removeClineFromStack()
 					break
+				}
+			}
+
+			for (const deletedId of deletedIds) {
+				const deletedItem = this.taskHistoryStore.get(deletedId)
+				const parentId = deletedItem?.parentTaskId
+				if (!parentId || deletedIds.has(parentId)) {
+					continue
+				}
+				try {
+					const parent = this.taskHistoryStore.get(parentId)
+					if (parent?.status !== "delegated" || parent.awaitingChildId !== deletedId) {
+						continue
+					}
+					if (this.getCurrentTask()?.taskId === parentId) {
+						await this.removeClineFromStack()
+					}
+					await this.taskHistoryStore.updateIfPresent(parentId, (storedParent) =>
+						storedParent.status === "delegated" && storedParent.awaitingChildId === deletedId
+							? { status: "active", awaitingChildId: undefined }
+							: undefined,
+					)
+				} catch (error) {
+					this.log(`[deleteTaskWithId] Failed to repair parent ${parentId}: ${String(error)}`)
 				}
 			}
 
@@ -3001,7 +3061,7 @@ export class ClineProvider
 		//    This ensures we never have >1 tasks open at any time during delegation.
 		//    Await abort completion to ensure clean disposal and prevent unhandled rejections.
 		try {
-			await this.removeClineFromStack({ skipDelegationRepair: true })
+			await this.removeClineFromStack()
 		} catch (error) {
 			this.log(
 				`[delegateParentAndOpenChild] Error during parent disposal (non-fatal): ${

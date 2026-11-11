@@ -1,4 +1,11 @@
 {
+	"showCompleted": "Tamamlananları göster",
+	"sessionCompleted": "Tamamlandı",
+	"markSessionCompleted": "Oturumu tamamla ve sakla",
+	"confirmSessionCompleted": "Tamamla ve sakla",
+	"completeSessionMessage": "Bu oturum ve mesajları saklansın, ancak varsayılan olarak geçmişte gizlensin mi? Hiçbir şey silinmez ve devam eden çalışmalar sürer. Daha sonra bulup yeniden açmak için Tamamlananları göster'i kullan.",
+	"reopenSession": "Oturumu yeniden aç",
+	"resumeSession": "Sürdür",
 	"recentTasks": "Son görevler",
 	"history": "Geçmiş",
 	"exitSelectionMode": "Seçim Modundan Çık",

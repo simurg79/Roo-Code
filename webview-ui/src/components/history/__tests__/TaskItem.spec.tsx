@@ -1,6 +1,7 @@
 import { render, screen, fireEvent } from "@/utils/test-utils"
 
 import TaskItem from "../TaskItem"
+import { vscode } from "@/utils/vscode"
 
 vi.mock("@src/utils/vscode")
 vi.mock("@src/i18n/TranslationContext", () => ({
@@ -29,6 +30,41 @@ const mockTask = {
 describe("TaskItem", () => {
 	beforeEach(() => {
 		vi.clearAllMocks()
+	})
+
+	it("keeps row inspection separate from Resume and confirmed completion", () => {
+		render(<TaskItem item={mockTask} variant="full" />)
+		fireEvent.click(screen.getByTestId("task-content"))
+		expect(vscode.postMessage).toHaveBeenLastCalledWith({ type: "showTaskWithId", text: "1" })
+		vi.mocked(vscode.postMessage).mockClear()
+		fireEvent.click(screen.getByRole("button", { name: "history:resumeSession" }))
+		expect(vscode.postMessage).toHaveBeenCalledTimes(1)
+		expect(vscode.postMessage).toHaveBeenCalledWith({ type: "resumeSession", text: "1" })
+		vi.mocked(vscode.postMessage).mockClear()
+		fireEvent.click(screen.getByRole("button", { name: "history:markSessionCompleted" }))
+		expect(screen.getByText("history:completeSessionMessage")).toBeInTheDocument()
+		expect(vscode.postMessage).not.toHaveBeenCalled()
+		fireEvent.click(screen.getByRole("button", { name: "history:cancel" }))
+		expect(vscode.postMessage).not.toHaveBeenCalled()
+		fireEvent.click(screen.getByRole("button", { name: "history:markSessionCompleted" }))
+		fireEvent.click(screen.getByRole("button", { name: "history:confirmSessionCompleted" }))
+		expect(vscode.postMessage).toHaveBeenCalledTimes(1)
+		expect(vscode.postMessage).toHaveBeenCalledWith({ type: "markSessionCompleted", text: "1" })
+	})
+
+	it("identifies completed sessions and reopens without resuming or inspecting", () => {
+		render(<TaskItem item={{ ...mockTask, sessionCompletedAt: 123 }} variant="full" />)
+		expect(screen.getByText("history:sessionCompleted")).toBeInTheDocument()
+		expect(screen.queryByRole("button", { name: "history:markSessionCompleted" })).not.toBeInTheDocument()
+		fireEvent.click(screen.getByRole("button", { name: "history:reopenSession" }))
+		expect(vscode.postMessage).toHaveBeenCalledTimes(1)
+		expect(vscode.postMessage).toHaveBeenCalledWith({ type: "reopenSession", text: "1" })
+	})
+
+	it("does not offer session actions on child search results", () => {
+		render(<TaskItem item={{ ...mockTask, parentTaskId: "root" }} variant="full" />)
+		expect(screen.queryByRole("button", { name: "history:resumeSession" })).not.toBeInTheDocument()
+		expect(screen.queryByRole("button", { name: "history:markSessionCompleted" })).not.toBeInTheDocument()
 	})
 
 	it("renders task information", () => {
@@ -109,4 +145,11 @@ describe("TaskItem", () => {
 		const taskItem = screen.getByTestId("task-item-1")
 		expect(taskItem).toHaveClass("hover:text-vscode-foreground")
 	})
+})
+
+// Share the renderer's React instance across Vite and native dependencies.
+vi.mock("react", async () => {
+	const { createRequire } = await import("node:module")
+	const react = createRequire(import.meta.url)("react")
+	return { ...react, default: react }
 })

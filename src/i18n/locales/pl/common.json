@@ -19,6 +19,15 @@
 		"delete_config_profile": "Czy na pewno chcesz usunąć ten profil konfiguracyjny?",
 		"delete_custom_mode_with_rules": "Czy na pewno chcesz usunąć ten tryb {scope}?\n\nSpowoduje to również usunięcie powiązanego folderu reguł pod adresem:\n{rulesFolderPath}"
 	},
+	"session_history": {
+		"reopen_first": "Ta sesja jest zakończona. Otwórz ją ponownie, zanim wznowisz pracę.",
+		"edit_not_sent": "Edytowana wiadomość nie została wysłana.",
+		"resume_fallback": "Nie udało się przywrócić planowanej kontynuacji: {{reason}}. Otwarto główne zadanie sesji. Naciśnij tam Wznów, aby kontynuować.",
+		"cycle": "Relacje między zadaniami zawierają cykl",
+		"missingChild": "Brakuje oczekiwanego podzadania",
+		"missingAwaitingChild": "Delegowane zadanie nie wskazuje podzadania, na które czeka",
+		"inconsistentChild": "Oczekiwane podzadanie ma niespójne relacje między zadaniami lub jest już zakończone"
+	},
 	"errors": {
 		"invalid_data_uri": "Nieprawidłowy format URI danych",
 		"error_copying_image": "Błąd kopiowania obrazu: {{errorMessage}}",

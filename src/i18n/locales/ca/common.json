@@ -23,6 +23,15 @@
 		"delete_config_profile": "Estàs segur que vols eliminar aquest perfil de configuració?",
 		"delete_custom_mode_with_rules": "Esteu segur que voleu suprimir aquest mode {scope}?\n\nAixò també suprimirà la carpeta de regles associada a:\n{rulesFolderPath}"
 	},
+	"session_history": {
+		"reopen_first": "Aquesta sessió està completada. Torna-la a obrir abans de reprendre la feina.",
+		"edit_not_sent": "El missatge editat no s'ha enviat.",
+		"resume_fallback": "No s'ha pogut restaurar la continuació prevista: {{reason}}. S'ha obert la tasca arrel de la sessió. Prem Reprèn allà per continuar.",
+		"cycle": "Les relacions entre tasques contenen un cicle",
+		"missingChild": "Falta la tasca filla esperada",
+		"missingAwaitingChild": "Una tasca delegada no identifica la tasca filla que espera",
+		"inconsistentChild": "La tasca filla esperada té relacions entre tasques incoherents o ja està completada"
+	},
 	"errors": {
 		"invalid_data_uri": "Format d'URI de dades no vàlid",
 		"error_copying_image": "Error copiant la imatge: {{errorMessage}}",
