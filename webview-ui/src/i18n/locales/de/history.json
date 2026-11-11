@@ -1,4 +1,11 @@
 {
+	"showCompleted": "Abgeschlossene anzeigen",
+	"sessionCompleted": "Abgeschlossen",
+	"markSessionCompleted": "Sitzung abschließen und behalten",
+	"confirmSessionCompleted": "Abschließen und behalten",
+	"completeSessionMessage": "Diese Sitzung samt Nachrichten behalten, aber standardmäßig im Verlauf ausblenden? Nichts wird gelöscht und laufende Arbeiten werden fortgesetzt. Mit Abgeschlossene anzeigen kannst du sie später finden und erneut öffnen.",
+	"reopenSession": "Sitzung erneut öffnen",
+	"resumeSession": "Fortsetzen",
 	"recentTasks": "Aufgaben",
 	"viewAll": "Alle anzeigen",
 	"tokens": "Tokens: ↑{{in}} ↓{{out}}",

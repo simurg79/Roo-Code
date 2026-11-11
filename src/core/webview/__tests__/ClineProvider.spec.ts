@@ -1306,6 +1306,7 @@ describe("ClineProvider", () => {
 
 	describe("editMessage", () => {
 		beforeEach(async () => {
+			provider.guardSessionEdit = vi.fn().mockResolvedValue(true)
 			await provider.resolveWebviewView(mockWebviewView)
 		})
 
@@ -2642,6 +2643,7 @@ describe("ClineProvider - Comprehensive Edit/Delete Edge Cases", () => {
 
 		vi.mocked(filesystem.readFile).mockResolvedValue("[]")
 		provider = new ClineProvider(mockContext, mockOutputChannel, "sidebar", new ContextProxy(mockContext))
+		provider.guardSessionEdit = vi.fn().mockResolvedValue(true)
 
 		defaultTaskOptions = {
 			provider,

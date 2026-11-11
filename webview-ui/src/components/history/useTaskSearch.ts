@@ -13,6 +13,37 @@ export const useTaskSearch = () => {
 	const [lastNonRelevantSort, setLastNonRelevantSort] = useState<SortOption | null>("newest")
 	const [showAllWorkspaces, setShowAllWorkspaces] = useState(false)
 
+	const [showCompleted, setShowCompleted] = useState(false)
+
+	const hiddenTaskIds = useMemo(() => {
+		const hiddenIds = new Set<string>()
+		if (showCompleted) {
+			return hiddenIds
+		}
+		const taskIds = new Set(taskHistory.map((item) => item.id))
+		const children = new Map<string, string[]>()
+		const pendingIds: string[] = []
+		for (const item of taskHistory) {
+			if (item.parentTaskId && taskIds.has(item.parentTaskId)) {
+				const siblings = children.get(item.parentTaskId) ?? []
+				siblings.push(item.id)
+				children.set(item.parentTaskId, siblings)
+			} else if (item.sessionCompletedAt !== undefined) {
+				pendingIds.push(item.id)
+			}
+		}
+		while (pendingIds.length > 0) {
+			const taskId = pendingIds.pop()!
+			if (!hiddenIds.has(taskId)) {
+				hiddenIds.add(taskId)
+				for (const childId of children.get(taskId) ?? []) {
+					pendingIds.push(childId)
+				}
+			}
+		}
+		return hiddenIds
+	}, [taskHistory, showCompleted])
+
 	useEffect(() => {
 		if (searchQuery && sortOption !== "mostRelevant" && !lastNonRelevantSort) {
 			setLastNonRelevantSort(sortOption)
@@ -24,12 +55,12 @@ export const useTaskSearch = () => {
 	}, [searchQuery, sortOption, lastNonRelevantSort])
 
 	const presentableTasks = useMemo(() => {
-		let tasks = taskHistory.filter((item) => item.ts && item.task)
+		let tasks = taskHistory.filter((item) => item.ts && item.task && !hiddenTaskIds.has(item.id))
 		if (!showAllWorkspaces) {
 			tasks = tasks.filter((item) => item.workspace === cwd)
 		}
 		return tasks
-	}, [taskHistory, showAllWorkspaces, cwd])
+	}, [taskHistory, showAllWorkspaces, cwd, hiddenTaskIds])
 
 	const fzf = useMemo(() => {
 		return new Fzf(presentableTasks, {
@@ -86,6 +117,8 @@ export const useTaskSearch = () => {
 		setSortOption,
 		lastNonRelevantSort,
 		setLastNonRelevantSort,
+		showCompleted,
+		setShowCompleted,
 		showAllWorkspaces,
 		setShowAllWorkspaces,
 	}

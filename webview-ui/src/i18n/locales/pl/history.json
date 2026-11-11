@@ -1,4 +1,11 @@
 {
+	"showCompleted": "Pokaż zakończone",
+	"sessionCompleted": "Zakończona",
+	"markSessionCompleted": "Zakończ i zachowaj sesję",
+	"confirmSessionCompleted": "Zakończ i zachowaj",
+	"completeSessionMessage": "Zachować tę sesję i jej wiadomości, ale domyślnie ukryć ją w historii? Nic nie zostanie usunięte, a trwająca praca będzie kontynuowana. Użyj Pokaż zakończone, aby później znaleźć sesję i otworzyć ją ponownie.",
+	"reopenSession": "Otwórz sesję ponownie",
+	"resumeSession": "Wznów",
 	"recentTasks": "Ostatnie zadania",
 	"history": "Historia",
 	"exitSelectionMode": "Wyłącz tryb wyboru",

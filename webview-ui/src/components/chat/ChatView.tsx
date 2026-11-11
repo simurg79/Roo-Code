@@ -133,6 +133,7 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 	const [manualCondenseTaskId, setManualCondenseTaskId] = useState<string | undefined>()
 	const sendingDisabled = baseSendingDisabled || manualCondenseTaskId !== undefined
 	const [selectedImages, setSelectedImages] = useState<string[]>([])
+	const pendingResumeTaskIdRef = useRef<string>()
 
 	// We need to hold on to the ask because useEffect > lastMessage will always
 	// let us know when an ask comes in and handle it, but by the time
@@ -567,6 +568,7 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 	}, [])
 
 	const handleChatReset = useCallback(() => {
+		pendingResumeTaskIdRef.current = undefined
 		// Clear any pending auto-approval timeout
 		if (autoApproveTimeoutRef.current) {
 			clearTimeout(autoApproveTimeoutRef.current)
@@ -586,6 +588,22 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 		// setSecondaryButtonText(undefined)
 	}, [])
 
+	const resumeSession = useCallback(
+		(input?: string, images?: string[]) => {
+			if (!currentTaskItem) {
+				return
+			}
+			pendingResumeTaskIdRef.current = currentTaskItem.id
+			vscode.postMessage({
+				type: "resumeSession",
+				text: currentTaskItem.id,
+				...(input ? { input } : {}),
+				...(images?.length ? { images } : {}),
+			})
+		},
+		[currentTaskItem],
+	)
+
 	/**
 	 * Handles sending messages to the extension
 	 * @param text - The message text to send
@@ -600,6 +618,11 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 				// WarningRow instead of sending anything to the backend.
 				if (apiConfiguration?.apiProvider && isRetiredProvider(apiConfiguration.apiProvider)) {
 					setShowRetiredProviderWarning(true)
+					return
+				}
+
+				if (clineAskRef.current === "resume_task") {
+					resumeSession(text, images)
 					return
 				}
 
@@ -647,7 +670,6 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 						case "command": // User can provide feedback to a tool or command use.
 						case "use_mcp_server":
 						case "completion_result": // If this happens then the user has feedback for the completion result.
-						case "resume_task":
 						case "resume_completed_task":
 						case "mistake_limit_reached":
 							vscode.postMessage({
@@ -668,6 +690,7 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 			}
 		},
 		[
+			resumeSession,
 			handleChatReset,
 			markFollowUpAsAnswered,
 			sendingDisabled,
@@ -759,20 +782,8 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 					if (isCompletedSubtaskForClick) {
 						startNewTask()
 					} else {
-						// Only send text/images if they exist
-						if (trimmedInput || (images && images.length > 0)) {
-							vscode.postMessage({
-								type: "askResponse",
-								askResponse: "yesButtonClicked",
-								text: trimmedInput,
-								images: images,
-							})
-							// Clear input state after sending
-							setInputValue("")
-							setSelectedImages([])
-						} else {
-							vscode.postMessage({ type: "askResponse", askResponse: "yesButtonClicked" })
-						}
+						resumeSession(trimmedInput, images)
+						return
 					}
 					break
 				case "completion_result":
@@ -791,7 +802,7 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 			setPrimaryButtonText(undefined)
 			setSecondaryButtonText(undefined)
 		},
-		[clineAsk, startNewTask, currentTaskItem?.parentTaskId],
+		[clineAsk, startNewTask, currentTaskItem?.parentTaskId, resumeSession],
 	)
 
 	const handleSecondaryButtonClick = useCallback(
@@ -854,6 +865,17 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 			const message: ExtensionMessage = e.data
 
 			switch (message.type) {
+				case "resumeSessionInputUsed":
+					if (
+						message.text &&
+						message.text === pendingResumeTaskIdRef.current &&
+						message.text === currentTaskItem?.id
+					) {
+						handleChatReset()
+						setPrimaryButtonText(undefined)
+						setSecondaryButtonText(undefined)
+					}
+					break
 				case "action":
 					switch (message.action!) {
 						case "didBecomeVisible":

@@ -43,6 +43,16 @@ describe("HistoryView", () => {
 		})
 	})
 
+	it("offers a local Show completed toggle that starts off", () => {
+		render(<HistoryView onDone={vi.fn()} />)
+		const toggle = screen.getByRole("checkbox", { name: "history:showCompleted" })
+		expect(toggle).not.toBeChecked()
+		fireEvent.click(toggle)
+		expect(toggle).toBeChecked()
+		fireEvent.click(toggle)
+		expect(toggle).not.toBeChecked()
+	})
+
 	it("renders the history interface", () => {
 		const onDone = vi.fn()
 		render(<HistoryView onDone={onDone} />)
@@ -62,4 +72,11 @@ describe("HistoryView", () => {
 
 		expect(onDone).toHaveBeenCalled()
 	})
+})
+
+// Share the renderer's React instance across Vite and native dependencies.
+vi.mock("react", async () => {
+	const { createRequire } = await import("node:module")
+	const react = createRequire(import.meta.url)("react")
+	return { ...react, default: react }
 })

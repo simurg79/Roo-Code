@@ -19,6 +19,15 @@
 		"delete_config_profile": "Weet je zeker dat je dit configuratieprofiel wilt verwijderen?",
 		"delete_custom_mode_with_rules": "Weet je zeker dat je deze {scope}-modus wilt verwijderen?\n\nDit verwijdert ook de bijbehorende regelsmap op:\n{rulesFolderPath}"
 	},
+	"session_history": {
+		"reopen_first": "Deze sessie is voltooid. Heropen de sessie voordat je verder werkt.",
+		"edit_not_sent": "Het bewerkte bericht is niet verzonden.",
+		"resume_fallback": "De bedoelde voortzetting kon niet worden hersteld: {{reason}}. De hoofdtaak van de sessie is geopend. Druk daar op Hervatten om verder te gaan.",
+		"cycle": "De taakrelaties bevatten een cyclus",
+		"missingChild": "De verwachte subtaak ontbreekt",
+		"missingAwaitingChild": "Een gedelegeerde taak geeft niet aan op welke subtaak deze wacht",
+		"inconsistentChild": "De verwachte subtaak heeft inconsistente taakrelaties of is al voltooid"
+	},
 	"errors": {
 		"invalid_data_uri": "Ongeldig data-URI-formaat",
 		"error_copying_image": "Fout bij kopiëren van afbeelding: {{errorMessage}}",

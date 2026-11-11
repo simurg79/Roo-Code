@@ -22,6 +22,8 @@ import { Mention } from "./Mention"
 import { TodoListDisplay } from "./TodoListDisplay"
 import { LucideIconButton } from "./LucideIconButton"
 
+import { SessionCompletionButton } from "../history/SessionCompletionButton"
+
 export interface TaskHeaderProps {
 	task: ClineMessage
 	tokensIn: number
@@ -159,6 +161,12 @@ const TaskHeader = ({
 							)}
 						</div>
 						<div className="flex items-center shrink-0 ml-2" onClick={(e) => e.stopPropagation()}>
+							{!isSubtask && currentTaskItem && !currentTaskItem.parentTaskId && (
+								<SessionCompletionButton
+									taskId={currentTaskItem.id}
+									completed={currentTaskItem.sessionCompletedAt !== undefined}
+								/>
+							)}
 							<StandardTooltip content={isTaskExpanded ? t("chat:task.collapse") : t("chat:task.expand")}>
 								<button
 									onClick={() => setIsTaskExpanded(!isTaskExpanded)}

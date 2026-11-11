@@ -1,4 +1,11 @@
 {
+	"showCompleted": "Mostrar concluídas",
+	"sessionCompleted": "Concluída",
+	"markSessionCompleted": "Concluir e manter sessão",
+	"confirmSessionCompleted": "Concluir e manter",
+	"completeSessionMessage": "Manter esta sessão e suas mensagens, mas ocultá-la do histórico por padrão? Nada será excluído e qualquer trabalho em andamento continuará. Use Mostrar concluídas para encontrá-la e reabri-la depois.",
+	"reopenSession": "Reabrir sessão",
+	"resumeSession": "Retomar",
 	"recentTasks": "Tarefas recentes",
 	"history": "Histórico",
 	"exitSelectionMode": "Sair do modo de seleção",

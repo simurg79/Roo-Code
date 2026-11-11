@@ -57,6 +57,7 @@ export interface ExtensionMessage {
 		| "fileSearchResults"
 		| "toggleApiConfigPin"
 		| "acceptInput"
+		| "resumeSessionInputUsed"
 		| "setHistoryPreviewCollapsed"
 		| "commandExecutionStatus"
 		| "mcpExecutionStatus"
@@ -400,6 +401,9 @@ export interface WebviewMessage {
 		| "selectImages"
 		| "exportCurrentTask"
 		| "showTaskWithId"
+		| "markSessionCompleted"
+		| "reopenSession"
+		| "resumeSession"
 		| "deleteTaskWithId"
 		| "exportTaskWithId"
 		| "importSettings"
@@ -541,6 +545,7 @@ export interface WebviewMessage {
 	askResponse?: ClineAskResponse
 	apiConfiguration?: ProviderSettings
 	images?: string[]
+	input?: string
 	bool?: boolean
 	value?: number
 	stepIndex?: number

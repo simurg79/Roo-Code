@@ -19,6 +19,15 @@
 		"delete_config_profile": "¿Estás seguro de que deseas eliminar este perfil de configuración?",
 		"delete_custom_mode_with_rules": "¿Estás seguro de que quieres eliminar este modo {scope}?\n\nEsto también eliminará la carpeta de reglas asociada en:\n{rulesFolderPath}"
 	},
+	"session_history": {
+		"reopen_first": "Esta sesión está completada. Vuelve a abrirla antes de reanudar el trabajo.",
+		"edit_not_sent": "El mensaje editado no se envió.",
+		"resume_fallback": "No se pudo restaurar la continuación prevista: {{reason}}. Se abrió la tarea raíz de la sesión. Pulsa Reanudar allí para continuar.",
+		"cycle": "Las relaciones entre tareas contienen un ciclo",
+		"missingChild": "Falta la tarea hija esperada",
+		"missingAwaitingChild": "Una tarea delegada no identifica la tarea hija que espera",
+		"inconsistentChild": "La tarea hija esperada tiene relaciones entre tareas incoherentes o ya está completada"
+	},
 	"errors": {
 		"invalid_data_uri": "Formato de URI de datos no válido",
 		"error_copying_image": "Error copiando la imagen: {{errorMessage}}",
