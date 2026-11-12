@@ -1,6 +1,6 @@
 import { codeIndexLog } from "../code-index-log"
 import { OpenAI } from "openai"
-import type { TransientClass } from "../shared/indexing-errors"
+import { makeRateLimitScope } from "../provider-pacer"
 import { IEmbedder, EmbeddingResponse, EmbedderInfo } from "../interfaces/embedder"
 import { MAX_BATCH_TOKENS, MAX_ITEM_TOKENS } from "../constants"
 import { getDefaultModelId, getModelQueryPrefix } from "../../../shared/embeddingModels"
@@ -27,7 +27,7 @@ interface OpenAIEmbeddingResponse {
  */
 
 export class OpenAICompatibleEmbedder implements IEmbedder {
-	readonly internallyRetriedClasses: ReadonlySet<TransientClass> = new Set()
+	readonly rateLimitScope: string
 	private embeddingsClient: OpenAI
 	private readonly defaultModelId: string
 	private readonly baseUrl: string
@@ -52,6 +52,7 @@ export class OpenAICompatibleEmbedder implements IEmbedder {
 
 		this.baseUrl = baseUrl
 		this.apiKey = apiKey
+		this.rateLimitScope = makeRateLimitScope("openai-compatible", baseUrl, apiKey)
 
 		// Wrap OpenAI client creation to handle invalid API key characters
 		try {

@@ -505,6 +505,7 @@ describe("ClineProvider", () => {
 			systemStatus: "Indexing",
 			processedItems: 0,
 			totalItems: 1,
+			providerWaits: [{ service: "openai", resumeAt: 123456, waitingFiles: ["waiting.ts"] }],
 			failedFiles: [{ path: "bad.ts", activity: "embed", reason: "retrying", state: "retrying" }],
 			failedFileSummary: { count: 1, path: "bad.ts", activity: "embed", reason: "retrying", state: "retrying" },
 		}

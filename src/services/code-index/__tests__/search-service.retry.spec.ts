@@ -2,12 +2,21 @@ import "./mock-code-index-log"
 import { CodeIndexSearchService } from "../search-service"
 import { OpenAICompatibleEmbedder } from "../embedders/openai-compatible"
 import { FileFailureRegistry } from "../file-failure-registry"
+import { ProviderPacerRegistry } from "../provider-pacer"
 import type { CodeIndexConfigManager } from "../config-manager"
 import type { CodeIndexStateManager } from "../state-manager"
 import type { IVectorStore } from "../interfaces"
 import type { IndexingState } from "../interfaces/manager"
 
-vi.mock("../../../i18n", () => ({ t: (key: string) => key }))
+import { SearchProviderRateLimitError } from "../shared/indexing-errors"
+import englishEmbeddings from "../../../i18n/locales/en/embeddings.json"
+
+vi.mock("../../../i18n", async () => {
+	const { default: messages } = await import("../../../i18n/locales/en/embeddings.json")
+	return {
+		t: (key: string) => (key === "embeddings:searchProviderRateLimited" ? messages.searchProviderRateLimited : key),
+	}
+})
 
 const transports = [
 	["SDK", "https://example.test/v1"],
@@ -25,7 +34,7 @@ function prepare(baseUrl: string, state: IndexingState = "Indexing", failed = tr
 	const failures = new FileFailureRegistry()
 	if (failed) {
 		failures.renew("pending.ts", "revision")
-		failures.record("pending.ts", "revision", "embed", "waiting", 1, "retrying", "rate-limit")
+		failures.record("pending.ts", "revision", "embed", "unavailable", 1, "retrying", "server")
 	}
 	const snapshot = failures.list()
 	const registryMethods = ["record", "clear", "renew", "resetAllBudgets"] as const
@@ -39,12 +48,16 @@ function prepare(baseUrl: string, state: IndexingState = "Indexing", failed = tr
 	}
 	const results = [{ id: "point", score: 0.9, payload: { filePath: "good.ts" } }]
 	const store = { search: vi.fn().mockResolvedValue(results), collectionExists: vi.fn().mockResolvedValue(true) }
+	const registry = new ProviderPacerRegistry()
+	const embedder = new OpenAICompatibleEmbedder(baseUrl, "test-key")
+	const pacer = registry.get(embedder.rateLimitScope)
 	const service = new CodeIndexSearchService(
 		config as CodeIndexConfigManager,
 		stateManager as unknown as CodeIndexStateManager,
-		new OpenAICompatibleEmbedder(baseUrl, "test-key"),
+		embedder,
 		store as unknown as IVectorStore,
 		failures,
+		registry,
 	)
 	function expectUnchanged() {
 		expect(stateManager.setSystemState).not.toHaveBeenCalled()
@@ -52,7 +65,7 @@ function prepare(baseUrl: string, state: IndexingState = "Indexing", failed = tr
 		expect(failures.list()).toEqual(snapshot)
 		for (const write of registryWrites) expect(write).not.toHaveBeenCalled()
 	}
-	return { service, store, results, expectUnchanged }
+	return { service, store, results, expectUnchanged, pacer }
 }
 
 beforeEach(() => {
@@ -66,48 +79,71 @@ afterEach(() => {
 })
 
 describe.each(transports)("T27 search query retry via %s transport", (_transport, baseUrl) => {
-	it.each([2, 60])("returns results after two requests, honoring retry-after: %s", async (seconds) => {
-		const request = vi.fn().mockResolvedValueOnce(response(429, { "retry-after": String(seconds) }))
-		request.mockResolvedValueOnce(response(200))
+	it.each([true, false])("bypasses a 120-second pause and occupied permits, matches: %s", async (matches) => {
+		const request = vi.fn(async () => response(200))
 		vi.stubGlobal("fetch", request)
-		const { service, store, results, expectUnchanged } = prepare(baseUrl)
-		const pending = service.searchIndex("query", "src")
+		const { service, store, results, expectUnchanged, pacer } = prepare(baseUrl)
+		let release!: () => void
+		const held = new Promise<void>((resolve) => {
+			release = resolve
+		})
+		const occupied = Array.from({ length: pacer.state().limit }, () => pacer.run(undefined, undefined, () => held))
 		await vi.advanceTimersByTimeAsync(0)
+		pacer.reportRateLimit({ status: 429, headers: { "retry-after": "120" } }, pacer.markIssued())
+		const before = pacer.state()
+		store.search.mockResolvedValue(matches ? results : [])
+		await expect(service.searchIndex("query")).resolves.toMatchObject({ results: matches ? results : [] })
 		expect(request).toHaveBeenCalledTimes(1)
-		await vi.advanceTimersByTimeAsync(seconds * 1000 - 1)
-		expect(request).toHaveBeenCalledTimes(1)
+		expect(pacer.state()).toMatchObject({ ...before, issueSeq: before.issueSeq + 1 })
 		expectUnchanged()
-		await vi.advanceTimersByTimeAsync(1)
-		await expect(pending).resolves.toEqual({ results, partial: true, failedFiles: ["pending.ts"] })
-		expect(request).toHaveBeenCalledTimes(2)
-		expect(store.search).toHaveBeenCalledOnce()
-		expectUnchanged()
+		release()
+		await Promise.all(occupied)
+		await vi.advanceTimersByTimeAsync(120_000)
 	})
 
-	it.each([
-		["missing", {}],
-		["invalid", { "retry-after": "invalid" }],
-		["over cap seconds", { "retry-after": "61" }],
-		["over cap milliseconds", { "retry-after-ms": "60001" }],
-		["over cap date", { "retry-after": "Tue, 10 Nov 2026 12:01:01 GMT" }],
-	] as const)("exhausts three 429s with default 500/1000 ms waits: %s", async (_name, headers) => {
-		const request = vi.fn(async () => response(429, headers))
+	it("reports each 429 immediately without retries or repeated allowance reduction", async () => {
+		const request = vi.fn(async () => response(429, { "retry-after": "120" }))
 		vi.stubGlobal("fetch", request)
-		const { service, store, expectUnchanged } = prepare(baseUrl)
-		const outcome = service.searchIndex("query").catch((error: unknown) => error)
-		await vi.advanceTimersByTimeAsync(0)
-		expect(request).toHaveBeenCalledTimes(1)
+		const { service, store, expectUnchanged, pacer } = prepare(baseUrl)
+		let firstLimit: number | undefined
+		for (const attempt of [1, 2, 3]) {
+			const error = await service.searchIndex("query").catch((error: unknown) => error)
+			expect(error).toBeInstanceOf(SearchProviderRateLimitError)
+			expect(error).toMatchObject({
+				message: englishEmbeddings.searchProviderRateLimited,
+				classification: "rate-limit",
+				statusCode: 429,
+				retryAfterMs: 120_000,
+				cause: expect.objectContaining({ classification: "rate-limit", statusCode: 429 }),
+			})
+			expect(request).toHaveBeenCalledTimes(attempt)
+			firstLimit ??= pacer.state().limit
+			expect(pacer.state()).toMatchObject({ limit: firstLimit, consecutiveRateLimits: 1, issueSeq: attempt })
+			await vi.advanceTimersByTimeAsync(1)
+		}
+		expect(store.search).not.toHaveBeenCalled()
+		expectUnchanged()
+		await vi.advanceTimersByTimeAsync(120_000)
+	})
+
+	it.each(["server", "connection"])("retains bounded %s retries", async (failure) => {
+		const request = vi.fn()
+		if (failure === "server") request.mockResolvedValueOnce(response(503))
+		else request.mockRejectedValueOnce(new TypeError("fetch failed", { cause: new Error("network") }))
+		request.mockResolvedValueOnce(response(200))
+		vi.stubGlobal("fetch", request)
+		const { service, results, expectUnchanged } = prepare(baseUrl)
+		const pending = service.searchIndex("query")
 		await vi.advanceTimersByTimeAsync(499)
 		expect(request).toHaveBeenCalledTimes(1)
 		await vi.advanceTimersByTimeAsync(1)
+		await expect(pending).resolves.toEqual({
+			results,
+			partial: true,
+			failedFiles: ["pending.ts"],
+			waitingFiles: [],
+		})
 		expect(request).toHaveBeenCalledTimes(2)
-		await vi.advanceTimersByTimeAsync(999)
-		expect(request).toHaveBeenCalledTimes(2)
-		await vi.advanceTimersByTimeAsync(1)
-		await expect(outcome).resolves.toMatchObject({ classification: "rate-limit", attempts: 3, statusCode: 429 })
-		expect(request).toHaveBeenCalledTimes(3)
-		expect(store.search).not.toHaveBeenCalled()
-		expect(vi.getTimerCount()).toBe(0)
 		expectUnchanged()
 	})
 
@@ -130,7 +166,7 @@ describe.each(transports)("T27 search query retry via %s transport", (_transport
 	)
 
 	it("cancels a lifecycle retry wait with no further transport request", async () => {
-		const request = vi.fn(async () => response(429, { "retry-after": "60" }))
+		const request = vi.fn(async () => response(503))
 		vi.stubGlobal("fetch", request)
 		const { service, store, expectUnchanged } = prepare(baseUrl)
 		const lifecycleController = new AbortController()
@@ -138,7 +174,7 @@ describe.each(transports)("T27 search query retry via %s transport", (_transport
 			.searchIndex("query", undefined, lifecycleController.signal)
 			.catch((error: unknown) => error)
 		await vi.advanceTimersByTimeAsync(0)
-		await vi.advanceTimersByTimeAsync(59_999)
+		await vi.advanceTimersByTimeAsync(499)
 		expect(request).toHaveBeenCalledTimes(1)
 		lifecycleController.abort()
 		await expect(outcome).resolves.toBe(lifecycleController.signal.reason)

@@ -108,6 +108,10 @@
 		"description": "設定用於快速操作的支援提示詞，如增強提示詞、解釋程式碼和修復問題。這些提示詞幫助 Roo 為常見開發工作提供更好的支援。"
 	},
 	"codeIndex": {
+		"providerWaiting": "正在等待 {{service}}；索引將自動恢復",
+		"providerWaitingUntil": "正在等待 {{service}}；索引將於 {{time}} 自動恢復",
+		"providerPaused": "正在等待 {{service}}",
+		"providerPausedUntil": "正在等待 {{service}}，直到 {{time}}",
 		"title": "程式碼庫索引",
 		"description": "設定程式碼庫索引設定以啟用專案的語意搜尋。<0>了解更多</0>",
 		"statusTitle": "狀態",

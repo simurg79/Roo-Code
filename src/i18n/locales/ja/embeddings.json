@@ -1,4 +1,5 @@
 {
+	"searchProviderRateLimited": "検索プロバイダーのレート制限に達しました。プロバイダーの待機時間が終了すると、インデックス作成が自動的に再開されます。",
 	"unknownError": "不明なエラー",
 	"authenticationFailed": "埋め込みの作成に失敗しました：認証に失敗しました。APIキーを確認してください。",
 	"failedWithStatus": "埋め込みの作成に失敗しました：HTTP {{statusCode}} - {{errorMessage}}",
@@ -63,6 +64,8 @@
 		"codeIndexingNotConfigured": "サービスを作成できません: コードインデックスが正しく設定されていません"
 	},
 	"orchestrator": {
+		"providerWaiting": "{{service}} を待機中です。インデックス作成は自動的に再開されます",
+		"providerWaitingUntil": "{{service}} を待機中です。インデックス作成は {{time}} に自動的に再開されます",
 		"parserFailed": "{{filePath}} の解析中にコードのインデックス作成が停止しました（{{category}}）。ファイルを修正してインデックス作成を手動で再開するか、無効にしてください。モデルやプロバイダーのエラーではありません。",
 		"indexingFailedNoBlocks": "インデックス作成に失敗しました：コードブロックが正常にインデックス化されませんでした。これは通常、エンベッダーの設定問題を示しています。",
 		"indexingFailedCritical": "インデックス作成に失敗しました：処理するファイルが見つかったにもかかわらず、コードブロックが正常にインデックス化されませんでした。これは重大なエンベッダーの障害を示しています。",

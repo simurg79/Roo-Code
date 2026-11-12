@@ -38,6 +38,8 @@ import { getDefaultModelId, getModelDimension } from "../../../shared/embeddingM
 const mockGetDefaultModelId = getDefaultModelId as MockedFunction<typeof getDefaultModelId>
 const mockGetModelDimension = getModelDimension as MockedFunction<typeof getModelDimension>
 
+import { ProviderPacerRegistry } from "../provider-pacer"
+
 describe("CodeIndexServiceFactory", () => {
 	let factory: CodeIndexServiceFactory
 	let mockConfigManager: any
@@ -59,6 +61,7 @@ describe("CodeIndexServiceFactory", () => {
 		const gate = new IndexWriteGate()
 		const allocator = new GenerationAllocator(mockCacheManager)
 		const failures = new FileFailureRegistry()
+		const registry = new ProviderPacerRegistry()
 		factory = new CodeIndexServiceFactory(
 			mockConfigManager,
 			"/test/workspace",
@@ -66,6 +69,7 @@ describe("CodeIndexServiceFactory", () => {
 			gate,
 			allocator,
 			failures,
+			registry,
 		)
 		const parser = {} as any
 		const embedder = {} as any
@@ -73,11 +77,13 @@ describe("CodeIndexServiceFactory", () => {
 		const ignoreInstance = {} as any
 		factory.createDirectoryScanner(embedder, store, parser, ignoreInstance)
 		factory.createFileWatcher({} as any, embedder, store, mockCacheManager, ignoreInstance, undefined, parser)
-		expect(vitest.mocked(DirectoryScanner).mock.calls[0].slice(-4, -1)).toEqual([gate, allocator, failures])
-		expect(vitest.mocked(FileWatcher).mock.calls[0].slice(-4, -1)).toEqual([gate, allocator, failures])
-		expect(vitest.mocked(DirectoryScanner).mock.calls[0].at(-1)).toBe(
-			vitest.mocked(FileWatcher).mock.calls[0].at(-1),
+		expect(vitest.mocked(DirectoryScanner).mock.calls[0].slice(-5, -2)).toEqual([gate, allocator, failures])
+		expect(vitest.mocked(FileWatcher).mock.calls[0].slice(-5, -2)).toEqual([gate, allocator, failures])
+		expect(vitest.mocked(DirectoryScanner).mock.calls[0].at(-2)).toBe(
+			vitest.mocked(FileWatcher).mock.calls[0].at(-2),
 		)
+		expect(vitest.mocked(DirectoryScanner).mock.calls[0][10]).toBe(registry)
+		expect(vitest.mocked(FileWatcher).mock.calls[0][12]).toBe(registry)
 	})
 
 	describe("createEmbedder", () => {
@@ -711,6 +717,13 @@ describe("CodeIndexServiceFactory", () => {
 			mockEmbedderInstance = {
 				validateConfiguration: vitest.fn(),
 			}
+		})
+
+		it.each(["openai", "ollama", "gemini"])("rethrows %s validation 429 unchanged", async (provider) => {
+			const error = Object.assign(new Error("limited"), { status: 429, headers: { "retry-after": "120" } })
+			mockEmbedderInstance.embedderInfo = { name: provider }
+			mockEmbedderInstance.validateConfiguration.mockRejectedValue(error)
+			await expect(factory.validateEmbedder(mockEmbedderInstance)).rejects.toBe(error)
 		})
 
 		it("should validate OpenAI embedder successfully", async () => {

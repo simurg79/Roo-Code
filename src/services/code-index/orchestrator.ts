@@ -14,6 +14,9 @@ import { INDEX_STOP_LIMIT_MS } from "./constants"
 import { FileFailureRegistry } from "./file-failure-registry"
 import { codeIndexLog } from "./code-index-log"
 
+import { ProviderPacerRegistry } from "./provider-pacer"
+import { formatProviderWaitMessage } from "./shared/provider-wait-message"
+
 export class CodeIndexOrchestrator {
 	private _fileWatcherSubscriptions: vscode.Disposable[] = []
 	private _isProcessing = false
@@ -25,6 +28,7 @@ export class CodeIndexOrchestrator {
 	private resolveStartup?: () => void
 	private rejectStartup?: (error: unknown) => void
 	private failureSubscription?: vscode.Disposable
+	private pacerSubscription?: vscode.Disposable
 	private watcherBatchPending = false
 	public stopped = false
 	private parserFailure?: ParserFatalError
@@ -46,6 +50,8 @@ export class CodeIndexOrchestrator {
 		private readonly generationAllocator = new GenerationAllocator(cacheManager),
 		private readonly isCurrentAttempt: () => boolean = () => true,
 		private readonly failures = new FileFailureRegistry(),
+		private readonly providerPacers = new ProviderPacerRegistry(),
+		private readonly beforeScan?: (signal: AbortSignal) => Promise<void>,
 	) {}
 
 	private isLive(signal: AbortSignal): boolean {
@@ -68,6 +74,7 @@ export class CodeIndexOrchestrator {
 		return (
 			this.failures.list().length > 0 ||
 			this.watcherBatchPending ||
+			this.providerPacers.waitingPaths().length > 0 ||
 			(this.stopped && this.scanner.hasIncompleteFiles) ||
 			Object.keys(this.cacheManager.getOpenFiles()).length > 0
 		)
@@ -77,13 +84,22 @@ export class CodeIndexOrchestrator {
 		signal: AbortSignal,
 		source = this._isProcessing ? "scan" : "changed-file-batch",
 	): void {
-		if (!this.isLive(signal) || this.stopped || this.stateManager.state === "Error") return
+		if (
+			!this.isLive(signal) ||
+			this.stopped ||
+			this.stateManager.state === "Error" ||
+			this.stateManager.state === "Stopping"
+		)
+			return
 		const failures = this.failures.list()
 		const retrying = failures.some((failure) => failure.state === "retrying")
 		const recoveryMessage = t(
 			retrying ? "embeddings:orchestrator.indexingFilesRetrying" : "embeddings:orchestrator.indexingFilesFailed",
 		)
-		if (this._isProcessing || this.watcherBatchPending || retrying) {
+		const providerWaits = this.providerPacers.providerWaits()
+		if (this.providerPacers.hasWaitingRequests()) {
+			this.stateManager.setSystemState("Indexing", formatProviderWaitMessage(providerWaits), source)
+		} else if (this._isProcessing || this.watcherBatchPending || retrying) {
 			this.stateManager.setSystemState("Indexing", failures.length > 0 ? recoveryMessage : undefined, source)
 		} else if (this.hasIncompleteFiles()) {
 			this.stateManager.setSystemState("Standby", recoveryMessage, source)
@@ -176,6 +192,7 @@ export class CodeIndexOrchestrator {
 		void this.startupResult.catch(() => {})
 		const signal = this._abortController.signal
 		this.failureSubscription = this.failures.onDidChange(() => this.updateRecoveryStatus(signal))
+		this.pacerSubscription = this.providerPacers.onDidChange(() => this.updateRecoveryStatus(signal))
 		this.stateManager.setSystemState("Indexing", "Initializing services...", "start-request")
 		this.scanPromise = this.runScan(this._abortController.signal)
 		return this.scanPromise
@@ -183,6 +200,12 @@ export class CodeIndexOrchestrator {
 
 	private async runScan(signal: AbortSignal): Promise<void> {
 		try {
+			if (this.beforeScan) {
+				this.resolveStartup?.()
+				await this.beforeScan(signal)
+				throwIfAborted(signal)
+				if (!this.isCurrentAttempt()) return
+			}
 			const collectionCreated = await this.writeGate.run(signal, () => this.vectorStore.initialize())
 			throwIfAborted(signal)
 			if (collectionCreated) await this.writeGate.run(signal, () => this.cacheManager.clearCacheFile())
@@ -316,6 +339,8 @@ export class CodeIndexOrchestrator {
 		this.resolveStartup?.()
 		this.failureSubscription?.dispose()
 		this.failureSubscription = undefined
+		this.pacerSubscription?.dispose()
+		this.pacerSubscription = undefined
 		this.parser?.stop()
 		this.fileWatcher.dispose()
 		this._fileWatcherSubscriptions.forEach((subscription) => subscription.dispose())

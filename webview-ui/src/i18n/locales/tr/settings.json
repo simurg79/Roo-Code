@@ -98,6 +98,10 @@
 		"description": "Prompt geliştirme, kod açıklama ve sorun çözme gibi hızlı eylemler için kullanılan destek promptlarını yapılandırın. Bu promptlar, Roo'nun yaygın geliştirme görevleri için daha iyi destek sağlamasına yardımcı olur."
 	},
 	"codeIndex": {
+		"providerWaiting": "{{service}} bekleniyor; dizinleme otomatik olarak devam eder",
+		"providerWaitingUntil": "{{service}} bekleniyor; dizinleme {{time}} zamanında otomatik olarak devam eder",
+		"providerPaused": "{{service}} bekleniyor",
+		"providerPausedUntil": "{{time}} zamanına kadar {{service}} bekleniyor",
 		"title": "Kod Tabanı İndeksleme",
 		"enableLabel": "Kod Tabanı İndekslemeyi Etkinleştir",
 		"enableDescription": "Geliştirilmiş arama ve bağlam anlayışı için kod indekslemeyi etkinleştirin",

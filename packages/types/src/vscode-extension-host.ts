@@ -664,6 +664,7 @@ export interface IndexingStatusPayload {
 	message: string
 	failedFiles?: FailedFileStatus[]
 	failedFileSummary?: FailedFileSummary
+	providerWaits?: ProviderWaitStatus[]
 }
 
 export interface IndexClearedPayload {
@@ -690,6 +691,12 @@ export interface FailedFileSummary extends FailedFileStatus {
 	count: number
 }
 
+export interface ProviderWaitStatus {
+	service: string
+	resumeAt?: number
+	waitingFiles: string[]
+}
+
 export interface IndexingStatus {
 	systemStatus: string
 	message?: string
@@ -701,6 +708,7 @@ export interface IndexingStatus {
 	autoEnableDefault?: boolean
 	failedFiles?: FailedFileStatus[]
 	failedFileSummary?: FailedFileSummary
+	providerWaits?: ProviderWaitStatus[]
 }
 
 export interface IndexingStatusUpdateMessage {

@@ -23,6 +23,8 @@ import { safeWriteJson } from "../../../../utils/safeWriteJson"
 import { FileCompletion } from "../../file-completion"
 import { FileFailureRegistry } from "../../file-failure-registry"
 import { codeIndexLog } from "../../code-index-log"
+import { ProviderPacerRegistry } from "../../provider-pacer"
+import { definePacingContracts } from "./pacing-contracts"
 
 // Use this spec's workspace double, not the setup-time VS Code module.
 vi.hoisted(() => vi.resetModules())
@@ -131,6 +133,7 @@ describe("FileWatcher per-file completion", () => {
 	let orchestrator: CodeIndexOrchestrator
 
 	let failures: FileFailureRegistry
+	let pacers: ProviderPacerRegistry
 
 	function makeWatcher() {
 		failures = new FileFailureRegistry()
@@ -146,6 +149,8 @@ describe("FileWatcher per-file completion", () => {
 			gate,
 			generations,
 			failures,
+			undefined,
+			pacers,
 		)
 		watchers.push(created)
 		return created
@@ -196,6 +201,7 @@ describe("FileWatcher per-file completion", () => {
 			generations,
 			isCurrentAttempt,
 			failures,
+			pacers,
 		)
 		await orchestrator.startIndexing()
 		expect(state.state).toBe(Object.keys(cache.getOpenFiles()).length ? "Standby" : "Indexed")
@@ -239,6 +245,7 @@ describe("FileWatcher per-file completion", () => {
 		vi.useFakeTimers()
 		vi.setSystemTime(0)
 		watchers = []
+		pacers = new ProviderPacerRegistry()
 		handlers = {}
 		hashes = {}
 		open = {}
@@ -273,6 +280,7 @@ describe("FileWatcher per-file completion", () => {
 			clearCacheFile: vi.fn(),
 		}
 		store = {
+			rateLimitScope: "qdrant:watcher-test",
 			initialize: vi.fn().mockResolvedValue(false),
 			markIndexingIncomplete: vi.fn(),
 			markIndexingComplete: vi.fn(),
@@ -290,7 +298,10 @@ describe("FileWatcher per-file completion", () => {
 				}
 			}),
 		}
-		embedder = { createEmbeddings: vi.fn(async (texts: string[]) => ({ embeddings: texts.map(() => [1, 2, 3]) })) }
+		embedder = {
+			rateLimitScope: "openai:watcher-test",
+			createEmbeddings: vi.fn(async (texts: string[]) => ({ embeddings: texts.map(() => [1, 2, 3]) })),
+		}
 		parser = { parseFile: vi.fn(async (filePath) => blocks(filePath)) }
 		ignore = { ignores: vi.fn(() => false) }
 		access = { validateAccess: vi.fn(() => true) }
@@ -328,6 +339,46 @@ describe("FileWatcher per-file completion", () => {
 		vi.unstubAllGlobals()
 		vi.useRealTimers()
 	})
+
+	definePacingContracts(
+		() => ({
+			paths: [
+				fileA,
+				fileB,
+				path.join(workspace, "c.ts"),
+				...Array.from({ length: 197 }, (_, fileNumber) => path.join(workspace, `pacing-${fileNumber}.ts`)),
+			],
+			embedder,
+			store,
+			parser,
+			pacers,
+			failures,
+			start: async (paths) => {
+				await start()
+				await queue(paths)
+			},
+			finish: async () => {
+				await drain()
+				expect(watcher.isProcessing).toBe(false)
+				expect(state.state).toBe(failures.list().length ? "Standby" : "Indexed")
+			},
+			getStatus: () => ({ state: state.state, message: state.setSystemState.mock.calls.at(-1)?.[1] }),
+			getHash: (filePath) => hashes[filePath],
+			getPoints: (filePath) =>
+				[...points.values()].filter((point) => point.payload.filePath === path.relative(workspace, filePath)),
+			seed: (filePath) => {
+				points.set("obsolete", {
+					id: "obsolete",
+					vector: [0],
+					payload: {
+						filePath: path.relative(workspace, filePath),
+						generation: 0,
+					},
+				})
+			},
+		}),
+		vi,
+	)
 
 	it("recovers a watcher store request without another event and retains every retry in grouped diagnostics", async () => {
 		store.upsertPoints.mockRejectedValueOnce(Object.assign(new Error("unavailable"), { status: 503 }))
@@ -1548,6 +1599,7 @@ describe("FileWatcher per-file completion", () => {
 		internal._searchService = {}
 		internal.generationAllocator = generations
 		gate = internal.writeGate
+		pacers = manager.providerPacerRegistry
 		watcher.dispose()
 		watcher = makeWatcher()
 		failures = manager.fileFailureRegistry
@@ -1565,6 +1617,8 @@ describe("FileWatcher per-file completion", () => {
 				gate,
 				generations,
 				failures,
+				undefined,
+				pacers,
 			)
 			watchers.push(created)
 			return created
@@ -1589,14 +1643,17 @@ describe("FileWatcher per-file completion", () => {
 			generations,
 			() => internal.currentAttempt === 0,
 			failures,
+			pacers,
 		)
 		internal._orchestrator = initial
 		try {
 			await initial.startIndexing()
 			await queue([filePath])
 			expect(request).toHaveBeenCalledOnce()
-			expect(failures.list()).toEqual([
-				expect.objectContaining({ path: "restart.md", state: "retrying", revision: hash(oldSource) }),
+			expect(failures.list()).toEqual([])
+			const resumeAt = pacers.get(embedder.rateLimitScope).state().pausedUntil!
+			expect(manager.getCurrentStatus().providerWaits).toEqual([
+				expect.objectContaining({ waitingFiles: ["restart.md"], resumeAt }),
 			])
 			expect(initial.isScanning).toBe(false)
 			expect(initial.isActive).toBe(true)
@@ -1612,6 +1669,8 @@ describe("FileWatcher per-file completion", () => {
 				gate,
 				generations,
 				failures,
+				undefined,
+				pacers,
 			)
 			const replacementScan = vi.spyOn(replacementScanner, "scanDirectory")
 			createServices.mockReturnValue({
@@ -1623,6 +1682,13 @@ describe("FileWatcher per-file completion", () => {
 			const startup = manager.startIndexing()
 			expect(manager.startIndexing()).toBe(startup)
 			await startup
+			expect(request).toHaveBeenCalledOnce()
+			expect(manager.state).toBe("Indexing")
+			await vi.advanceTimersByTimeAsync(resumeAt - Date.now() - 1)
+			expect(request).toHaveBeenCalledOnce()
+			expect(cache.completeFile).not.toHaveBeenCalled()
+			await vi.advanceTimersByTimeAsync(1)
+			await vi.advanceTimersByTimeAsync(375)
 			for (let advance = 0; advance < 20 && manager.state !== "Indexed"; advance++) {
 				await vi.advanceTimersByTimeAsync(0)
 			}
@@ -1704,8 +1770,9 @@ describe("FileWatcher per-file completion", () => {
 			watcher = makeWatcher()
 			await start()
 			await queue()
-			expect(failures.list()).toEqual([
-				expect.objectContaining({ activity, classification: "rate-limit", state: "retrying", attempt: 1 }),
+			expect(failures.list()).toEqual([])
+			expect(pacers.providerWaits()).toEqual([
+				expect.objectContaining({ waitingFiles: ["a.ts"], resumeAt: Date.now() + 30_000 }),
 			])
 			expect(state.state).toBe("Indexing")
 			const transportCalls = () =>
@@ -1728,7 +1795,7 @@ describe("FileWatcher per-file completion", () => {
 			expect(store.deletePointsByFilePath).not.toHaveBeenCalled()
 			expect(store.countPointsForFile).not.toHaveBeenCalled()
 			expect(cache.completeFile).not.toHaveBeenCalled()
-			expect(failures.list()).toEqual([expect.objectContaining({ activity, state: "exhausted" })])
+			expect(failures.list()).toEqual([])
 			expect(state.setSystemState).toHaveBeenLastCalledWith(
 				"Standby",
 				"embeddings:orchestrator.indexingStoppedPartial",
@@ -1756,11 +1823,19 @@ describe("FileWatcher per-file completion", () => {
 		await start()
 		await queue([filePath])
 		expect(request).toHaveBeenCalledOnce()
-		expect(failures.list()[0]).toMatchObject({ state: "retrying", revision: hash(oldSource) })
+		expect(failures.list()).toEqual([])
+		const resumeAt = pacers.get(embedder.rateLimitScope).state().pausedUntil!
+		expect(pacers.waitingPaths()).toEqual(["revision.md"])
 		expect(state.state).toBe("Indexing")
 		contents.set(filePath, newSource)
 		await queue([filePath])
 		await vi.advanceTimersByTimeAsync(500)
+		await drain()
+		expect(request).toHaveBeenCalledOnce()
+		expect(hashes[filePath]).toBeUndefined()
+		await vi.advanceTimersByTimeAsync(resumeAt - Date.now() - 1)
+		expect(request).toHaveBeenCalledOnce()
+		await vi.advanceTimersByTimeAsync(1)
 		await drain()
 		expect(request).toHaveBeenCalledTimes(2)
 		expect(hashes[filePath]).toBe(hash(newSource))

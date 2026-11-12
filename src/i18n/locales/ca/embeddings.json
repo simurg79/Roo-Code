@@ -1,4 +1,5 @@
 {
+	"searchProviderRateLimited": "El proveïdor de cerca ha limitat les sol·licituds. La indexació es reprèn automàticament quan acaba l’espera del proveïdor.",
 	"unknownError": "Error desconegut",
 	"authenticationFailed": "No s'han pogut crear les incrustacions: ha fallat l'autenticació. Comproveu la vostra clau d'API.",
 	"failedWithStatus": "No s'han pogut crear les incrustacions: HTTP {{statusCode}} - {{errorMessage}}",
@@ -63,6 +64,8 @@
 		"codeIndexingNotConfigured": "No es poden crear serveis: La indexació de codi no està configurada correctament"
 	},
 	"orchestrator": {
+		"providerWaiting": "Esperant {{service}}; la indexació es reprèn automàticament",
+		"providerWaitingUntil": "Esperant {{service}}; la indexació es reprèn automàticament a les {{time}}",
 		"parserFailed": "La indexació de codi s’ha aturat en analitzar {{filePath}} ({{category}}). Corregeix el fitxer i inicia la indexació explícitament per tornar-ho a provar, o desactiva-la. No és un error del model o proveïdor.",
 		"indexingFailedNoBlocks": "Indexació fallida: No s'ha indexat cap bloc de codi amb èxit. Això normalment indica un problema de configuració de l'embedder.",
 		"indexingFailedCritical": "Indexació fallida: No s'ha indexat cap bloc de codi amb èxit malgrat trobar fitxers per processar. Això indica una fallida crítica de l'embedder.",

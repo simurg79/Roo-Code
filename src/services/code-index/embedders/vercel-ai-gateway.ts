@@ -1,4 +1,5 @@
 import { OpenAICompatibleEmbedder } from "./openai-compatible"
+import { makeRateLimitScope } from "../provider-pacer"
 import { IEmbedder, EmbeddingResponse, EmbedderInfo } from "../interfaces/embedder"
 import { MAX_ITEM_TOKENS } from "../constants"
 import { t } from "../../../i18n"
@@ -20,9 +21,7 @@ import { t } from "../../../i18n"
  * - mistral/mistral-embed (dimension: 1024)
  */
 export class VercelAiGatewayEmbedder implements IEmbedder {
-	get internallyRetriedClasses() {
-		return this.openAICompatibleEmbedder.internallyRetriedClasses
-	}
+	readonly rateLimitScope: string
 
 	private readonly openAICompatibleEmbedder: OpenAICompatibleEmbedder
 	private static readonly VERCEL_AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh/v1"
@@ -38,6 +37,12 @@ export class VercelAiGatewayEmbedder implements IEmbedder {
 		if (!apiKey) {
 			throw new Error(t("embeddings:validation.apiKeyRequired"))
 		}
+
+		this.rateLimitScope = makeRateLimitScope(
+			"vercel-ai-gateway",
+			VercelAiGatewayEmbedder.VERCEL_AI_GATEWAY_BASE_URL,
+			apiKey,
+		)
 
 		// Use provided model or default
 		this.modelId = modelId || VercelAiGatewayEmbedder.DEFAULT_MODEL

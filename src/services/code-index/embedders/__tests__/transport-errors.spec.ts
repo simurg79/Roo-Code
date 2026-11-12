@@ -12,7 +12,7 @@ import { VercelAiGatewayEmbedder } from "../vercel-ai-gateway"
 import { CodeIndexOllamaEmbedder } from "../ollama"
 import { BedrockEmbedder } from "../bedrock"
 import { classifyIndexingError, EmbeddingError, IndexingRetryError } from "../../shared/indexing-errors"
-import { transportWriter } from "../../__tests__/transport-writer"
+import { pacedTransportWriter as transportWriter, waitForTransport } from "./paced-transport-writer"
 
 vi.mock("../../../../api/providers/openai-native", () => ({
 	OpenAiNativeHandler: class {
@@ -56,7 +56,7 @@ afterEach(() => {
 })
 
 describe.each(embeddingTransportFactories)("%s real transport boundary", (transport, createEmbedder) => {
-	it.each([500, 503, 408, 409, 401, 429])("preserves HTTP %s without SDK retry stacking", async (status) => {
+	it.each([500, 503, 408, 409, 401])("preserves HTTP %s without SDK retry stacking", async (status) => {
 		const request = vi.fn(
 			async () =>
 				new Response(JSON.stringify({ error: { message: "failure" } }), {
@@ -68,12 +68,12 @@ describe.each(embeddingTransportFactories)("%s real transport boundary", (transp
 		const embedder = createEmbedder()
 		const { replace, failures, cache } = transportWriter()
 		const error = await replace(embedder).catch((error: unknown) => error)
-		const classification = status === 429 ? "rate-limit" : status >= 500 ? "server" : "permanent"
+		const classification = status >= 500 ? "server" : "permanent"
 		expect(error).toBeInstanceOf(IndexingRetryError)
 		expect((error as Error).cause).toBeInstanceOf(EmbeddingError)
 		expect(error).toMatchObject({ classification, statusCode: status })
 		expect(classifyIndexingError(error)).toBe(classification)
-		const attempts = status >= 500 || status === 429 ? 3 : 1
+		const attempts = status >= 500 ? 3 : 1
 		expect(request).toHaveBeenCalledTimes(attempts)
 		expect(failures.list()).toEqual([
 			expect.objectContaining({
@@ -85,55 +85,6 @@ describe.each(embeddingTransportFactories)("%s real transport boundary", (transp
 			}),
 		])
 		expect(cache.completeFile).not.toHaveBeenCalled()
-		expect([...embedder.internallyRetriedClasses]).toEqual([])
-	})
-
-	it.each([
-		["retry-after", "2", 2000],
-		["retry-after", "60", 60_000],
-		["retry-after", "61", 61_000],
-		["retry-after-ms", "60001", 60_001],
-		["retry-after-ms", "2500", 2500],
-		["retry-after", "invalid", undefined],
-		["retry-after", "-1", undefined],
-	] as const)("carries %s: %s to the workflow", async (header, value, retryAfterMs) => {
-		const request = vi.fn(
-			async () =>
-				new Response(JSON.stringify({ error: { message: "limited" } }), {
-					status: 429,
-					headers: { "content-type": "application/json", [header]: value },
-				}),
-		)
-		vi.stubGlobal("fetch", request)
-		const { replace, failures } = transportWriter()
-		const error = await replace(createEmbedder()).catch((error: unknown) => error)
-		expect(error).toMatchObject({ classification: "rate-limit", retryAfterMs })
-		expect(request).toHaveBeenCalledTimes(3)
-		const acceptedDelay = retryAfterMs !== undefined && retryAfterMs <= 60_000 ? retryAfterMs : 0
-		expect(waits.mock.calls.map(([delay]) => delay)).toEqual([
-			Math.max(500, acceptedDelay),
-			Math.max(1000, acceptedDelay),
-		])
-		expect(failures.list()[0]).toMatchObject({ classification: "rate-limit", attempt: 3, state: "exhausted" })
-	})
-
-	it.each([5, 61])("carries an HTTP-date %s seconds ahead without wrapper waits", async (seconds) => {
-		vi.setSystemTime(new Date("2026-11-10T12:00:00Z"))
-		const retryDate = new Date(Date.now() + seconds * 1000).toUTCString()
-		const request = vi.fn(
-			async () =>
-				new Response(JSON.stringify({ error: { message: "limited" } }), {
-					status: 429,
-					headers: { "content-type": "application/json", "retry-after": retryDate },
-				}),
-		)
-		vi.stubGlobal("fetch", request)
-		await expect(createEmbedder().createEmbeddings(["test"])).rejects.toMatchObject({
-			classification: "rate-limit",
-			retryAfterMs: seconds * 1000,
-		})
-		expect(request).toHaveBeenCalledTimes(1)
-		expect(waits).not.toHaveBeenCalled()
 	})
 
 	it("preserves a fetch network rejection with no network code", async () => {
@@ -203,6 +154,58 @@ it("classifies Ollama's own timeout as connection, not caller cancellation", asy
 })
 
 describe("Bedrock real HTTP/2 transport boundary", () => {
+	it("T25 paces four HTTP/2 throttles without exhaustion and then completes", async () => {
+		const startTime = Date.now()
+		vi.useRealTimers()
+		vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] })
+		vi.setSystemTime(startTime)
+		vi.spyOn(Math, "random").mockReturnValue(0)
+		let requests = 0
+		const server = createServer()
+		server.on("stream", (stream) => {
+			requests++
+			if (requests <= 4) {
+				stream.respond({
+					":status": 429,
+					"content-type": "application/json",
+					"x-amzn-errortype": "ThrottlingException",
+				})
+				stream.end(JSON.stringify({ message: "limited", __type: "ThrottlingException" }))
+			} else {
+				stream.respond({ ":status": 200, "content-type": "application/json" })
+				stream.end(JSON.stringify({ embedding: [1, 0], inputTextTokenCount: 1 }))
+			}
+		})
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+		configureCredentials(`http://127.0.0.1:${(server.address() as AddressInfo).port}`)
+		const embedder = new BedrockEmbedder("us-east-1")
+		const controller = new AbortController()
+		const { replace, failures, cache, pacers } = transportWriter()
+		const pending = replace(embedder, controller.signal).catch((error: unknown) => error)
+		try {
+			for (const [index, delay] of [500, 1000, 2000, 4000].entries()) {
+				await waitForTransport(() => {
+					expect(requests).toBe(index + 1)
+					expect(pacers.get(embedder.rateLimitScope).state().pausedUntil).toBe(Date.now() + delay)
+					expect(pacers.get(embedder.rateLimitScope).state().waitingPaths).toEqual(["test.ts"])
+				})
+				expect(failures.list()).toEqual([])
+				vi.advanceTimersByTime(delay - 1)
+				expect(requests).toBe(index + 1)
+				vi.advanceTimersByTime(1)
+			}
+			await pending
+			expect(requests).toBe(5)
+			expect(failures.list()).toEqual([])
+			expect(cache.completeFile).toHaveBeenCalledOnce()
+		} finally {
+			controller.abort()
+			await pending
+			;(embedder as unknown as { bedrockClient: { destroy(): void } }).bedrockClient.destroy()
+			await new Promise<void>((resolve) => server.close(() => resolve()))
+		}
+	})
+
 	function configureCredentials(endpoint: string) {
 		vi.stubEnv("AWS_ACCESS_KEY_ID", "test-access-key")
 		vi.stubEnv("AWS_SECRET_ACCESS_KEY", "test-secret-key")
@@ -214,7 +217,6 @@ describe("Bedrock real HTTP/2 transport boundary", () => {
 		[500, "InternalServerException", "server"],
 		[503, "ServiceUnavailableException", "server"],
 		[400, "ValidationException", "permanent"],
-		[429, "ThrottlingException", "rate-limit"],
 	] as const)("preserves HTTP %s without AWS retry stacking", async (status, exception, classification) => {
 		let requests = 0
 		const server = createServer()
@@ -232,9 +234,8 @@ describe("Bedrock real HTTP/2 transport boundary", () => {
 			expect(error).toBeInstanceOf(IndexingRetryError)
 			expect((error as Error).cause).toBeInstanceOf(EmbeddingError)
 			expect(error).toMatchObject({ classification, statusCode: status })
-			const attempts = status >= 500 || status === 429 ? 3 : 1
+			const attempts = status >= 500 ? 3 : 1
 			expect(requests).toBe(attempts)
-			if (status === 429) expect(waits.mock.calls.map(([delay]) => delay)).toEqual([500, 1000])
 			expect(failures.list()[0]).toMatchObject({
 				path: "test.ts",
 				activity: "embed",
@@ -242,7 +243,6 @@ describe("Bedrock real HTTP/2 transport boundary", () => {
 				attempt: attempts,
 				state: "exhausted",
 			})
-			expect([...embedder.internallyRetriedClasses]).toEqual([])
 		} finally {
 			;(embedder as unknown as { bedrockClient: { destroy(): void } }).bedrockClient.destroy()
 			await new Promise<void>((resolve) => server.close(() => resolve()))

@@ -22,6 +22,8 @@ import { CodeIndexOllamaEmbedder } from "../../embedders/ollama"
 import { QdrantVectorStore } from "../../vector-store/qdrant-client"
 import { FileFailureRegistry } from "../../file-failure-registry"
 import { codeIndexLog } from "../../code-index-log"
+import { ProviderPacerRegistry } from "../../provider-pacer"
+import { definePacingContracts } from "./pacing-contracts"
 
 vi.mock("../../../../i18n", () => ({ t: (key: string) => key }))
 
@@ -102,10 +104,11 @@ describe("DirectoryScanner durable per-file recovery", () => {
 	let scanner: DirectoryScanner
 	let listedPaths: string[]
 	let failures: FileFailureRegistry
+	let pacers: ProviderPacerRegistry
 
 	const drain = () => vi.advanceTimersByTimeAsync(0)
 	const createScanner = () =>
-		new DirectoryScanner(embedder, store, parser, cache, ignore, 1, gate, generations, failures)
+		new DirectoryScanner(embedder, store, parser, cache, ignore, 1, gate, generations, failures, undefined, pacers)
 	const createOrchestrator = (isCurrent = () => true, sharedState?: any) => {
 		const state = sharedState ?? {
 			state: "Standby",
@@ -146,6 +149,7 @@ describe("DirectoryScanner durable per-file recovery", () => {
 			generations,
 			isCurrent,
 			failures,
+			pacers,
 		)
 		return { orchestrator, state, watcher, fatal }
 	}
@@ -198,11 +202,13 @@ describe("DirectoryScanner durable per-file recovery", () => {
 		listedPaths = [fileA]
 		vi.mocked(listFiles).mockImplementation(async () => [[...listedPaths], false])
 		failures = new FileFailureRegistry()
+		pacers = new ProviderPacerRegistry()
 		cache = new CacheManager(context, workspacePath)
 		gate = new IndexWriteGate()
 		generations = new GenerationAllocator(cache)
 		points = new Map()
 		store = {
+			rateLimitScope: "qdrant:scanner-test",
 			upsertPoints: vi.fn().mockImplementation(async (newPoints: any[]) => {
 				for (const point of newPoints) points.set(point.id, point)
 			}),
@@ -218,6 +224,7 @@ describe("DirectoryScanner durable per-file recovery", () => {
 			}),
 		}
 		embedder = {
+			rateLimitScope: "openai:scanner-test",
 			createEmbeddings: vi
 				.fn()
 				.mockImplementation(async (texts: string[]) => ({ embeddings: texts.map(() => [1]) })),
@@ -232,6 +239,38 @@ describe("DirectoryScanner durable per-file recovery", () => {
 		vi.unstubAllGlobals()
 		vi.useRealTimers()
 	})
+
+	definePacingContracts(() => {
+		let pending: Promise<void>
+		let scanState: any
+		return {
+			paths: [
+				fileA,
+				fileB,
+				path.join(workspacePath, "c.ts"),
+				...Array.from({ length: 197 }, (_, fileNumber) => path.join(workspacePath, `pacing-${fileNumber}.ts`)),
+			],
+			embedder,
+			store,
+			parser,
+			pacers,
+			failures,
+			start: async (paths) => {
+				listedPaths = paths
+				const { orchestrator, state } = createOrchestrator()
+				scanState = state
+				pending = orchestrator.startIndexing()
+				await drain()
+			},
+			finish: async () => {
+				await pending
+			},
+			getStatus: () => ({ state: scanState.state, message: scanState.setSystemState.mock.calls.at(-1)?.[1] }),
+			getHash: (filePath) => cache.getHash(filePath),
+			getPoints: filePoints,
+			seed,
+		}
+	}, vi)
 
 	it("recovers a scan store request without reembedding and logs every retry plus its summary", async () => {
 		store.upsertPoints.mockRejectedValueOnce(Object.assign(new Error("unavailable"), { status: 503 }))
@@ -1177,8 +1216,9 @@ describe("DirectoryScanner durable per-file recovery", () => {
 		const { orchestrator, state } = createOrchestrator()
 		const pending = orchestrator.startIndexing()
 		await drain()
-		expect(failures.list()).toEqual([
-			expect.objectContaining({ activity, classification: "rate-limit", state: "retrying", attempt: 1 }),
+		expect(failures.list()).toEqual([])
+		expect(pacers.providerWaits()).toEqual([
+			expect.objectContaining({ waitingFiles: ["a.ts"], resumeAt: Date.now() + 30_000 }),
 		])
 		expect(state.state).toBe("Indexing")
 		const transportCalls = () =>
@@ -1201,7 +1241,7 @@ describe("DirectoryScanner durable per-file recovery", () => {
 		expect(store.deletePointsByFilePath).not.toHaveBeenCalled()
 		expect(store.countPointsForFile).not.toHaveBeenCalled()
 		expect(cache.getHash(fileA)).toBeUndefined()
-		expect(failures.list()).toEqual([expect.objectContaining({ state: "exhausted", activity })])
+		expect(failures.list()).toEqual([])
 		expect(state.setSystemState).toHaveBeenLastCalledWith(
 			"Standby",
 			"embeddings:orchestrator.indexingStoppedPartial",

@@ -73,6 +73,7 @@ describe("DirectoryScanner", () => {
 	beforeEach(async () => {
 		vi.useFakeTimers()
 		mockEmbedder = {
+			rateLimitScope: "openai:scanner-unit",
 			createEmbeddings: vi.fn().mockImplementation(async (texts: string[]) => ({
 				embeddings: texts.map(() => [0.1, 0.2, 0.3]),
 			})),
@@ -80,6 +81,7 @@ describe("DirectoryScanner", () => {
 		}
 		const storedPoints = new Map<string, any>()
 		mockVectorStore = {
+			rateLimitScope: "qdrant:scanner-unit",
 			upsertPoints: vi.fn().mockResolvedValue(undefined),
 			deletePointsByFilePath: vi.fn().mockResolvedValue(undefined),
 			deletePointsByMultipleFilePaths: vi.fn().mockResolvedValue(undefined),

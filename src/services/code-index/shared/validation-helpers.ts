@@ -176,6 +176,7 @@ export async function withValidationErrorHandling<T extends { valid: boolean; er
 	try {
 		return await validationFn()
 	} catch (error) {
+		if (classifyIndexingError(error) === "rate-limit") throw error
 		return handleValidationError(error, embedderType, customHandlers)
 	}
 }

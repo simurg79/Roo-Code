@@ -1,4 +1,5 @@
 import { OpenAICompatibleEmbedder } from "./openai-compatible"
+import { makeRateLimitScope } from "../provider-pacer"
 import { IEmbedder, EmbeddingResponse, EmbedderInfo } from "../interfaces/embedder"
 import { MAX_ITEM_TOKENS } from "../constants"
 import { t } from "../../../i18n"
@@ -11,9 +12,7 @@ import { t } from "../../../i18n"
  * - codestral-embed-2505 (dimension: 1536)
  */
 export class MistralEmbedder implements IEmbedder {
-	get internallyRetriedClasses() {
-		return this.openAICompatibleEmbedder.internallyRetriedClasses
-	}
+	readonly rateLimitScope: string
 
 	private readonly openAICompatibleEmbedder: OpenAICompatibleEmbedder
 	private static readonly MISTRAL_BASE_URL = "https://api.mistral.ai/v1"
@@ -29,6 +28,8 @@ export class MistralEmbedder implements IEmbedder {
 		if (!apiKey) {
 			throw new Error(t("embeddings:validation.apiKeyRequired"))
 		}
+
+		this.rateLimitScope = makeRateLimitScope("mistral", MistralEmbedder.MISTRAL_BASE_URL, apiKey)
 
 		// Use provided model or default
 		this.modelId = modelId || MistralEmbedder.DEFAULT_MODEL

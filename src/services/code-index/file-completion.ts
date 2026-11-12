@@ -5,7 +5,7 @@ import { IndexWriteGate } from "./index-write-gate"
 import { CodeBlock, IEmbedder, IVectorStore } from "./interfaces"
 import { BATCH_SEGMENT_THRESHOLD, QDRANT_CODE_BLOCK_NAMESPACE } from "./constants"
 import { FileFailureRegistry, REMOVAL_REVISION, type FileFailureActivity } from "./file-failure-registry"
-import { type TransientClass } from "./shared/indexing-errors"
+import { ProviderPacerRegistry } from "./provider-pacer"
 import { retryWithPolicy } from "./shared/retry-policy"
 import { toIndexPath } from "../glob/discovery-options"
 import { throwIfAborted } from "./parser-errors"
@@ -53,6 +53,7 @@ export class FileIndexWriter {
 		private readonly generations: GenerationAllocator,
 		private readonly workspacePath: string,
 		private readonly failures = new FileFailureRegistry(),
+		private readonly pacers = new ProviderPacerRegistry(),
 	) {}
 
 	private async run<T>(signal: AbortSignal, operation: () => Promise<T>, files: string[] = []): Promise<T> {
@@ -87,19 +88,23 @@ export class FileIndexWriter {
 			activity: FileFailureActivity
 			file: string
 			revision: string
-			ownedClasses?: ReadonlySet<TransientClass>
+			rateLimitScope?: string
 		},
 	): Promise<T> {
-		const { signal, activity, file, revision, ownedClasses } = options
+		const { signal, activity, file, revision, rateLimitScope = this.store.rateLimitScope } = options
 		const relativePath = toIndexPath(file, this.workspacePath)
 		const previous = this.failures.getFailure(relativePath, revision, activity)
 		if (previous?.state === "exhausted") throw Object.assign(new Error(previous.reason), previous)
 		return await retryWithPolicy(
-			() => this.run(signal, operation, activity === "upsert" || activity === "delete" ? [file] : []),
+			() =>
+				this.pacers
+					.get(rateLimitScope)
+					.run(relativePath, signal, () =>
+						this.run(signal, operation, activity === "upsert" || activity === "delete" ? [file] : []),
+					),
 			{
 				signal,
 				activity,
-				ownedClasses,
 				budget: this.failures.getRetryBudget(relativePath, revision, activity),
 				onFailure: ({ error, attempt, willRetry, classification, ...delay }) => {
 					this.failures.record(
@@ -270,7 +275,7 @@ export class FileIndexWriter {
 							throw new Error(`Incomplete embeddings for ${filePath}`)
 						return result
 					},
-					{ ...retryOptions, activity: "embed", ownedClasses: embedder.internallyRetriedClasses },
+					{ ...retryOptions, activity: "embed", rateLimitScope: embedder.rateLimitScope },
 				)
 				throwIfAborted(signal)
 				const points = batch.map((block, index) => ({

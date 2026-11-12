@@ -5,13 +5,14 @@ import { getModelQueryPrefix } from "../../../shared/embeddingModels"
 import { MAX_ITEM_TOKENS } from "../constants"
 import { t } from "../../../i18n"
 import { withValidationErrorHandling } from "../shared/validation-helpers"
-import { EmbeddingError, type TransientClass } from "../shared/indexing-errors"
+import { EmbeddingError } from "../shared/indexing-errors"
+import { makeRateLimitScope } from "../provider-pacer"
 
 const OLLAMA_EMBEDDING_TIMEOUT_MS = 60000 // 60 seconds for embedding requests
 const OLLAMA_VALIDATION_TIMEOUT_MS = 30000 // 30 seconds for validation requests
 
 export class CodeIndexOllamaEmbedder implements IEmbedder {
-	readonly internallyRetriedClasses: ReadonlySet<TransientClass> = new Set()
+	readonly rateLimitScope: string
 	private readonly baseUrl: string
 	private readonly defaultModelId: string
 
@@ -21,6 +22,7 @@ export class CodeIndexOllamaEmbedder implements IEmbedder {
 		baseUrl = baseUrl.replace(/\/+$/, "")
 
 		this.baseUrl = baseUrl
+		this.rateLimitScope = makeRateLimitScope("ollama", baseUrl)
 		this.defaultModelId = options.ollamaModelId || "nomic-embed-text:latest"
 	}
 

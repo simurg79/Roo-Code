@@ -17,6 +17,9 @@ import { IndexWriteGate } from "./index-write-gate"
 import { GenerationAllocator } from "./generation-allocator"
 import { FileFailureRegistry } from "./file-failure-registry"
 import { codeIndexLog } from "./code-index-log"
+import { ProviderPacerRegistry } from "./provider-pacer"
+import { classifyIndexingError } from "./shared/indexing-errors"
+import { formatProviderWaitMessage } from "./shared/provider-wait-message"
 import type { FailedFileStatus, FailedFileSummary } from "@roo-code/types"
 
 export class CodeIndexManager {
@@ -47,6 +50,7 @@ export class CodeIndexManager {
 	private startupFailureMessage?: string
 	private startupEpoch = 0
 	public readonly fileFailureRegistry = new FileFailureRegistry()
+	public readonly providerPacerRegistry = new ProviderPacerRegistry()
 	private readonly progressEmitter = new vscode.EventEmitter<ReturnType<CodeIndexManager["getCurrentStatus"]>>()
 	private readonly statusSubscriptions: vscode.Disposable[] = []
 
@@ -113,6 +117,7 @@ export class CodeIndexManager {
 		this.statusSubscriptions.push(
 			this._stateManager.onProgressUpdate(() => this.progressEmitter.fire(this.getCurrentStatus())),
 			this.fileFailureRegistry.onDidChange(() => this.progressEmitter.fire(this.getCurrentStatus())),
+			this.providerPacerRegistry.onDidChange(() => this.progressEmitter.fire(this.getCurrentStatus())),
 		)
 	}
 
@@ -443,24 +448,41 @@ export class CodeIndexManager {
 			? { ...representative, count: failedFiles.length }
 			: undefined
 		const stopped = this.servicesStopped || !this.isWorkspaceEnabled || !this.isFeatureEnabled
+		const providerWaits = this.providerPacerRegistry.providerWaits().map((wait) => ({
+			...wait,
+			waitingFiles: wait.waitingFiles.map((file) =>
+				codeIndexLog.redact(path.isAbsolute(file) ? path.relative(this.workspacePath, file) : file),
+			),
+		}))
+		const waiting = !stopped && this.providerPacerRegistry.hasWaitingRequests()
+		const incompleteFiles =
+			failedFiles.length > 0 ||
+			this.providerPacerRegistry.waitingPaths().length > 0 ||
+			(stopped && Object.keys(this._cacheManager?.getOpenFiles?.() ?? {}).length > 0)
 		const retrying = failedFiles.some((failure) => failure.state === "retrying")
-		const recoveryMessage =
-			failedFiles.length > 0 && status?.systemStatus !== "Error" && status?.systemStatus !== "Stopping"
-				? t(
-						stopped
-							? "embeddings:orchestrator.indexingStoppedPartial"
-							: retrying
-								? "embeddings:orchestrator.indexingFilesRetrying"
-								: "embeddings:orchestrator.indexingFilesFailed",
-					)
-				: status?.message
+		const canShowRecovery = status?.systemStatus !== "Error" && status?.systemStatus !== "Stopping"
+		let recoveryMessage = status?.message
+		if (canShowRecovery) {
+			if (waiting) {
+				recoveryMessage = formatProviderWaitMessage(providerWaits)
+			} else if (incompleteFiles) {
+				recoveryMessage = t(
+					stopped
+						? "embeddings:orchestrator.indexingStoppedPartial"
+						: retrying
+							? "embeddings:orchestrator.indexingFilesRetrying"
+							: "embeddings:orchestrator.indexingFilesFailed",
+				)
+			}
+		}
 		return {
 			...status,
-			...(status?.systemStatus !== "Error" && status?.systemStatus !== "Stopping" && failedFiles.length > 0
+			...(canShowRecovery && (incompleteFiles || waiting)
 				? {
 						systemStatus: (this.servicesStopped || !this.isWorkspaceEnabled || !this.isFeatureEnabled
 							? "Standby"
-							: this._orchestrator?.isActive ||
+							: waiting ||
+								  this._orchestrator?.isActive ||
 								  failedFiles.some((failure) => failure.state === "retrying")
 								? "Indexing"
 								: "Standby") as IndexingState,
@@ -479,6 +501,7 @@ export class CodeIndexManager {
 				: {}),
 			failedFiles,
 			failedFileSummary,
+			providerWaits,
 			workspacePath: this.workspacePath,
 			workspaceEnabled: this.isWorkspaceEnabled,
 			autoEnableDefault: this.autoEnableDefault,
@@ -492,7 +515,13 @@ export class CodeIndexManager {
 	): Promise<CodeIndexSearchResponse> {
 		if (!this.isFeatureEnabled) {
 			const failedFiles = this.fileFailureRegistry.list().map((failure) => failure.path)
-			return { results: [], partial: failedFiles.length > 0, failedFiles }
+			const waitingFiles = this.providerPacerRegistry.waitingPaths()
+			return {
+				results: [],
+				partial: failedFiles.length > 0 || waitingFiles.length > 0,
+				failedFiles,
+				waitingFiles,
+			}
 		}
 		this.assertInitialized()
 		return this._searchService!.searchIndex(query, directoryPrefix, signal)
@@ -525,6 +554,7 @@ export class CodeIndexManager {
 			this.writeGate,
 			this.generationAllocator,
 			this.fileFailureRegistry,
+			this.providerPacerRegistry,
 		)
 
 		const ignoreInstance = ignore()
@@ -565,8 +595,24 @@ export class CodeIndexManager {
 			rooIgnoreController,
 		)
 
-		// Validate embedder configuration before proceeding
-		const validationResult = await this._serviceFactory.validateEmbedder(embedder)
+		const factory = this._serviceFactory
+		const pacer = this.providerPacerRegistry.get(embedder.rateLimitScope)
+		let deferredValidation = pacer.state().pausedUntil !== undefined
+		let validationResult = { valid: true } as { valid: boolean; error?: string }
+		if (!deferredValidation) {
+			const issueSeq = pacer.markIssued()
+			try {
+				validationResult = await factory.validateEmbedder(embedder)
+			} catch (error) {
+				if (classifyIndexingError(error) !== "rate-limit") {
+					parser?.stop()
+					fileWatcher.dispose()
+					throw error
+				}
+				pacer.reportRateLimit(error, issueSeq)
+				deferredValidation = true
+			}
+		}
 		if (!isCurrentAttempt()) {
 			parser?.stop()
 			fileWatcher.dispose()
@@ -603,6 +649,13 @@ export class CodeIndexManager {
 			this.generationAllocator,
 			isCurrentAttempt,
 			this.fileFailureRegistry,
+			this.providerPacerRegistry,
+			deferredValidation
+				? async (signal) => {
+						const result = await pacer.run(undefined, signal, () => factory.validateEmbedder(embedder))
+						if (!result.valid) throw new Error(result.error || "Embedder configuration validation failed")
+					}
+				: undefined,
 		)
 		this.servicesStopped = false
 
@@ -613,6 +666,7 @@ export class CodeIndexManager {
 			embedder,
 			vectorStore,
 			this.fileFailureRegistry,
+			this.providerPacerRegistry,
 		)
 
 		// Clear any error state after successful recreation

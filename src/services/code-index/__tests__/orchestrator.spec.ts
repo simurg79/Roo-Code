@@ -5,6 +5,7 @@ import { FileFailureRegistry } from "../file-failure-registry"
 
 import { CodeIndexStateManager } from "../state-manager"
 import { codeIndexLog } from "../code-index-log"
+import { ProviderPacerRegistry } from "../provider-pacer"
 
 vi.mock("../code-index-log", () => ({ codeIndexLog: { info: vi.fn(), error: vi.fn() } }))
 
@@ -47,6 +48,8 @@ describe("CodeIndexOrchestrator lifecycle", () => {
 	let orchestrator: CodeIndexOrchestrator
 	let failures: FileFailureRegistry
 
+	let providerPacers: ProviderPacerRegistry
+
 	beforeEach(() => {
 		vi.useFakeTimers()
 		vi.clearAllMocks()
@@ -88,6 +91,7 @@ describe("CodeIndexOrchestrator lifecycle", () => {
 		current = true
 		fatal = vi.fn()
 		failures = new FileFailureRegistry()
+		providerPacers = new ProviderPacerRegistry()
 		orchestrator = new CodeIndexOrchestrator(
 			{ isFeatureConfigured: true } as any,
 			state,
@@ -103,6 +107,7 @@ describe("CodeIndexOrchestrator lifecycle", () => {
 			allocator,
 			() => current,
 			failures,
+			providerPacers,
 		)
 	})
 
@@ -295,6 +300,32 @@ describe("CodeIndexOrchestrator lifecycle", () => {
 			systemStatus: "Standby",
 			message: "embeddings:orchestrator.indexingStoppedPartial",
 		})
+	})
+
+	it("keeps Indexed for a search-only pause and stops without false partial work", async () => {
+		await orchestrator.startIndexing()
+		const pacer = providerPacers.get("openai:test")
+		pacer.reportRateLimit({ status: 429, retryAfterMs: 120_000 }, pacer.markIssued())
+		expect(state.getCurrentStatus()).toMatchObject({
+			systemStatus: "Indexed",
+			message: "embeddings:orchestrator.fileWatcherStarted",
+		})
+		expect(providerPacers.providerWaits()).toEqual([
+			{ service: "openai", resumeAt: Date.now() + 120_000, waitingFiles: [] },
+		])
+		for (const systemStatus of ["Error", "Stopping"]) {
+			state.setSystemState(systemStatus, "primary")
+			pacer.reportRateLimit({ status: 429, retryAfterMs: 120_001 }, pacer.markIssued())
+			expect(state.getCurrentStatus()).toMatchObject({ systemStatus, message: "primary" })
+		}
+		state.setSystemState("Indexed", "complete")
+		watcher.isProcessing = true
+		await orchestrator.stopIndexing()
+		expect(state.getCurrentStatus()).toMatchObject({
+			systemStatus: "Standby",
+			message: "embeddings:orchestrator.indexingStopped",
+		})
+		await vi.advanceTimersByTimeAsync(120_001)
 	})
 
 	it("keeps recovery Indexing while a watcher batch remains active", async () => {

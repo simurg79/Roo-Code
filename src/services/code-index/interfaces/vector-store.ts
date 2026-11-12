@@ -8,6 +8,8 @@ export type PointStruct = {
 }
 
 export interface IVectorStore {
+	readonly rateLimitScope: string
+
 	/**
 	 * Initializes the vector store
 	 * @returns Promise resolving to boolean indicating if a new collection was created

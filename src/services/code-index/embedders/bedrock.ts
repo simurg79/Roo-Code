@@ -1,7 +1,7 @@
 import { codeIndexLog } from "../code-index-log"
 import { BedrockRuntimeClient, InvokeModelCommand, InvokeModelCommandInput } from "@aws-sdk/client-bedrock-runtime"
 import { fromIni, fromNodeProviderChain } from "@aws-sdk/credential-providers"
-import type { TransientClass } from "../shared/indexing-errors"
+import { makeRateLimitScope } from "../provider-pacer"
 import { IEmbedder, EmbeddingResponse, EmbedderInfo } from "../interfaces"
 import { MAX_BATCH_TOKENS, MAX_ITEM_TOKENS } from "../constants"
 import { getDefaultModelId } from "../../../shared/embeddingModels"
@@ -13,7 +13,7 @@ import { withValidationErrorHandling, formatEmbeddingError } from "../shared/val
  * Amazon Bedrock implementation of the embedder interface with batching
  */
 export class BedrockEmbedder implements IEmbedder {
-	readonly internallyRetriedClasses: ReadonlySet<TransientClass> = new Set()
+	readonly rateLimitScope: string
 	private bedrockClient: BedrockRuntimeClient
 	private readonly defaultModelId: string
 
@@ -31,6 +31,13 @@ export class BedrockEmbedder implements IEmbedder {
 		if (!region) {
 			throw new Error("Region is required for AWS Bedrock embedder")
 		}
+
+		this.rateLimitScope = makeRateLimitScope(
+			"bedrock",
+			undefined,
+			undefined,
+			JSON.stringify([region, profile ?? ""]),
+		)
 
 		// Initialize the Bedrock client with credentials
 		// If profile is specified, use it; otherwise use default credential chain

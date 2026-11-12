@@ -1,9 +1,12 @@
+import "./mock-code-index-log"
 import { v5 as uuidv5 } from "uuid"
 import { FileCompletion, FileIndexWriter } from "../file-completion"
 import { IndexWriteGate, LATE_WRITE_GRACE_MS } from "../index-write-gate"
 import { QDRANT_CODE_BLOCK_NAMESPACE } from "../constants"
 import type { CodeBlock } from "../interfaces"
 import { FileFailureRegistry } from "../file-failure-registry"
+
+import { makeRateLimitScope, ProviderPacerRegistry } from "../provider-pacer"
 
 function deferred<Value = void>() {
 	let resolve!: (value: Value) => void
@@ -103,12 +106,14 @@ describe("FileIndexWriter", () => {
 			completeRemoval: vi.fn(),
 		}
 		store = {
+			rateLimitScope: "qdrant:writer-test",
 			upsertPoints: vi.fn().mockResolvedValue(undefined),
 			deletePointsByFilePath: vi.fn().mockResolvedValue(undefined),
 			countPointsForFile: vi.fn().mockResolvedValue({ current: 2, other: 0 }),
 		}
 		generations = { allocate: vi.fn().mockResolvedValue(17) }
 		embedder = {
+			rateLimitScope: "openai:writer-test",
 			createEmbeddings: vi.fn(async (texts: string[]) => ({ embeddings: texts.map(() => [0.1, 0.2]) })),
 		}
 		gate = new IndexWriteGate()
@@ -301,11 +306,51 @@ describe("FileIndexWriter", () => {
 		},
 	)
 
-	it.each(["owned", "permanent", "abort", "revision"])("ends automatic attempts for %s", async (ending) => {
-		if (ending === "owned") embedder.internallyRetriedClasses = new Set(["rate-limit"])
+	it("T35 a different API key completes through the writer while the original allowance remains paused", async () => {
+		const pacers = new ProviderPacerRegistry()
+		const originalScope = makeRateLimitScope("openai", "https://api.example.test/v1", "first-test-key")
+		const independentScope = makeRateLimitScope("openai", "https://api.example.test/v1", "second-test-key")
+		const paused = pacers.get(originalScope)
+		paused.reportRateLimit({ status: 429, retryAfterMs: 30_000 }, paused.markIssued())
+		const resumeAt = paused.state().pausedUntil
+		embedder.rateLimitScope = independentScope
+		writer = new FileIndexWriter(cache, store, gate, generations, "/workspace", failures, pacers)
+		await writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal)
+		expect(embedder.createEmbeddings).toHaveBeenCalledOnce()
+		expect(store.upsertPoints).toHaveBeenCalledOnce()
+		expect(cache.completeFile).toHaveBeenCalledWith(filePath, "hash")
+		expect(paused.state().pausedUntil).toBe(resumeAt)
+		expect(pacers.get(independentScope).state().pausedUntil).toBeUndefined()
+		expect(failures.list()).toEqual([])
+	})
+
+	it("T41 an upsert aborted inside a paused pacer never enters the gate or incurs grace", async () => {
+		const pacers = new ProviderPacerRegistry()
+		writer = new FileIndexWriter(cache, store, gate, generations, "/workspace", failures, pacers)
+		const pacer = pacers.get(store.rateLimitScope)
+		pacer.reportRateLimit({ status: 429, retryAfterMs: 30_000 }, pacer.markIssued())
+		const pending = writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal).catch((error) => error)
+		await vi.advanceTimersByTimeAsync(0)
+		expect(embedder.createEmbeddings).toHaveBeenCalledOnce()
+		expect(pacer.state().waitingPaths).toEqual(["file.ts"])
+		expect(gate.hasPending(attempt.signal)).toBe(false)
+		expect(store.upsertPoints).not.toHaveBeenCalled()
+		attempt.abort()
+		expect(await pending).toBe(attempt.signal.reason)
+		expect(gate.uncertainFiles(attempt.signal)).toEqual([])
+		expect(gate.graceDeadline(filePath)).toBe(0)
+		expect(gate.needsReconciliation(filePath)).toBe(false)
+		await gate.settled(attempt.signal)
+		await vi.advanceTimersByTimeAsync(60_000)
+		expect(store.upsertPoints).not.toHaveBeenCalled()
+		expect(cache.completeFile).not.toHaveBeenCalled()
+		expect(failures.list()).toEqual([])
+	})
+
+	it.each(["permanent", "abort", "revision"])("ends automatic attempts for %s", async (ending) => {
 		embedder.createEmbeddings.mockRejectedValue(
 			Object.assign(new Error("failed"), {
-				status: ending === "owned" ? 429 : ending === "permanent" ? 401 : 503,
+				status: ending === "permanent" ? 401 : 503,
 			}),
 		)
 		const pending = writer.replace(filePath, "hash", blocks(2), embedder, attempt.signal).catch((error) => error)

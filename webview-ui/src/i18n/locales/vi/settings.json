@@ -98,6 +98,10 @@
 		"description": "Cấu hình các lời nhắc hỗ trợ được sử dụng cho các hành động nhanh như cải thiện lời nhắc, giải thích mã và khắc phục sự cố. Những lời nhắc này giúp Roo cung cấp hỗ trợ tốt hơn cho các tác vụ phát triển phổ biến."
 	},
 	"codeIndex": {
+		"providerWaiting": "Đang chờ {{service}}; việc lập chỉ mục tự động tiếp tục",
+		"providerWaitingUntil": "Đang chờ {{service}}; việc lập chỉ mục tự động tiếp tục lúc {{time}}",
+		"providerPaused": "Đang chờ {{service}}",
+		"providerPausedUntil": "Đang chờ {{service}} đến {{time}}",
 		"title": "Lập chỉ mục mã nguồn",
 		"enableLabel": "Bật lập chỉ mục mã nguồn",
 		"enableDescription": "Bật lập chỉ mục mã để cải thiện tìm kiếm và sự hiểu biết về ngữ cảnh",

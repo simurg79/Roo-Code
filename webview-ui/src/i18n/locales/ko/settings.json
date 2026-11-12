@@ -98,6 +98,10 @@
 		"description": "프롬프트 향상, 코드 설명, 문제 해결과 같은 빠른 작업에 사용되는 지원 프롬프트를 구성합니다. 이러한 프롬프트는 Roo가 일반적인 개발 작업에 대해 더 나은 지원을 제공하는 데 도움이 됩니다."
 	},
 	"codeIndex": {
+		"providerWaiting": "{{service}} 대기 중; 인덱싱이 자동으로 재개됩니다",
+		"providerWaitingUntil": "{{service}} 대기 중; {{time}}에 인덱싱이 자동으로 재개됩니다",
+		"providerPaused": "{{service}} 대기 중",
+		"providerPausedUntil": "{{time}}까지 {{service}} 대기 중",
 		"title": "코드베이스 인덱싱",
 		"enableLabel": "코드베이스 인덱싱 활성화",
 		"enableDescription": "향상된 검색 및 컨텍스트 이해를 위해 코드 인덱싱 활성화",

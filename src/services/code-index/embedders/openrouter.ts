@@ -1,6 +1,6 @@
 import { codeIndexLog } from "../code-index-log"
 import { OpenAI } from "openai"
-import type { TransientClass } from "../shared/indexing-errors"
+import { makeRateLimitScope } from "../provider-pacer"
 import { IEmbedder, EmbeddingResponse, EmbedderInfo } from "../interfaces/embedder"
 import { MAX_BATCH_TOKENS, MAX_ITEM_TOKENS } from "../constants"
 import { getDefaultModelId, getModelQueryPrefix } from "../../../shared/embeddingModels"
@@ -30,7 +30,7 @@ interface OpenRouterEmbeddingResponse {
  * through a single endpoint, automatically handling fallbacks and cost optimization.
  */
 export class OpenRouterEmbedder implements IEmbedder {
-	readonly internallyRetriedClasses: ReadonlySet<TransientClass> = new Set()
+	readonly rateLimitScope: string
 	private embeddingsClient: OpenAI
 	private readonly defaultModelId: string
 	private readonly apiKey: string
@@ -51,6 +51,7 @@ export class OpenRouterEmbedder implements IEmbedder {
 		}
 
 		this.apiKey = apiKey
+		this.rateLimitScope = makeRateLimitScope("openrouter", this.baseUrl, apiKey)
 		// Only set specificProvider if it's not the default value
 		this.specificProvider =
 			specificProvider && specificProvider !== OPENROUTER_DEFAULT_PROVIDER_NAME ? specificProvider : undefined

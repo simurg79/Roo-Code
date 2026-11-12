@@ -445,7 +445,6 @@ describe("BedrockEmbedder", () => {
 				})
 				expect(mockSend).toHaveBeenCalledTimes(1)
 				expect(vitest.getTimerCount()).toBe(0)
-				expect([...embedder.internallyRetriedClasses]).toEqual([])
 			})
 
 			it("should not retry on non-throttling errors", async () => {
