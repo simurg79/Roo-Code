@@ -25,6 +25,7 @@ import { FileIndexWriter } from "../file-completion"
 import { FileFailureRegistry, UNKNOWN_REVISION, type FileFailureActivity } from "../file-failure-registry"
 import { codeIndexLog } from "../code-index-log"
 import { ProviderPacerRegistry } from "../provider-pacer"
+import { readSource, SOURCE_MISSING } from "../shared/indexing-errors"
 
 export class DirectoryScanner implements IDirectoryScanner {
 	private readonly batchSegmentThreshold: number
@@ -145,6 +146,15 @@ export class DirectoryScanner implements IDirectoryScanner {
 				const message = error instanceof Error ? error.message : String(error)
 				onError?.(new Error(`${message} (Workspace: ${scanWorkspace}, File: ${filePath})`))
 			}
+			const dropSelected = (filePath: string) => {
+				selectedPaths.delete(filePath)
+				if (!trackedPaths.has(filePath)) incompleteFiles.delete(filePath)
+			}
+			// A missing source falls into the removal phase; it is neither processed nor skipped.
+			const dropMissing = (filePath: string, relativePath: string) => {
+				codeIndexLog.debug("Source missing at read; treating as removed", { path: relativePath })
+				dropSelected(filePath)
+			}
 			const processFile = async (filePath: string) => {
 				const relativePath = toIndexPath(filePath, scanWorkspace)
 				let revision = this.failures.getRevision(relativePath) ?? UNKNOWN_REVISION
@@ -153,16 +163,17 @@ export class DirectoryScanner implements IDirectoryScanner {
 				let fileSignal = signal
 				try {
 					checkActive()
-					const stats = await stat(filePath)
+					const stats = await readSource(stat(filePath))
 					checkActive()
+					if (stats === SOURCE_MISSING) return dropMissing(filePath, relativePath)
 					if (stats.size > MAX_FILE_SIZE_BYTES) {
-						selectedPaths.delete(filePath)
-						if (!trackedPaths.has(filePath)) incompleteFiles.delete(filePath)
+						dropSelected(filePath)
 						skippedCount++
 						return
 					}
-					const buffer = await vscode.workspace.fs.readFile(vscode.Uri.file(filePath))
+					const buffer = await readSource(vscode.workspace.fs.readFile(vscode.Uri.file(filePath)))
 					checkActive()
+					if (buffer === SOURCE_MISSING) return dropMissing(filePath, relativePath)
 					const content = Buffer.from(buffer).toString("utf-8")
 					const hash = createHash("sha256").update(content).digest("hex")
 					revision = hash
