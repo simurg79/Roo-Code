@@ -146,6 +146,15 @@ export class DirectoryScanner implements IDirectoryScanner {
 				const message = error instanceof Error ? error.message : String(error)
 				onError?.(new Error(`${message} (Workspace: ${scanWorkspace}, File: ${filePath})`))
 			}
+			const dropSelected = (filePath: string) => {
+				selectedPaths.delete(filePath)
+				if (!trackedPaths.has(filePath)) incompleteFiles.delete(filePath)
+			}
+			// A missing source falls into the removal phase; it is neither processed nor skipped.
+			const dropMissing = (filePath: string, relativePath: string) => {
+				codeIndexLog.debug("Source missing at read; treating as removed", { path: relativePath })
+				dropSelected(filePath)
+			}
 			const processFile = async (filePath: string) => {
 				const relativePath = toIndexPath(filePath, scanWorkspace)
 				let revision = this.failures.getRevision(relativePath) ?? UNKNOWN_REVISION
@@ -154,24 +163,17 @@ export class DirectoryScanner implements IDirectoryScanner {
 				let fileSignal = signal
 				try {
 					checkActive()
-					// A missing source falls into the removal phase; it is neither processed nor skipped.
-					const dropMissing = () => {
-						codeIndexLog.debug("Source missing at read; treating as removed", { path: relativePath })
-						selectedPaths.delete(filePath)
-						if (!trackedPaths.has(filePath)) incompleteFiles.delete(filePath)
-					}
 					const stats = await readSource(stat(filePath))
 					checkActive()
-					if (stats === SOURCE_MISSING) return dropMissing()
+					if (stats === SOURCE_MISSING) return dropMissing(filePath, relativePath)
 					if (stats.size > MAX_FILE_SIZE_BYTES) {
-						selectedPaths.delete(filePath)
-						if (!trackedPaths.has(filePath)) incompleteFiles.delete(filePath)
+						dropSelected(filePath)
 						skippedCount++
 						return
 					}
 					const buffer = await readSource(vscode.workspace.fs.readFile(vscode.Uri.file(filePath)))
 					checkActive()
-					if (buffer === SOURCE_MISSING) return dropMissing()
+					if (buffer === SOURCE_MISSING) return dropMissing(filePath, relativePath)
 					const content = Buffer.from(buffer).toString("utf-8")
 					const hash = createHash("sha256").update(content).digest("hex")
 					revision = hash

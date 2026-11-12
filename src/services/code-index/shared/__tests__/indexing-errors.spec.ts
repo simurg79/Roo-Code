@@ -16,6 +16,7 @@ import { CodeIndexOllamaEmbedder } from "../../embedders/ollama"
 import { IndexingRetryError } from "../indexing-errors"
 
 vi.mock("../../../../i18n", () => ({ t: (key: string) => key }))
+vi.mock("../../../../shared/embeddingModels", () => ({ getModelQueryPrefix: () => undefined }))
 
 describe("T44 isSourceMissing and readSource", () => {
 	const withCode = (code?: string) => Object.assign(new Error("x"), code ? { code } : {})
@@ -47,7 +48,6 @@ describe("T44 isSourceMissing and readSource", () => {
 		await expect(readSource(Promise.reject(denied))).rejects.toBe(denied)
 	})
 })
-vi.mock("../../../../shared/embeddingModels", () => ({ getModelQueryPrefix: () => undefined }))
 
 describe("indexing error classification", () => {
 	it.each([

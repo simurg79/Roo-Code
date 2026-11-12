@@ -417,7 +417,7 @@ describe("FileWatcher per-file completion", () => {
 	)
 
 	describe("T43 watcher source missing at read is a removal", () => {
-		const missing = (code: string) => Object.assign(new Error("gone"), { code })
+		const errorWithCode = (code: string) => Object.assign(new Error("gone"), { code })
 		const failAt = (stage: "stat" | "read", error: Error) => {
 			if (stage === "stat") vi.mocked(vscode.workspace.fs.stat).mockRejectedValueOnce(error)
 			else vi.mocked(vscode.workspace.fs.readFile).mockRejectedValueOnce(error)
@@ -426,7 +426,7 @@ describe("FileWatcher per-file completion", () => {
 			[...points.values()].filter((point) => point.payload.filePath === path.relative(workspace, filePath))
 
 		it.each(["stat", "read"] as const)("never-indexed file missing at %s is skipped", async (stage) => {
-			failAt(stage, missing("FileNotFound"))
+			failAt(stage, errorWithCode("FileNotFound"))
 			expect(await watcher.processFile(fileA)).toMatchObject({ status: "skipped" })
 			expect(store.deletePointsByFilePath).not.toHaveBeenCalled()
 			expect(failures.list()).toEqual([])
@@ -435,7 +435,7 @@ describe("FileWatcher per-file completion", () => {
 		it.each(["stat", "read"] as const)("previously indexed file missing at %s is removed", async (stage) => {
 			expect(await watcher.processFile(fileA)).toMatchObject({ status: "success" })
 			expect(pointsFor(fileA)).not.toEqual([])
-			failAt(stage, missing(stage === "stat" ? "FileNotFound" : "ENOENT"))
+			failAt(stage, errorWithCode(stage === "stat" ? "FileNotFound" : "ENOENT"))
 			expect(await watcher.processFile(fileA)).toMatchObject({ status: "success" })
 			expect(pointsFor(fileA)).toEqual([])
 			expect(hashes[fileA]).toBeUndefined()
@@ -446,14 +446,14 @@ describe("FileWatcher per-file completion", () => {
 			parser.parseFile.mockRejectedValueOnce(new Error("parse failed"))
 			await watcher.processFile(fileA)
 			expect(failures.list()).toHaveLength(1)
-			failAt("stat", missing("FileNotFound"))
+			failAt("stat", errorWithCode("FileNotFound"))
 			expect(await watcher.processFile(fileA)).toMatchObject({ status: "success" })
 			expect(failures.list()).toEqual([])
 		})
 
 		it("keeps a cleanup failure as a delete failure", async () => {
 			await watcher.processFile(fileA)
-			failAt("read", missing("FileNotFound"))
+			failAt("read", errorWithCode("FileNotFound"))
 			store.deletePointsByFilePath.mockRejectedValueOnce(new Error("delete failed"))
 			expect(await watcher.processFile(fileA)).toMatchObject({ status: "local_error" })
 			expect(failures.list()).toEqual([expect.objectContaining({ path: "a.ts", activity: "delete" })])
@@ -464,7 +464,7 @@ describe("FileWatcher per-file completion", () => {
 			["read", "EACCES"],
 			["read", "Unknown"],
 		] as const)("keeps denied access at %s (%s) as a read failure", async (stage, code) => {
-			failAt(stage, missing(code))
+			failAt(stage, errorWithCode(code))
 			expect(await watcher.processFile(fileA)).toMatchObject({ status: "local_error" })
 			expect(failures.list()).toEqual([
 				expect.objectContaining({ path: "a.ts", activity: "read", state: "exhausted" }),
@@ -472,7 +472,7 @@ describe("FileWatcher per-file completion", () => {
 		})
 
 		it("keeps a not-found error from setup, outside stat and read, as a failure", async () => {
-			vi.spyOn(watcher as any, "getContext").mockRejectedValueOnce(missing("ENOENT"))
+			vi.spyOn(watcher as any, "getContext").mockRejectedValueOnce(errorWithCode("ENOENT"))
 			expect(await watcher.processFile(fileA)).toMatchObject({ status: "local_error" })
 			expect(failures.list()).toEqual([expect.objectContaining({ path: "a.ts", activity: "read" })])
 		})
@@ -506,7 +506,7 @@ describe("FileWatcher per-file completion", () => {
 				vi.mocked(vscode.workspace.fs.readFile).mockImplementation(async (uri) => {
 					if (uri.fsPath === fileA) {
 						missingRead()
-						throw missing("FileNotFound")
+						throw errorWithCode("FileNotFound")
 					}
 					return readFile(uri)
 				})
@@ -522,7 +522,7 @@ describe("FileWatcher per-file completion", () => {
 				expect(state.state).toBe("Indexing")
 				const resumeAt = pacers.providerWaits()[0].resumeAt!
 				await vi.advanceTimersByTimeAsync(resumeAt - Date.now() - (timing === "during" ? 1 : 0))
-				if (stage === "stat") metadata.reject(missing("FileNotFound"))
+				if (stage === "stat") metadata.reject(errorWithCode("FileNotFound"))
 				else metadata.resolve({ size: 100 })
 				await drain()
 				expect(missingRead).toHaveBeenCalledTimes(stage === "read" ? 1 : 0)
@@ -560,7 +560,7 @@ describe("FileWatcher per-file completion", () => {
 
 		it("indexes a recreated file normally", async () => {
 			await watcher.processFile(fileA)
-			failAt("read", missing("FileNotFound"))
+			failAt("read", errorWithCode("FileNotFound"))
 			await watcher.processFile(fileA)
 			expect(pointsFor(fileA)).toEqual([])
 			expect(await watcher.processFile(fileA)).toMatchObject({ status: "success" })

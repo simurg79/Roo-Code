@@ -4,5 +4,6 @@
 	"printWidth": 120,
 	"semi": false,
 	"bracketSameLine": true,
+	"endOfLine": "auto",
 	"ignore": ["node_modules", "dist", "build", "out", ".next", ".venv", "pnpm-lock.yaml"]
 }
