@@ -54,6 +54,7 @@ function createFixture() {
 	Object.defineProperty(task, "messageManager", { value: new MessageManager(task) })
 	const providerDouble = {
 		getCurrentTask: vi.fn(() => task as Task | undefined),
+		guardSessionEdit: vi.fn(async () => true),
 		cancelTask: vi.fn(async (_options: unknown) => {
 			taskDouble.abort = true
 			taskDouble.abandoned = true

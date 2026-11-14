@@ -184,6 +184,28 @@ export class TaskHistoryStore {
 		})
 	}
 
+	async updateIfPresent(
+		taskId: string,
+		update: (item: HistoryItem) => Partial<Omit<HistoryItem, "id">> | undefined,
+	): Promise<HistoryItem | undefined> {
+		return this.withLock(async () => {
+			const existing = this.cache.get(taskId)
+			if (!existing) {
+				return undefined
+			}
+			const changes = update(existing)
+			if (!changes) {
+				return undefined
+			}
+			const merged = { ...existing, ...changes, id: taskId }
+			await this.writeTaskFile(merged)
+			this.cache.set(taskId, merged)
+			this.scheduleIndexWrite()
+			await this.onWrite?.(this.getAll())
+			return merged
+		})
+	}
+
 	/**
 	 * Delete a single task's history item.
 	 */

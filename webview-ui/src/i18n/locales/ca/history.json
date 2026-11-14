@@ -1,4 +1,11 @@
 {
+	"showCompleted": "Mostra les completades",
+	"sessionCompleted": "Completada",
+	"markSessionCompleted": "Completa i conserva la sessió",
+	"confirmSessionCompleted": "Completa i conserva",
+	"completeSessionMessage": "Vols conservar aquesta sessió i els seus missatges, però amagar-la de l'historial per defecte? No s'elimina res i qualsevol feina en curs continuarà. Fes servir Mostra les completades per trobar-la i tornar-la a obrir més endavant.",
+	"reopenSession": "Torna a obrir la sessió",
+	"resumeSession": "Reprèn",
 	"recentTasks": "Tasques",
 	"viewAll": "Veure tot",
 	"tokens": "Tokens: ↑{{in}} ↓{{out}}",

@@ -38,7 +38,7 @@ vi.mock("@vscode/webview-ui-toolkit/react", () => ({
 // Create a variable to hold the mock state
 const mockExtensionState: {
 	apiConfiguration: ProviderSettings
-	currentTaskItem: { id: string } | null
+	currentTaskItem: { id: string; sessionCompletedAt?: number } | null
 	clineMessages: any[]
 } = {
 	apiConfiguration: {
@@ -107,6 +107,34 @@ describe("TaskHeader", () => {
 			</QueryClientProvider>,
 		)
 	}
+
+	it("offers confirmed root session completion even while work is running", () => {
+		mockPostMessage.mockClear()
+		renderTaskHeader({ buttonsDisabled: true })
+		fireEvent.click(screen.getByRole("button", { name: "history:markSessionCompleted" }))
+		expect(mockPostMessage).not.toHaveBeenCalled()
+		fireEvent.click(screen.getByRole("button", { name: "history:confirmSessionCompleted" }))
+		expect(mockPostMessage).toHaveBeenCalledTimes(1)
+		expect(mockPostMessage).toHaveBeenCalledWith({ type: "markSessionCompleted", text: "test-task-id" })
+	})
+
+	it("offers reopen for a completed root without resuming it", () => {
+		mockPostMessage.mockClear()
+		mockExtensionState.currentTaskItem = { id: "test-task-id", sessionCompletedAt: 123 }
+		try {
+			renderTaskHeader()
+			fireEvent.click(screen.getByRole("button", { name: "history:reopenSession" }))
+			expect(mockPostMessage).toHaveBeenCalledTimes(1)
+			expect(mockPostMessage).toHaveBeenCalledWith({ type: "reopenSession", text: "test-task-id" })
+		} finally {
+			mockExtensionState.currentTaskItem = { id: "test-task-id" }
+		}
+	})
+
+	it("does not offer session completion on a child header", () => {
+		renderTaskHeader({ parentTaskId: "root" })
+		expect(screen.queryByRole("button", { name: "history:markSessionCompleted" })).not.toBeInTheDocument()
+	})
 
 	it("should display cost when totalCost is greater than 0", () => {
 		renderTaskHeader()
@@ -280,4 +308,11 @@ describe("TaskHeader", () => {
 			expect(screen.getByText("25%")).toBeInTheDocument()
 		})
 	})
+})
+
+// Share the renderer's React instance across Vite and native dependencies.
+vi.mock("react", async () => {
+	const { createRequire } = await import("node:module")
+	const react = createRequire(import.meta.url)("react")
+	return { ...react, default: react }
 })

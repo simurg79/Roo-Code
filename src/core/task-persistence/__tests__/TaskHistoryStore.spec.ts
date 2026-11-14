@@ -49,6 +49,39 @@ describe("TaskHistoryStore", () => {
 		await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
 	})
 
+	describe("updateIfPresent()", () => {
+		it("SH-11: checks existence inside the lock after a queued deletion", async () => {
+			await store.upsert(makeHistoryItem({ id: "parent", status: "delegated", awaitingChildId: "child" }))
+			let releaseWrite!: () => void
+			const blockedWrite = new Promise<void>((resolve) => {
+				releaseWrite = resolve
+			})
+			const { safeWriteJson } = await import("../../../utils/safeWriteJson")
+			vi.mocked(safeWriteJson).mockImplementationOnce(async () => blockedWrite)
+			const blocker = store.upsert(makeHistoryItem({ id: "blocker" }))
+			const deletion = store.delete("parent")
+			const update = vi.fn(() => ({ status: "active" as const, awaitingChildId: undefined }))
+			const repair = store.updateIfPresent("parent", update)
+			releaseWrite()
+			await Promise.all([blocker, deletion, repair])
+			expect(await repair).toBeUndefined()
+			expect(update).not.toHaveBeenCalled()
+			expect(store.get("parent")).toBeUndefined()
+			await expect(fs.access(path.join(tmpDir, "tasks", "parent", GlobalFileNames.historyItem))).rejects.toThrow()
+		})
+
+		it("rechecks relationships under lock and preserves unrelated fields", async () => {
+			await store.upsert(makeHistoryItem({ id: "parent", sessionCompletedAt: 123, status: "delegated" }))
+			await store.updateIfPresent("parent", () => ({ status: "active", awaitingChildId: undefined }))
+			expect(store.get("parent")).toMatchObject({ status: "active", sessionCompletedAt: 123 })
+			const update = await store.updateIfPresent("parent", (entry) =>
+				entry.status === "delegated" ? { status: "completed" } : undefined,
+			)
+			expect(update).toBeUndefined()
+			expect(store.get("parent")!.status).toBe("active")
+		})
+	})
+
 	describe("initialize()", () => {
 		it("initializes from empty state (no index, no task dirs)", async () => {
 			await store.initialize()

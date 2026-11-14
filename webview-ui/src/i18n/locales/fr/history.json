@@ -1,4 +1,11 @@
 {
+	"showCompleted": "Afficher les sessions terminées",
+	"sessionCompleted": "Terminée",
+	"markSessionCompleted": "Terminer et conserver la session",
+	"confirmSessionCompleted": "Terminer et conserver",
+	"completeSessionMessage": "Conserver cette session et ses messages, mais la masquer dans l'historique par défaut ? Rien n'est supprimé et tout travail en cours continuera. Utilise Afficher les sessions terminées pour la retrouver et la rouvrir plus tard.",
+	"reopenSession": "Rouvrir la session",
+	"resumeSession": "Reprendre",
 	"recentTasks": "Tâches",
 	"viewAll": "Voir tout",
 	"tokens": "Tokens: ↑{{in}} ↓{{out}}",

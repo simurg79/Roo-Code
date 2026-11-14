@@ -19,6 +19,15 @@
 		"delete_config_profile": "Bạn có chắc chắn muốn xóa hồ sơ cấu hình này không?",
 		"delete_custom_mode_with_rules": "Bạn có chắc chắn muốn xóa chế độ {scope} này không?\n\nThao tác này cũng sẽ xóa thư mục quy tắc liên quan tại:\n{rulesFolderPath}"
 	},
+	"session_history": {
+		"reopen_first": "Phiên này đã hoàn tất. Mở lại trước khi tiếp tục làm việc.",
+		"edit_not_sent": "Tin nhắn đã chỉnh sửa chưa được gửi.",
+		"resume_fallback": "Không thể khôi phục trạng thái tiếp tục dự kiến: {{reason}}. Tác vụ gốc của phiên đã được mở. Nhấn Tiếp tục ở đó để làm tiếp.",
+		"cycle": "Quan hệ giữa các tác vụ tạo thành vòng lặp",
+		"missingChild": "Không tìm thấy tác vụ con đang chờ",
+		"missingAwaitingChild": "Một tác vụ được ủy quyền không chỉ rõ tác vụ con mà nó đang chờ",
+		"inconsistentChild": "Tác vụ con đang chờ có quan hệ tác vụ không nhất quán hoặc đã hoàn tất"
+	},
 	"errors": {
 		"invalid_data_uri": "Định dạng URI dữ liệu không hợp lệ",
 		"error_copying_image": "Lỗi khi sao chép hình ảnh: {{errorMessage}}",

@@ -1,4 +1,11 @@
 {
+	"showCompleted": "Tampilkan yang selesai",
+	"sessionCompleted": "Selesai",
+	"markSessionCompleted": "Selesaikan dan simpan sesi",
+	"confirmSessionCompleted": "Selesaikan dan simpan",
+	"completeSessionMessage": "Simpan sesi ini beserta pesannya, tetapi sembunyikan dari riwayat secara default? Tidak ada yang dihapus, dan pekerjaan yang sedang berjalan akan tetap berlanjut. Gunakan Tampilkan yang selesai untuk menemukan dan membukanya kembali nanti.",
+	"reopenSession": "Buka kembali sesi",
+	"resumeSession": "Lanjutkan",
 	"recentTasks": "Tugas",
 	"viewAll": "Lihat Semua Tugas",
 	"tokens": "Token: ↑{{in}} ↓{{out}}",

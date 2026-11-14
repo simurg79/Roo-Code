@@ -224,6 +224,7 @@ vi.mock("../ChatTextArea", () => {
 
 		return (
 			<div data-testid="chat-textarea">
+				<output data-testid="selected-images">{JSON.stringify(props.selectedImages)}</output>
 				<input
 					ref={mockInputRef}
 					type="text"
@@ -333,6 +334,192 @@ const renderChatView = (props: Partial<ChatViewProps> = {}) => {
 		</ExtensionStateContextProvider>,
 	)
 }
+
+describe("ChatView - session Resume", () => {
+	const image = "data:image/png;base64,dGVzdA=="
+	const dispatch = (data: unknown) => {
+		act(() => window.dispatchEvent(new MessageEvent("message", { data })))
+	}
+	const hydrate = (taskId = "root", details = {}, ask = "resume_task", extraMessages: ClineMessage[] = []) => {
+		dispatch({
+			type: "state",
+			state: {
+				version: "1.0.0",
+				currentTaskItem: { id: taskId, ...details },
+				clineMessages: [
+					{ type: "say", say: "task", ts: 100, text: "Saved task" },
+					...extraMessages,
+					{
+						type: "ask",
+						ask,
+						ts: 300,
+						text: ask === "tool" ? JSON.stringify({ tool: "readFile", path: "test.txt" }) : "Continue?",
+					},
+				],
+			},
+		})
+	}
+
+	beforeEach(() => vi.clearAllMocks())
+
+	it.each(["button", "send"])(
+		"SH-13/14: %s keeps the completed-session prompt and draft usable on decline or no answer",
+		(control) => {
+			const view = renderChatView()
+			hydrate("root", { sessionCompletedAt: 123 })
+			const input = view.getByTestId("chat-textarea").querySelector("input")!
+			fireEvent.change(input, { target: { value: "  Continue work  " } })
+			dispatch({ type: "selectedImages", images: [image] })
+			const resume = view.getByRole("button", { name: "chat:resumeTask.title" })
+			const send = view.getByTestId("send-message")
+			fireEvent.click(control === "button" ? resume : send)
+			expect(vscode.postMessage).toHaveBeenCalledWith({
+				type: "resumeSession",
+				text: "root",
+				input: "Continue work",
+				images: [image],
+			})
+			expect(vi.mocked(vscode.postMessage).mock.calls.some(([message]) => message.type === "askResponse")).toBe(
+				false,
+			)
+			const expectRetained = () => {
+				expect(input).toHaveValue("  Continue work  ")
+				expect(view.getByTestId("selected-images")).toHaveTextContent(JSON.stringify([image]))
+				expect(input).toHaveAttribute("data-sending-disabled", "false")
+				expect(send).toBeEnabled()
+				expect(resume).toBeEnabled()
+				expect(view.getByRole("button", { name: "chat:terminate.title" })).toBeEnabled()
+			}
+			expectRetained()
+			dispatch({ type: "resumeSessionInputUsed", text: "other-task" })
+			expectRetained()
+			hydrate("root", { sessionCompletedAt: 123 })
+			expectRetained()
+			fireEvent.change(input, { target: { value: "Try again" } })
+			fireEvent.click(resume)
+			expect(vscode.postMessage).toHaveBeenLastCalledWith({
+				type: "resumeSession",
+				text: "root",
+				input: "Try again",
+				images: [image],
+			})
+		},
+	)
+
+	it.each(["button", "send"])("SH-15: %s clears only after matching input-used confirmation", (control) => {
+		const view = renderChatView()
+		hydrate()
+		const input = view.getByTestId("chat-textarea").querySelector("input")!
+		fireEvent.change(input, { target: { value: "Continue" } })
+		dispatch({ type: "selectedImages", images: [image] })
+		fireEvent.click(
+			control === "button"
+				? view.getByRole("button", { name: "chat:resumeTask.title" })
+				: view.getByTestId("send-message"),
+		)
+		expect(input).toHaveValue("Continue")
+		dispatch({ type: "resumeSessionInputUsed", text: "root" })
+		expect(input).toHaveValue("")
+		expect(view.getByTestId("selected-images")).toHaveTextContent("[]")
+		expect(view.getByTestId("send-message")).toBeDisabled()
+		expect(view.queryByRole("button", { name: "chat:resumeTask.title" })).not.toBeInTheDocument()
+	})
+
+	it("sends an empty Resume without optional input and keeps the prompt available", () => {
+		const view = renderChatView()
+		hydrate()
+		fireEvent.click(view.getByRole("button", { name: "chat:resumeTask.title" }))
+		expect(vscode.postMessage).toHaveBeenCalledWith({ type: "resumeSession", text: "root" })
+		expect(view.getByRole("button", { name: "chat:resumeTask.title" })).toBeEnabled()
+	})
+
+	it.each(["button", "send"])("keeps image-only %s input until confirmed", (control) => {
+		const view = renderChatView()
+		hydrate()
+		dispatch({ type: "selectedImages", images: [image] })
+		fireEvent.click(
+			control === "button"
+				? view.getByRole("button", { name: "chat:resumeTask.title" })
+				: view.getByTestId("send-message"),
+		)
+		expect(vscode.postMessage).toHaveBeenCalledWith({ type: "resumeSession", text: "root", images: [image] })
+		expect(view.getByTestId("selected-images")).toHaveTextContent(JSON.stringify([image]))
+		expect(view.getByTestId("send-message")).toBeEnabled()
+		dispatch({ type: "resumeSessionInputUsed", text: "root" })
+		expect(view.getByTestId("selected-images")).toHaveTextContent("[]")
+	})
+
+	it("preserves text and images when navigating to the continuation target or fallback root", () => {
+		const view = renderChatView()
+		hydrate("inspected-parent")
+		const input = view.getByTestId("chat-textarea").querySelector("input")!
+		fireEvent.change(input, { target: { value: "Unsent draft" } })
+		dispatch({ type: "selectedImages", images: [image] })
+		fireEvent.click(view.getByTestId("send-message"))
+		hydrate("continuation-child", { parentTaskId: "inspected-parent" })
+		dispatch({ type: "resumeSessionInputUsed", text: "inspected-parent" })
+		expect(input).toHaveValue("Unsent draft")
+		expect(view.getByTestId("selected-images")).toHaveTextContent(JSON.stringify([image]))
+		fireEvent.click(view.getByRole("button", { name: "chat:resumeTask.title" }))
+		expect(vscode.postMessage).toHaveBeenLastCalledWith({
+			type: "resumeSession",
+			text: "continuation-child",
+			input: "Unsent draft",
+			images: [image],
+		})
+		hydrate("fallback-root")
+		expect(input).toHaveValue("Unsent draft")
+		expect(view.getByTestId("selected-images")).toHaveTextContent(JSON.stringify([image]))
+	})
+
+	it("retains the draft when the same target receives another ask without confirmation", () => {
+		const view = renderChatView()
+		hydrate()
+		const input = view.getByTestId("chat-textarea").querySelector("input")!
+		fireEvent.change(input, { target: { value: "Unsent draft" } })
+		dispatch({ type: "selectedImages", images: [image] })
+		fireEvent.click(view.getByTestId("send-message"))
+		hydrate("root", {}, "tool")
+		expect(input).toHaveValue("Unsent draft")
+		expect(view.getByTestId("selected-images")).toHaveTextContent(JSON.stringify([image]))
+	})
+
+	it("does not consume an unsolicited confirmation", () => {
+		const view = renderChatView()
+		hydrate()
+		const input = view.getByTestId("chat-textarea").querySelector("input")!
+		fireEvent.change(input, { target: { value: "Unsent draft" } })
+		dispatch({ type: "resumeSessionInputUsed", text: "root" })
+		expect(input).toHaveValue("Unsent draft")
+	})
+
+	it("keeps completed-subtask Start New Task unchanged", () => {
+		const view = renderChatView()
+		hydrate("child", { parentTaskId: "root" }, "resume_task", [
+			{ type: "say", say: "completion_result", ts: 200, text: "Done" },
+		])
+		fireEvent.click(view.getByRole("button", { name: "chat:startNewTask.title" }))
+		expect(vscode.postMessage).toHaveBeenCalledWith({ type: "clearTask" })
+		expect(vi.mocked(vscode.postMessage).mock.calls.some(([message]) => message.type === "resumeSession")).toBe(
+			false,
+		)
+	})
+
+	it("keeps sends at resume_completed_task on the existing askResponse path", () => {
+		const view = renderChatView()
+		hydrate("child", { parentTaskId: "root" }, "resume_completed_task")
+		const input = view.getByTestId("chat-textarea").querySelector("input")!
+		fireEvent.change(input, { target: { value: "Feedback" } })
+		fireEvent.click(view.getByTestId("send-message"))
+		expect(vscode.postMessage).toHaveBeenCalledWith({
+			type: "askResponse",
+			askResponse: "messageResponse",
+			text: "Feedback",
+			images: [],
+		})
+		expect(input).toHaveValue("")
+	})
+})
 
 describe("ChatView - manual condensation", () => {
 	const taskMessage: ClineMessage = { type: "say", say: "task", ts: 100, text: "Initial task" }

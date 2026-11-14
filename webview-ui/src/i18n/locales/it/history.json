@@ -1,4 +1,11 @@
 {
+	"showCompleted": "Mostra completate",
+	"sessionCompleted": "Completata",
+	"markSessionCompleted": "Completa e conserva la sessione",
+	"confirmSessionCompleted": "Completa e conserva",
+	"completeSessionMessage": "Vuoi conservare questa sessione e i suoi messaggi, ma nasconderla dalla cronologia per impostazione predefinita? Non verrà eliminato nulla e il lavoro in corso continuerà. Usa Mostra completate per trovarla e riaprirla in seguito.",
+	"reopenSession": "Riapri sessione",
+	"resumeSession": "Riprendi",
 	"recentTasks": "Attività recenti",
 	"history": "Cronologia",
 	"exitSelectionMode": "Esci dalla modalità selezione",

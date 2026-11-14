@@ -19,6 +19,15 @@
 		"delete_config_profile": "この設定プロファイルを削除してもよろしいですか？",
 		"delete_custom_mode_with_rules": "この{scope}モードを削除してもよろしいですか？\n\nこれにより、関連するルールフォルダも次の場所で削除されます:\n{rulesFolderPath}"
 	},
+	"session_history": {
+		"reopen_first": "このセッションは完了済み。作業を再開する前に、もう一度開いてね。",
+		"edit_not_sent": "編集したメッセージは送信されなかった。",
+		"resume_fallback": "予定していた続きの状態を復元できなかった：{{reason}}。セッションのルートタスクを開いたので、そこで「再開」を押して続けてね。",
+		"cycle": "タスク間の関係が循環している",
+		"missingChild": "待機中の子タスクが見つからない",
+		"missingAwaitingChild": "委任されたタスクに、待機中の子タスクが指定されていない",
+		"inconsistentChild": "待機中の子タスクの関係に矛盾があるか、すでに完了している"
+	},
 	"errors": {
 		"invalid_data_uri": "データURIフォーマットが無効です",
 		"error_copying_image": "画像のコピー中にエラーが発生しました：{{errorMessage}}",

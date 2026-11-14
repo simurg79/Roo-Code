@@ -19,6 +19,15 @@
 		"delete_config_profile": "您確定要刪除此設定檔案嗎？",
 		"delete_custom_mode_with_rules": "您確定要刪除此 {scope} 模式嗎？\n\n這也將刪除位於以下位置的關聯規則資料夾：\n{rulesFolderPath}"
 	},
+	"session_history": {
+		"reopen_first": "此工作階段已完成。繼續工作前，先重新開啟工作階段。",
+		"edit_not_sent": "編輯後的訊息未傳送。",
+		"resume_fallback": "無法還原預期的接續位置：{{reason}}。已開啟工作階段的根工作。按一下該處的「繼續」以恢復工作。",
+		"cycle": "工作關係中存在循環",
+		"missingChild": "等待的子工作不存在",
+		"missingAwaitingChild": "委派的工作未指定正在等待的子工作",
+		"inconsistentChild": "等待的子工作關係不一致，或子工作已完成"
+	},
 	"errors": {
 		"invalid_data_uri": "資料 URI 格式無效",
 		"error_copying_image": "複製圖片時發生錯誤：{{errorMessage}}",

@@ -1,4 +1,11 @@
 {
+	"showCompleted": "Show completed",
+	"sessionCompleted": "Completed",
+	"markSessionCompleted": "Complete and keep session",
+	"confirmSessionCompleted": "Complete and keep",
+	"completeSessionMessage": "Keep this session and its messages, but hide it from history by default? Nothing is deleted, and any running work will continue. Use Show completed to find and reopen it later.",
+	"reopenSession": "Reopen session",
+	"resumeSession": "Resume",
 	"recentTasks": "Recent Tasks",
 	"history": "History",
 	"exitSelectionMode": "Exit Selection Mode",

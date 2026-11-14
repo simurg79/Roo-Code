@@ -7,7 +7,9 @@ import { cn } from "@/lib/utils"
 import { Checkbox } from "@/components/ui/checkbox"
 
 import TaskItemFooter from "./TaskItemFooter"
-import { StandardTooltip } from "../ui"
+import { StandardTooltip, Button } from "../ui"
+import { useAppTranslation } from "@/i18n/TranslationContext"
+import { SessionCompletionButton } from "./SessionCompletionButton"
 
 interface TaskItemProps {
 	item: DisplayHistoryItem
@@ -32,6 +34,9 @@ const TaskItem = ({
 	onDelete,
 	className,
 }: TaskItemProps) => {
+	const { t } = useAppTranslation()
+	const isRoot = !item.parentTaskId
+	const completed = item.sessionCompletedAt !== undefined
 	const handleClick = () => {
 		if (isSelectionMode && onToggleSelection) {
 			onToggleSelection(item.id, !isSelected)
@@ -106,6 +111,27 @@ const TaskItem = ({
 						<div className="flex items-center font-mono gap-1 text-vscode-descriptionForeground text-xs mt-1">
 							<Folder className="size-3" />
 							<span>{item.workspace}</span>
+						</div>
+					)}
+
+					{isRoot && (
+						<div className="flex flex-wrap items-center gap-1" onClick={(event) => event.stopPropagation()}>
+							{completed && (
+								<span className="text-xs text-vscode-descriptionForeground">
+									{t("history:sessionCompleted")}
+								</span>
+							)}
+							{!isSelectionMode && (
+								<>
+									<Button
+										variant="ghost"
+										size="sm"
+										onClick={() => vscode.postMessage({ type: "resumeSession", text: item.id })}>
+										{t("history:resumeSession")}
+									</Button>
+									<SessionCompletionButton taskId={item.id} completed={completed} />
+								</>
+							)}
 						</div>
 					)}
 

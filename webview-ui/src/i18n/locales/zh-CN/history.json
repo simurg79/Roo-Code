@@ -1,4 +1,11 @@
 {
+	"showCompleted": "显示已完成",
+	"sessionCompleted": "已完成",
+	"markSessionCompleted": "完成并保留会话",
+	"confirmSessionCompleted": "完成并保留",
+	"completeSessionMessage": "保留此会话及其消息，但默认在历史记录中隐藏？不会删除任何内容，正在运行的工作也会继续。之后可通过“显示已完成”找到并重新打开会话。",
+	"reopenSession": "重新打开会话",
+	"resumeSession": "继续",
 	"recentTasks": "最近任务",
 	"history": "历史记录",
 	"exitSelectionMode": "退出多选模式",

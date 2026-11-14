@@ -19,6 +19,15 @@
 		"delete_config_profile": "您确定要删除此配置文件吗？",
 		"delete_custom_mode_with_rules": "您确定要删除此 {scope} 模式吗？\n\n这也将删除位于以下位置的关联规则文件夹：\n{rulesFolderPath}"
 	},
+	"session_history": {
+		"reopen_first": "此会话已完成。继续工作前，先重新打开会话。",
+		"edit_not_sent": "编辑后的消息未发送。",
+		"resume_fallback": "无法恢复预期的继续位置：{{reason}}。已打开会话的根任务。点击该处的“继续”以恢复工作。",
+		"cycle": "任务关系中存在循环",
+		"missingChild": "等待的子任务不存在",
+		"missingAwaitingChild": "委派的任务未指定正在等待的子任务",
+		"inconsistentChild": "等待的子任务关系不一致，或子任务已完成"
+	},
 	"errors": {
 		"invalid_mcp_config": "项目MCP配置格式无效",
 		"invalid_mcp_settings_format": "MCP设置JSON格式无效。请确保您的设置遵循正确的JSON格式。",

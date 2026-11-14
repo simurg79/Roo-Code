@@ -19,6 +19,15 @@
 		"delete_config_profile": "Apakah kamu yakin ingin menghapus profil konfigurasi ini?",
 		"delete_custom_mode_with_rules": "Anda yakin ingin menghapus mode {scope} ini?\n\nIni juga akan menghapus folder aturan terkait di:\n{rulesFolderPath}"
 	},
+	"session_history": {
+		"reopen_first": "Sesi ini sudah selesai. Buka kembali sebelum melanjutkan pekerjaan.",
+		"edit_not_sent": "Pesan yang diedit tidak terkirim.",
+		"resume_fallback": "Kelanjutan yang dimaksud tidak dapat dipulihkan: {{reason}}. Tugas utama sesi telah dibuka. Tekan Lanjutkan di sana untuk melanjutkan.",
+		"cycle": "Hubungan antartugas membentuk siklus",
+		"missingChild": "Subtugas yang ditunggu tidak ditemukan",
+		"missingAwaitingChild": "Tugas yang didelegasikan tidak mencantumkan subtugas yang ditunggu",
+		"inconsistentChild": "Subtugas yang ditunggu memiliki hubungan tugas yang tidak konsisten atau sudah selesai"
+	},
 	"errors": {
 		"invalid_data_uri": "Format data URI tidak valid",
 		"error_copying_image": "Error menyalin gambar: {{errorMessage}}",

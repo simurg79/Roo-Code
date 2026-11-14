@@ -1,4 +1,11 @@
 {
+	"showCompleted": "顯示已完成",
+	"sessionCompleted": "已完成",
+	"markSessionCompleted": "完成並保留工作階段",
+	"confirmSessionCompleted": "完成並保留",
+	"completeSessionMessage": "保留此工作階段及其訊息，但預設在歷程記錄中隱藏？不會刪除任何內容，執行中的工作也會繼續。之後可透過「顯示已完成」找到並重新開啟工作階段。",
+	"reopenSession": "重新開啟工作階段",
+	"resumeSession": "繼續",
 	"recentTasks": "最近工作",
 	"history": "歷史紀錄",
 	"exitSelectionMode": "離開選擇模式",

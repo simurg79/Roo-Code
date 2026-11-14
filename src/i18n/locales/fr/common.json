@@ -19,6 +19,15 @@
 		"delete_config_profile": "Êtes-vous sûr de vouloir supprimer ce profil de configuration ?",
 		"delete_custom_mode_with_rules": "Êtes-vous sûr de vouloir supprimer ce mode {scope} ?\n\nCela supprimera également le dossier de règles associé à l'adresse :\n{rulesFolderPath}"
 	},
+	"session_history": {
+		"reopen_first": "Cette session est terminée. Rouvre-la avant de reprendre le travail.",
+		"edit_not_sent": "Le message modifié n'a pas été envoyé.",
+		"resume_fallback": "La suite prévue n'a pas pu être restaurée : {{reason}}. La tâche racine de la session a été ouverte. Appuie sur Reprendre à cet endroit pour continuer.",
+		"cycle": "Les relations entre les tâches contiennent un cycle",
+		"missingChild": "La tâche enfant attendue est introuvable",
+		"missingAwaitingChild": "Une tâche déléguée n'identifie pas la tâche enfant qu'elle attend",
+		"inconsistentChild": "La tâche enfant attendue a des relations incohérentes ou est déjà terminée"
+	},
 	"errors": {
 		"invalid_data_uri": "Format d'URI de données invalide",
 		"error_copying_image": "Erreur lors de la copie de l'image : {{errorMessage}}",

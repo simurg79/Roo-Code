@@ -1,4 +1,11 @@
 {
+	"showCompleted": "Hiện phiên đã hoàn tất",
+	"sessionCompleted": "Đã hoàn tất",
+	"markSessionCompleted": "Hoàn tất và giữ phiên",
+	"confirmSessionCompleted": "Hoàn tất và giữ lại",
+	"completeSessionMessage": "Giữ phiên này cùng các tin nhắn nhưng mặc định ẩn khỏi lịch sử? Không có gì bị xóa và mọi công việc đang chạy vẫn tiếp tục. Dùng Hiện phiên đã hoàn tất để tìm và mở lại sau.",
+	"reopenSession": "Mở lại phiên",
+	"resumeSession": "Tiếp tục",
 	"recentTasks": "Nhiệm vụ gần đây",
 	"history": "Lịch sử",
 	"exitSelectionMode": "Thoát chế độ chọn",

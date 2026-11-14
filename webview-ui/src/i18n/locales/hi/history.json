@@ -1,4 +1,11 @@
 {
+	"showCompleted": "पूरे हुए सत्र दिखाओ",
+	"sessionCompleted": "पूरा हुआ",
+	"markSessionCompleted": "सत्र पूरा करो और रखो",
+	"confirmSessionCompleted": "पूरा करो और रखो",
+	"completeSessionMessage": "इस सत्र और इसके संदेशों को रखते हुए इसे इतिहास में डिफ़ॉल्ट रूप से छिपाना है? कुछ भी नहीं मिटेगा और चल रहा काम जारी रहेगा। बाद में इसे ढूँढने और दोबारा खोलने के लिए पूरे हुए सत्र दिखाओ का उपयोग करो।",
+	"reopenSession": "सत्र दोबारा खोलो",
+	"resumeSession": "फिर शुरू करो",
 	"recentTasks": "हाल के कार्य",
 	"history": "इतिहास",
 	"exitSelectionMode": "चयन मोड से बाहर निकलें",
