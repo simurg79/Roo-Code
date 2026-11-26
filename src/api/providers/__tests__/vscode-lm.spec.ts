@@ -191,6 +191,11 @@ describe("VsCodeLmHandler", () => {
 			["claude-fable-5", 658785],
 			["claude-fable-5.5", 660686],
 			["claude-fable-5.2", 871793],
+			["gemini-4-neon", 897718],
+			["gemini-4-hydrogen", 897719],
+			["gemini-4-carbon", 899900],
+			["gpt-6.2-astra", 271119],
+			["gpt-6.2-sol", 271119],
 		])("resolves %s to its assigned static budget when the live client reports it", (family, expected) => {
 			const familyHandler = new VsCodeLmHandler({
 				vsCodeLmModelSelector: { vendor: "copilot", family: "claude-sonnet-4.5" },
