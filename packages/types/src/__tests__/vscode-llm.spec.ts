@@ -193,6 +193,38 @@ describe("vscodeLlmModels", () => {
 		}
 	})
 
+	it("records the 2026-11-26 rows at their accepted sizes without a margin or unmeasured pricing", () => {
+		const expected = {
+			"gemini-4-neon": { contextWindow: 982833, maxInputTokens: 897718, name: "Gemini 4 Neon" },
+			"gemini-4-hydrogen": {
+				contextWindow: 982830,
+				maxInputTokens: 897719,
+				name: "Gemini 4 Hydrogen",
+			},
+			"gemini-4-carbon": {
+				contextWindow: 935793,
+				maxInputTokens: 899900,
+				name: "Gemini 4 Carbon",
+			},
+			"gpt-6.2-astra": { contextWindow: 921793, maxInputTokens: 271119, name: "GPT-6.2 Astra" },
+			"gpt-6.2-sol": { contextWindow: 921793, maxInputTokens: 271119, name: "GPT-6.2 Sol" },
+		} as const
+
+		for (const [family, row] of Object.entries(expected)) {
+			const model = vscodeLlmModels[family as keyof typeof expected]
+			expect(model.maxInputTokens, `${family}: maxInputTokens`).toBe(row.maxInputTokens)
+			expect(model.contextWindow, `${family}: contextWindow`).toBe(row.contextWindow)
+			expect(model.name, `${family}: name`).toBe(row.name)
+			expect(model.supportsImages, `${family}: supportsImages`).toBe(true)
+			expect(model.supportsToolCalling, `${family}: supportsToolCalling`).toBe(true)
+			expect(model.supportsPromptCache, `${family}: supportsPromptCache`).toBe(false)
+			expect(model.family, `${family}: family`).toBe(family)
+			expect(model.version, `${family}: version`).toBe(family)
+			expect(model, `${family}: inputPrice`).not.toHaveProperty("inputPrice")
+			expect(model, `${family}: outputPrice`).not.toHaveProperty("outputPrice")
+		}
+	})
+
 	it("pins Fable 5.5 to the user-requested Fable 5.1 values, not a measurement", () => {
 		const model = vscodeLlmModels["claude-fable-5.5"]
 		expect(model.contextWindow).toBe(935793)

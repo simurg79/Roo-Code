@@ -823,6 +823,11 @@ describe("useSelectedModel", () => {
 			["gemini-3.8-flash", 955113],
 			["claude-opus-5", 680456],
 			["gemini-3.6-flash", 935785],
+			["gemini-4-neon", 897718],
+			["gemini-4-hydrogen", 897719],
+			["gemini-4-carbon", 899900],
+			["gpt-6.2-astra", 271119],
+			["gpt-6.2-sol", 271119],
 		])("feeds the gauge %s's static maxInputTokens", (family, expected) => {
 			const apiConfiguration: ProviderSettings = {
 				apiProvider: "vscode-lm",
